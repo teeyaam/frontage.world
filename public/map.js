@@ -35,6 +35,18 @@
         priceDiv.style.marginTop = "2px";
         popupDiv.appendChild(titleLink);
         popupDiv.appendChild(priceDiv);
+        if (l.googleBusinessUrl) {
+          var gLink = document.createElement("a");
+          gLink.href = l.googleBusinessUrl;
+          gLink.target = "_blank";
+          gLink.rel = "noopener";
+          gLink.textContent = "View on Google →";
+          gLink.style.fontSize = "12px";
+          gLink.style.display = "block";
+          gLink.style.marginTop = "4px";
+          gLink.style.color = "#2F5D9F";
+          popupDiv.appendChild(gLink);
+        }
         marker.bindPopup(popupDiv);
         bounds.push([l.lat, l.lng]);
       });

@@ -5,6 +5,7 @@ import { money, formatMm, formatDate, svgSpaceDiagram, svgEyesGauge, STAGE_LABEL
 import { CATEGORIES, CATEGORY_LABEL } from "../lib/categories.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { isStripeConfigured } from "../lib/payments.js";
+import { isEmailConfigured } from "../lib/email.js";
 
 function send(res, status, html) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
@@ -437,10 +438,16 @@ export async function sellNewPage(req, res, query) {
   const deleted = query.get("deleted");
   const err = query.get("err");
 
+  const statusBadge = (l) =>
+    l.status === "leased"
+      ? `<span class="badge badge-blue">LEASED</span>`
+      : l.status === "removed"
+      ? `<span class="badge badge-steel">REMOVED</span>`
+      : `<span class="badge badge-green">LIVE</span>`;
   const listRows = myListings
     .map(
       (l) => `<div class="job-row row-between">
-        <div><strong>${escapeHtml(l.title)}</strong><div class="small muted">${escapeHtml(l.venue)} · ${money(l.price)}/mo</div></div>
+        <div><strong>${escapeHtml(l.title)}</strong> ${statusBadge(l)}<div class="small muted">${escapeHtml(l.venue)} · ${money(l.price)}/mo</div></div>
         <div><a href="/listing/${l.id}" class="small" style="color:var(--orange)">View →</a> &nbsp; <a href="/sell/edit/${l.id}" class="small" style="color:var(--ink)">Edit →</a> &nbsp; <a href="/sell/insights/${l.id}" class="small" style="color:var(--blue)">Insights →</a></div>
       </div>`
     )
@@ -766,11 +773,13 @@ export async function bookPage(req, res, listingId, query) {
         <h2 style="font-size:16px;margin-bottom:10px">Lease terms</h2>
         <p class="small" style="line-height:1.6">
           <strong>1. Space.</strong> ${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)} at ${escapeHtml(listing.venue)}, as listed.<br/>
-          <strong>2. Term.</strong> Commences the date the assigned contractor marks installation complete — not the date this is signed. Auto-renews monthly unless cancelled with 30 days' notice.<br/>
+          <strong>2. Term.</strong> Fixed term of 6 or 12 months, commencing the date the assigned contractor marks installation complete — not the date this is signed. Auto-renews monthly at term end unless cancelled with 30 days' notice.<br/>
           <strong>3. Rate.</strong> ${money(listing.price)} per month, billed to the payment method on file.<br/>
           <strong>4. Install & removal.</strong> You engage and pay a Frontage-network contractor directly for printing, install and uninstall — separate from this lease.<br/>
           <strong>5. Platform fee.</strong> Frontage deducts 15% from the seller's payout on each payment.<br/>
-          <strong>6. Early termination.</strong> Ending this lease early incurs a break fee equal to one month's rent (${money(listing.price)}).
+          <strong>6. Early termination.</strong> Ending this lease early incurs a break fee equal to one month's rent (${money(listing.price)}).<br/>
+          <strong>7. Content & conduct.</strong> Advertising content must be lawful and meet the standards in the <a href="/terms" target="_blank" style="color:var(--orange)">Terms &amp; Conditions</a>. The seller warrants they have authority over the listed space. Misrepresentation, unlawful content, or interference with an installed ad by either party is a breach.<br/>
+          <strong>8. Breach & liability.</strong> A party in breach is liable for the other party's resulting losses. Frontage is the marketplace facilitator, not a party to this lease — losses caused by a buyer's or seller's wrongdoing are borne by the party at fault, not by Frontage, and each party indemnifies Frontage against claims arising from their own breach.
         </p>
         <div class="panel-tint" style="margin-top:16px">
           <div style="font-weight:600;font-size:13px;margin-bottom:6px">Estimated contractor cost</div>
@@ -784,8 +793,8 @@ export async function bookPage(req, res, listingId, query) {
           <input type="hidden" name="listingId" value="${listing.id}" />
           <div class="field"><label>Lease term</label>
             <select name="term" id="term-select">
-              <option value="3">3 months</option><option value="6">6 months</option>
-              <option value="12" selected>12 months</option><option value="24">24 months</option>
+              <option value="6">6 months</option>
+              <option value="12" selected>12 months</option>
             </select>
           </div>
           <div class="panel-tint" style="margin-bottom:14px">
@@ -795,8 +804,11 @@ export async function bookPage(req, res, listingId, query) {
           <div class="field"><label>Type your name to sign</label><input name="signature" required placeholder="${escapeHtml(user.fullName)}" />
             <div class="signature" id="sig-preview"></div>
           </div>
+          <label class="small" style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px">
+            <input type="checkbox" required style="margin-top:2px" /> I have read and agree to the lease terms shown on this page.
+          </label>
           <label class="small" style="display:flex;gap:8px;align-items:flex-start;margin-bottom:14px">
-            <input type="checkbox" required style="margin-top:2px" /> I agree to the lease terms and Frontage Terms of Service.
+            <input type="checkbox" required style="margin-top:2px" /> I have read and agree to the <a href="/terms" target="_blank" style="color:var(--orange)">Frontage Terms &amp; Conditions</a>, including the conduct, breach, and liability provisions.
           </label>
           ${
             stripeConfigured
@@ -915,10 +927,10 @@ async function renderChatBubbles(messages, currentUserId) {
   return bubbles.join("");
 }
 
-async function jobChatBlock(jobOrder, currentUserId) {
+async function jobChatBlock(jobOrder, currentUserId, otherPartyLabel = "") {
   const messages = await db.getMessagesForThread("job", jobOrder.id);
   return `<details style="margin-top:10px">
-    <summary class="small" style="cursor:pointer;color:var(--orange);font-weight:600">💬 Chat (${messages.length})</summary>
+    <summary class="small" style="cursor:pointer;color:var(--orange);font-weight:600">💬 Chat${otherPartyLabel ? ` with the ${otherPartyLabel}` : ""} (${messages.length})</summary>
     <div class="chat-thread" data-poll-url="/api/joborders/${jobOrder.id}/messages" data-current-user="${escapeHtml(currentUserId)}" style="margin-top:8px">
       ${await renderChatBubbles(messages, currentUserId)}
     </div>
@@ -988,7 +1000,7 @@ export async function sellerJobsPage(req, res) {
         <div class="steps" style="margin-bottom:10px">${steps}</div>
         ${payoutLine}
         ${accessForm}
-        ${j.contractorId ? await jobChatBlock(j, user.id) : ""}
+        ${j.contractorId ? await jobChatBlock(j, user.id, "contractor") : ""}
       </div>`;
       })
     )
@@ -1113,11 +1125,11 @@ export async function contractorBoardPage(req, res) {
           <form method="POST" action="/api/joborders/${j.id}/simulate-buyer-accept"><button class="btn btn-outline btn-sm" type="submit">Simulate buyer acceptance (demo)</button></form>`;
         } else if (j.status === "quote_accepted") {
           actionBlock = `<form method="POST" action="/api/joborders/${j.id}/schedule" style="display:flex;gap:8px;align-items:flex-end">
-          <div class="field" style="margin-bottom:0"><label>Install date</label><input name="installDate" placeholder="14 Aug" required /></div>
+          <div class="field" style="margin-bottom:0"><label>Install date</label><input type="date" name="installDate" required /></div>
           <button class="btn btn-primary btn-sm" type="submit">Confirm date</button>
         </form>`;
         } else if (j.status === "scheduled") {
-          actionBlock = `<div class="small muted" style="margin-bottom:8px">Scheduled for ${escapeHtml(j.installDate)}.</div>
+          actionBlock = `<div class="small muted" style="margin-bottom:8px">Scheduled for ${formatDate(j.installDate)}.</div>
           <form method="POST" action="/api/joborders/${j.id}/complete"><button class="btn btn-dark btn-sm" type="submit">Mark install complete</button></form>`;
         } else if (j.status === "installed") {
           const total = j.quote ? j.quote.print + j.quote.install + j.quote.uninstall : 0;
@@ -1130,9 +1142,9 @@ export async function contractorBoardPage(req, res) {
           <span class="badge ${j.status === "installed" ? "badge-green" : "badge-blue"}">${STAGE_LABELS[j.status].toUpperCase()}</span>
         </div>
         <div class="steps" style="margin-bottom:10px">${steps}</div>
-        ${j.sellerAccessConfirmed ? `<div class="small" style="color:var(--green);margin-bottom:8px">✓ Seller confirmed access: ${escapeHtml(j.installWindow)}</div>` : `<div class="small muted" style="margin-bottom:8px">Waiting on seller to confirm an access window.</div>`}
+        ${j.sellerAccessConfirmed ? `<div class="small" style="color:var(--green);margin-bottom:8px">✓ Seller confirmed access: ${escapeHtml(j.installWindow)}</div>` : `<div class="small muted" style="margin-bottom:8px">Waiting on seller to confirm an access window — use the chat below to coordinate directly with them.</div>`}
         ${actionBlock}
-        ${await jobChatBlock(j, contractor.id)}
+        ${await jobChatBlock(j, contractor.id, "seller")}
       </div>`;
       })
     )
@@ -1419,6 +1431,15 @@ export async function accountPage(req, res, query) {
     ${updated ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(updated)} updated.</div>` : ""}
     ${err ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(err)}</div>` : ""}
     ${connect === "done" ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Stripe onboarding updated — check your payout status below.</div>` : ""}
+    ${query.get("verified") ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Email verified — you're all set.</div>` : ""}
+    ${
+      isEmailConfigured() && !user.emailVerifiedAt
+        ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">
+            Your email isn't verified yet — listing a space and booking are locked until it is. Check your inbox for the link.
+            <form method="POST" action="/api/account/resend-verification" style="display:inline;margin-left:8px"><button class="btn-link" style="color:var(--orange);text-decoration:underline">Resend email</button></form>
+          </div>`
+        : ""
+    }
 
     <div class="form-card" style="margin-bottom:20px">
       <h2 style="font-size:16px;margin-bottom:14px">Contact info</h2>
@@ -1534,7 +1555,9 @@ function leaseTermsBlock(booking, listing) {
     <strong>3. Rate.</strong> ${money(booking.monthlyRate)} per month.<br/>
     <strong>4. Install &amp; removal.</strong> Engaged and paid to a Frontage-network contractor directly, separate from this lease.<br/>
     <strong>5. Platform fee.</strong> Frontage deducts 15% from the seller's payout on each payment.<br/>
-    <strong>6. Early termination.</strong> Ending this lease early incurs a break fee equal to one month's rent${listing ? ` (${money(listing.price)})` : ""}.
+    <strong>6. Early termination.</strong> Ending this lease early incurs a break fee equal to one month's rent${listing ? ` (${money(listing.price)})` : ""}.<br/>
+    <strong>7. Content &amp; conduct.</strong> Advertising content must be lawful and meet the standards in the <a href="/terms" style="color:var(--orange)">Terms &amp; Conditions</a>, which both parties accepted at signing. The seller warrants authority over the listed space.<br/>
+    <strong>8. Breach &amp; liability.</strong> A party in breach is liable for the other party's resulting losses. Frontage facilitates this marketplace and is not a party to the lease; each party indemnifies Frontage against claims arising from their own breach.
   </p>`;
 }
 
@@ -1616,7 +1639,13 @@ export async function adminListingsPage(req, res) {
       listings.map(async (l) => {
         const owner = l.ownerId ? await db.getUserById(l.ownerId) : null;
         const statusBadge =
-          l.status === "removed" ? `<span class="badge badge-orange">REMOVED</span>` : l.status === "unclaimed" ? `<span class="badge badge-blue">UNCLAIMED</span>` : `<span class="badge badge-green">LIVE</span>`;
+          l.status === "removed"
+            ? `<span class="badge badge-orange">REMOVED</span>`
+            : l.status === "unclaimed"
+            ? `<span class="badge badge-blue">UNCLAIMED</span>`
+            : l.status === "leased"
+            ? `<span class="badge badge-blue">LEASED</span>`
+            : `<span class="badge badge-green">LIVE</span>`;
         let action = "";
         if (l.status === "live") {
           action = `<form method="POST" action="/api/admin/listings/${l.id}/remove" style="display:flex;gap:6px;margin-top:8px">
@@ -1714,7 +1743,7 @@ export async function adminDealDetailPage(req, res, id) {
 export async function aboutPage(req, res) {
   const user = await currentUser(req);
   const body = `
-    <div class="panel" style="max-width:640px">
+    <div class="panel" style="max-width:640px;margin:0 auto">
       <h1 style="font-size:22px;margin-bottom:10px">About Frontage</h1>
       <p style="margin-bottom:12px">Frontage connects businesses with spare wall, window, or fence space to advertisers who want to lease it — and to a network of vetted contractors who print, install, and remove the ads.</p>
       <p style="margin-bottom:12px">Sellers list a space in minutes. Buyers browse, sign a lease, and pay online. A contractor picks up the print/install job and keeps everyone updated until it's live on the wall.</p>
@@ -1727,7 +1756,7 @@ export async function aboutPage(req, res) {
 export async function howItWorksPage(req, res) {
   const user = await currentUser(req);
   const body = `
-    <div class="panel" style="max-width:640px">
+    <div class="panel" style="max-width:640px;margin:0 auto">
       <h1 style="font-size:22px;margin-bottom:14px">How it works</h1>
       <h3 style="font-size:14px;margin-bottom:6px">For sellers</h3>
       <p class="small muted" style="margin-bottom:14px">List a wall, window, or fence space with its size and a monthly rate. Once a buyer books it, you confirm an access window for the contractor and get paid monthly, minus a 15% platform fee.</p>
@@ -1740,11 +1769,66 @@ export async function howItWorksPage(req, res) {
   send(res, 200, await layout({ title: "How it works", activeNav: "how-it-works", user, body }));
 }
 
+export async function termsPage(req, res) {
+  const user = await currentUser(req);
+  const body = `
+    <div class="panel" style="max-width:720px;margin:0 auto">
+      <h1 style="font-size:22px;margin-bottom:4px">Terms &amp; Conditions</h1>
+      <p class="small muted" style="margin-bottom:18px">These terms govern every account, listing, lease, and job order on Frontage. By using the platform you agree to them.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">1. What Frontage is</h3>
+      <p class="small muted" style="margin-bottom:14px">Frontage is a marketplace that connects owners of physical advertising space ("sellers"), advertisers who lease that space ("buyers"), and independent contractors who print, install, and remove advertising. Frontage facilitates introductions, contracts, and payments — it is not a party to the lease between buyer and seller, nor to the service agreement between a buyer and a contractor.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">2. Accounts</h3>
+      <p class="small muted" style="margin-bottom:14px">You must provide accurate account information and keep your login credentials secure. You are responsible for all activity under your account. Accounts may be suspended or closed for breach of these terms.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">3. Listings</h3>
+      <p class="small muted" style="margin-bottom:14px">By listing a space, the seller warrants that they own the space or hold clear authority to lease it for advertising, that the listing details (size, location, exposure) are accurate, and that displaying advertising there does not breach any law, lease, strata rule, or council requirement. Misrepresented listings may be removed and any held payouts withheld.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">4. Leases &amp; payments</h3>
+      <p class="small muted" style="margin-bottom:14px">Leases run for a fixed term of 6 or 12 months, starting when installation is confirmed complete, and auto-renew monthly thereafter unless cancelled with 30 days' notice. The buyer pays the full term up front. Frontage holds the seller's payout until installation is confirmed, then releases it minus the 15% platform fee. Early termination by the buyer incurs a break fee of one month's rent.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">5. Contractors</h3>
+      <p class="small muted" style="margin-bottom:14px">Contractors are vetted before accessing job orders but act as independent businesses, not employees or agents of Frontage. Print, install, and removal work is quoted, agreed, and paid between the buyer and the contractor directly.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">6. Prohibited conduct</h3>
+      <p class="small muted" style="margin-bottom:14px">The following are breaches of these terms by any user: misrepresenting a listing, account, or credentials; displaying unlawful, misleading, or offensive advertising content; damaging, obscuring, or removing installed advertising before term end without agreement; circumventing Frontage to avoid platform fees on a connection made through the platform; and any fraudulent or unlawful use of the platform.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">7. Consequences of breach</h3>
+      <p class="small muted" style="margin-bottom:14px">Frontage may suspend or terminate accounts, remove listings, cancel job orders, and withhold pending payouts connected to a breach while it is investigated. <strong>A party who breaches these terms or a lease is responsible for the losses their breach causes to the other party.</strong> Frontage may recover from the breaching party any costs, fees, or losses Frontage itself incurs because of the breach.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">8. Liability &amp; indemnity</h3>
+      <p class="small muted" style="margin-bottom:14px">To the maximum extent permitted by law, Frontage is not liable for loss arising from the conduct of buyers, sellers, or contractors — including misrepresentation, breach of lease, defective installation, or property damage. Each user indemnifies Frontage against claims, losses, and costs arising from that user's own breach of these terms, their listings or advertising content, or their dealings with other users. Nothing in these terms excludes rights that cannot be excluded under applicable consumer law.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">9. Changes</h3>
+      <p class="small muted" style="margin-bottom:14px">Frontage may update these terms; material changes will be notified via the platform. Continued use after a change is acceptance of the updated terms.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">10. Governing law</h3>
+      <p class="small muted">These terms are governed by the laws of New South Wales, Australia.</p>
+    </div>
+  `;
+  send(res, 200, await layout({ title: "Terms & Conditions", activeNav: "terms", user, body }));
+}
+
+export async function investorsPage(req, res) {
+  const user = await currentUser(req);
+  const body = `
+    <div class="panel" style="max-width:640px;margin:0 auto">
+      <h1 style="font-size:22px;margin-bottom:10px">Investors</h1>
+      <p style="margin-bottom:12px">Frontage is building the marketplace for physical advertising space — turning idle walls, windows, and fences at gyms, cafés, offices, and homes into measurable, bookable ad inventory.</p>
+      <p style="margin-bottom:12px">The platform handles the full transaction end to end: listing and discovery, lease contracts and payment, a vetted contractor network for print and installation, and escrow-style payouts that release only once an ad is confirmed live on the wall.</p>
+      <p style="margin-bottom:18px">We're currently raising and would love to talk. Reach out for a deck and a walkthrough of the live product.</p>
+      <a href="mailto:teeyaam@gmail.com?subject=Frontage%20investor%20enquiry" class="btn btn-primary">Contact us — teeyaam@gmail.com</a>
+    </div>
+  `;
+  send(res, 200, await layout({ title: "Investors", activeNav: "investors", user, body }));
+}
+
 export async function contactPage(req, res, query) {
   const user = await currentUser(req);
   const sent = query.get("sent");
   const body = `
-    <div class="form-card">
+    <div class="form-card" style="max-width:560px;margin:0 auto">
       <h1 style="font-size:22px;margin-bottom:10px">Contact us</h1>
       ${sent ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Thanks — we'll get back to you.</div>` : ""}
       <form method="POST" action="/api/contact">
@@ -1762,7 +1846,7 @@ export async function contractorSupportPage(req, res, query) {
   const user = await currentUser(req);
   const sent = query.get("sent");
   const body = `
-    <div class="form-card">
+    <div class="form-card" style="max-width:560px;margin:0 auto">
       <h1 style="font-size:22px;margin-bottom:6px">Contractor support</h1>
       <p class="small muted" style="margin-bottom:14px">Questions about your application, onboarding, or the contractor side of Frontage go here — separate from general customer support.</p>
       ${sent ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Thanks — the contractor team will get back to you.</div>` : ""}

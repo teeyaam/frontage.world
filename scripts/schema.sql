@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS users (
   can_access_support BOOLEAN NOT NULL DEFAULT FALSE,
   can_create_bdr_listings BOOLEAN NOT NULL DEFAULT FALSE,
   stripe_connect_account_id TEXT,
+  email_verified_at TIMESTAMPTZ,
+  email_verify_token TEXT,
   last_messages_seen_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -129,6 +131,7 @@ CREATE TABLE IF NOT EXISTS bookings (
   status TEXT NOT NULL DEFAULT 'signed', -- signed -> active -> ending/ended
   lease_start_date TIMESTAMPTZ,
   auto_renew BOOLEAN NOT NULL DEFAULT TRUE,
+  reminder_sent_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_bookings_buyer_id ON bookings(buyer_id);

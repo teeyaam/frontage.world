@@ -20,6 +20,26 @@ import { estimateEyes } from "../lib/format.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { approximateCoords } from "../lib/geo.js";
 import { isStripeConfigured, createPaymentIntent, retrievePaymentIntent, constructWebhookEvent, createConnectAccount, createConnectOnboardingLink } from "../lib/payments.js";
+import {
+  isEmailConfigured,
+  sendEmail,
+  verificationEmail,
+  bookingSellerEmail,
+  bookingBuyerEmail,
+  jobUpdateEmail,
+  contactForwardEmail,
+} from "../lib/email.js";
+import crypto from "node:crypto";
+
+// Emails are best-effort — a provider outage must never fail the user
+// action that triggered the email (booking, signup, etc.).
+async function trySend(email) {
+  try {
+    await sendEmail(email);
+  } catch (err) {
+    console.error("Email send failed:", err.message);
+  }
+}
 
 function redirect(res, location, cookie) {
   const headers = { Location: location };
@@ -45,8 +65,43 @@ export async function signup(req, res) {
   }
   const { hash, salt } = hashPassword(password);
   const user = await db.createUser({ fullName, email, mobile, passwordHash: hash, passwordSalt: salt });
+  // Email verification: new accounts get a token and a verify link. When the
+  // email service isn't configured yet, accounts are auto-verified so the
+  // flow never dead-ends (nothing could deliver the link).
+  if (isEmailConfigured()) {
+    const token = crypto.randomBytes(24).toString("hex");
+    await db.updateUser(user.id, { emailVerifyToken: token });
+    await trySend(verificationEmail(user, token));
+  } else {
+    await db.updateUser(user.id, { emailVerifiedAt: new Date().toISOString() });
+  }
   const session = await db.createSession(user.id);
   redirect(res, next || "/", sessionCookieHeader(session.token));
+}
+
+// GET /verify?token=... — the link from the verification email.
+export async function verifyEmailHandler(req, res, query) {
+  const user = await db.getUserByVerifyToken(query.get("token"));
+  if (!user) return badRequest(res, "This verification link is invalid or has already been used.");
+  await db.updateUser(user.id, { emailVerifiedAt: new Date().toISOString(), emailVerifyToken: null });
+  redirect(res, "/account?verified=1");
+}
+
+export async function resendVerificationHandler(req, res) {
+  const user = await currentUser(req);
+  if (!user) return redirect(res, "/onboarding?next=/account");
+  if (user.emailVerifiedAt) return redirect(res, "/account");
+  const token = user.emailVerifyToken || crypto.randomBytes(24).toString("hex");
+  await db.updateUser(user.id, { emailVerifyToken: token });
+  await trySend(verificationEmail(user, token));
+  redirect(res, "/account?updated=Verification email resent — check your inbox. Email");
+}
+
+// Listing a space and paying for a lease are gated on a verified email once
+// the email service exists — before that there's no way to deliver the link,
+// so the gate stays open (see signup above).
+function emailUnverified(user) {
+  return isEmailConfigured() && !user.emailVerifiedAt;
 }
 
 export async function login(req, res) {
@@ -105,6 +160,7 @@ export async function contractorLogout(req, res) {
 export async function createListingHandler(req, res) {
   const user = await currentUser(req);
   if (!user) return redirect(res, "/onboarding?next=/sell/new");
+  if (emailUnverified(user)) return redirect(res, `/sell/new?err=${encodeURIComponent("Please verify your email before listing a space — check your inbox, or resend the link from your Account page.")}`);
   const ok = await runUpload(req, res, uploadListingPhotos, {
     onError: (message) => redirect(res, `/sell/new?err=${encodeURIComponent(message)}`),
   });
@@ -204,7 +260,21 @@ export async function createBdrListingHandler(req, res) {
 }
 
 export async function listingsMapJson(req, res) {
-  const listings = (await db.getListings()).map((l) => ({ id: l.id, title: l.title, suburb: l.suburb, category: l.category, price: l.price, lat: l.lat, lng: l.lng }));
+  const listings = await Promise.all(
+    (await db.getListings()).map(async (l) => {
+      const owner = l.ownerId ? await db.getUserById(l.ownerId) : null;
+      return {
+        id: l.id,
+        title: l.title,
+        suburb: l.suburb,
+        category: l.category,
+        price: l.price,
+        lat: l.lat,
+        lng: l.lng,
+        googleBusinessUrl: owner && owner.googleBusinessUrl ? owner.googleBusinessUrl : null,
+      };
+    })
+  );
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ listings }));
 }
@@ -326,11 +396,15 @@ export async function deleteListingHandler(req, res, id) {
 export async function createBookingIntentHandler(req, res) {
   const user = await currentUser(req);
   if (!user) return forbiddenJson(res);
+  if (emailUnverified(user)) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ error: "Please verify your email before booking — check your inbox, or resend the link from your Account page." }));
+  }
   const b = await readBody(req);
   const listing = await db.getListingById(b.listingId);
   if (!listing || listing.status !== "live") return badRequest(res, "Listing not found.");
   const term = parseInt(b.term, 10);
-  if (!term) return badRequest(res, "Missing term.");
+  if (![6, 12].includes(term)) return badRequest(res, "Lease terms are 6 or 12 months.");
   const amount = listing.price * term;
   const intent = await createPaymentIntent({
     amount,
@@ -344,11 +418,12 @@ export async function createBookingIntentHandler(req, res) {
 export async function createBookingHandler(req, res) {
   const user = await currentUser(req);
   if (!user) return redirect(res, "/onboarding?next=/");
+  if (emailUnverified(user)) return badRequest(res, "Please verify your email before booking.");
   const b = await readBody(req);
   const listing = await db.getListingById(b.listingId);
   if (!listing || listing.status !== "live") return badRequest(res, "Listing not found.");
   const term = parseInt(b.term, 10);
-  if (!term || !b.signature) return badRequest(res, "Missing term or signature.");
+  if (![6, 12].includes(term) || !b.signature) return badRequest(res, "Lease terms are 6 or 12 months, and a signature is required.");
 
   let paymentIntentId = null;
   if (isStripeConfigured()) {
@@ -372,6 +447,11 @@ export async function createBookingHandler(req, res) {
   }
 
   const { booking } = await db.createBookingBundle({ listing, buyerId: user.id, term, signature: b.signature, paymentIntentId });
+
+  const seller = listing.ownerId ? await db.getUserById(listing.ownerId) : null;
+  if (seller) await trySend(bookingSellerEmail(seller, listing, booking));
+  await trySend(bookingBuyerEmail(user, listing, booking));
+
   redirect(res, `/book/${listing.id}?confirmed=${booking.id}`);
 }
 
@@ -485,6 +565,9 @@ export async function jobOrderClaim(req, res, id) {
   const job = await db.getJobOrderById(id);
   if (!job || job.status !== "broadcast") return redirect(res, "/contractor/ping");
   await db.updateJobOrder(id, { contractorId: contractor.id, status: "new" });
+  const listing = await db.getListingById(job.listingId);
+  const seller = job.sellerId ? await db.getUserById(job.sellerId) : null;
+  if (seller && listing) await trySend(jobUpdateEmail(seller, listing, job, `${contractor.businessName || contractor.fullName} has accepted the install job — please confirm an access window from your job orders page`));
   redirect(res, "/contractor/board");
 }
 
@@ -519,7 +602,19 @@ export async function jobOrderSchedule(req, res, id) {
   const job = await db.getJobOrderById(id);
   if (!contractor || !job || job.contractorId !== contractor.id) return badRequest(res, "Not your job order.");
   const b = await readBody(req);
-  await db.updateJobOrder(id, { status: "scheduled", installDate: b.installDate || "TBC" });
+  // The install_date column is a real timestamp — validate before it ever
+  // reaches Postgres so a malformed date is a friendly message, not a crash.
+  const parsed = new Date(b.installDate);
+  if (!b.installDate || isNaN(parsed.getTime())) return badRequest(res, "Please pick a valid install date from the date picker.");
+  await db.updateJobOrder(id, { status: "scheduled", installDate: parsed.toISOString() });
+  const listing = await db.getListingById(job.listingId);
+  if (listing) {
+    const seller = job.sellerId ? await db.getUserById(job.sellerId) : null;
+    const buyer = job.buyerId ? await db.getUserById(job.buyerId) : null;
+    const when = parsed.toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
+    if (seller) await trySend(jobUpdateEmail(seller, listing, job, `install scheduled for ${when}`));
+    if (buyer) await trySend(jobUpdateEmail(buyer, listing, job, `install scheduled for ${when}`));
+  }
   redirect(res, "/contractor/board");
 }
 
@@ -528,6 +623,13 @@ export async function jobOrderComplete(req, res, id) {
   const job = await db.getJobOrderById(id);
   if (!contractor || !job || job.contractorId !== contractor.id) return badRequest(res, "Not your job order.");
   await db.updateJobOrder(id, { status: "installed" });
+  const listing = await db.getListingById(job.listingId);
+  if (listing) {
+    const seller = job.sellerId ? await db.getUserById(job.sellerId) : null;
+    const buyer = job.buyerId ? await db.getUserById(job.buyerId) : null;
+    if (seller) await trySend(jobUpdateEmail(seller, listing, job, "install confirmed complete — your payout has been released and the lease is now active"));
+    if (buyer) await trySend(jobUpdateEmail(buyer, listing, job, "your ad is installed and live — the lease clock has started"));
+  }
   redirect(res, "/contractor/board");
 }
 
@@ -537,6 +639,9 @@ export async function contactSubmit(req, res) {
   if (!b.name || !b.email || !b.message) return badRequest(res, "Name, email, and message are required.");
   const topic = b.topic === "contractor" ? "contractor" : "general";
   await db.createContactMessage({ name: b.name, email: b.email, message: b.message, topic });
+  // Also forward to the CONTACT_EMAIL inbox (env-configured) so submissions
+  // reach a real mailbox, not just the admin dashboard.
+  if (process.env.CONTACT_EMAIL) await trySend(contactForwardEmail(b.name, b.email, topic, b.message));
   redirect(res, topic === "contractor" ? "/contractor/support?sent=1" : "/contact?sent=1");
 }
 

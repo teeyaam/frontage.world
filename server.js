@@ -9,10 +9,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import "dotenv/config";
+import crypto from "node:crypto";
 import * as pages from "./routes/pages.js";
 import * as api from "./routes/api.js";
 import { layout } from "./lib/layout.js";
-import { currentUser } from "./lib/auth.js";
+import { currentUser, parseCookies } from "./lib/auth.js";
+import { readBody } from "./lib/body.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -41,12 +43,55 @@ function serverError(req, res, err) {
   res.end("Something went wrong: " + err.message);
 }
 
+// ---------- Private mode ----------
+// Set SITE_PASSCODE in the environment to lock the whole site behind a
+// single shared passcode while it's being refined — visitors see a minimal
+// gate page until they enter it once (cookie remembers them for 30 days).
+// Remove the env var and redeploy to go public. The Stripe webhook is
+// exempt (Stripe's servers can't type a passcode).
+function gateHash() {
+  return crypto.createHash("sha256").update(process.env.SITE_PASSCODE).digest("hex");
+}
+function gatePage(res, wrong) {
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Frontage — private preview</title></head>
+<body style="margin:0;background:#EDEBE6;color:#1B2A3D;font-family:Arial,Helvetica,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh">
+  <form method="POST" action="/gate" style="background:#fff;border:1px solid #DAD6CC;border-radius:12px;padding:32px;max-width:340px;text-align:center">
+    <div style="font-weight:bold;font-size:18px;letter-spacing:.02em">FRONTAGE</div>
+    <p style="font-size:13px;color:#8B9199">This site is in private preview. Enter the access code to continue.</p>
+    ${wrong ? `<p style="font-size:13px;color:#C4574B">That code isn't right — try again.</p>` : ""}
+    <input type="password" name="passcode" autofocus style="width:100%;box-sizing:border-box;padding:11px;border-radius:8px;border:1px solid #DAD6CC;margin-bottom:12px" />
+    <button type="submit" style="width:100%;background:#FF6B35;color:#fff;border:none;padding:11px;border-radius:8px;font-weight:bold;cursor:pointer">Enter</button>
+  </form>
+</body></html>`);
+}
+async function handleGate(req, res, pathname) {
+  if (!process.env.SITE_PASSCODE) return false; // public — no gate
+  if (pathname === "/api/stripe/webhook") return false;
+  const cookies = parseCookies(req);
+  if (cookies["frontage_gate"] === gateHash()) return false; // already through
+  if (req.method === "POST" && pathname === "/gate") {
+    const b = await readBody(req);
+    if (b.passcode === process.env.SITE_PASSCODE) {
+      res.writeHead(302, { Location: "/", "Set-Cookie": `frontage_gate=${gateHash()}; HttpOnly; Path=/; Max-Age=${60 * 60 * 24 * 30}; SameSite=Lax` });
+      res.end();
+    } else {
+      gatePage(res, true);
+    }
+    return true;
+  }
+  gatePage(res, false);
+  return true;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const { pathname } = url;
     const query = url.searchParams;
     const method = req.method;
+
+    if (await handleGate(req, res, pathname)) return;
 
     // static assets
     if (method === "GET" && (pathname === "/style.css" || pathname === "/client.js" || pathname === "/wall-visualizer.js" || pathname === "/map.js" || pathname.startsWith("/uploads/listings/"))) {
@@ -79,6 +124,9 @@ const server = http.createServer(async (req, res) => {
     if (method === "GET" && pathname === "/about") return await pages.aboutPage(req, res);
     if (method === "GET" && pathname === "/how-it-works") return await pages.howItWorksPage(req, res);
     if (method === "GET" && pathname === "/contact") return await pages.contactPage(req, res, query);
+    if (method === "GET" && pathname === "/terms") return await pages.termsPage(req, res);
+    if (method === "GET" && pathname === "/investors") return await pages.investorsPage(req, res);
+    if (method === "GET" && pathname === "/verify") return await api.verifyEmailHandler(req, res, query);
 
     let m;
     if (method === "GET" && (m = pathname.match(/^\/listing\/([^/]+)$/))) return await pages.listingDetailPage(req, res, m[1]);
@@ -115,6 +163,7 @@ const server = http.createServer(async (req, res) => {
     if (method === "POST" && pathname === "/api/account/password") return await api.updateAccountPassword(req, res);
     if (method === "POST" && pathname === "/api/account/banking") return await api.updateAccountBanking(req, res);
     if (method === "POST" && pathname === "/api/account/connect-payouts") return await api.connectPayoutsHandler(req, res);
+    if (method === "POST" && pathname === "/api/account/resend-verification") return await api.resendVerificationHandler(req, res);
     if (method === "POST" && pathname === "/api/stripe/webhook") return await api.stripeWebhook(req, res);
     if (method === "POST" && pathname === "/api/contact") return await api.contactSubmit(req, res);
     if (method === "POST" && pathname === "/api/contractor/apply") return await api.contractorApplyHandler(req, res);
