@@ -306,7 +306,7 @@ function lightboxMarkup(photos) {
   // photo URL ever contained one.
   const photosJs = JSON.stringify(photos).replace(/</g, "\\u003c");
   return `
-    <div id="frontage-lightbox" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:200;align-items:center;justify-content:center;flex-direction:column">
+    <div id="frontage-lightbox" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:2000;align-items:center;justify-content:center;flex-direction:column">
       <button type="button" onclick="frontageCloseLightbox()" aria-label="Close" style="position:absolute;top:16px;right:20px;background:none;border:none;color:#fff;font-size:30px;cursor:pointer;line-height:1;padding:6px">&times;</button>
       <button type="button" onclick="frontagePrevPhoto()" aria-label="Previous photo" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:#fff;font-size:38px;cursor:pointer;padding:10px">&#8249;</button>
       <img id="frontage-lightbox-img" src="" alt="" style="max-width:88vw;max-height:78vh;object-fit:contain;border-radius:6px" />
