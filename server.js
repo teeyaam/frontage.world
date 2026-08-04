@@ -94,7 +94,7 @@ const server = http.createServer(async (req, res) => {
     if (await handleGate(req, res, pathname)) return;
 
     // static assets
-    if (method === "GET" && (pathname === "/style.css" || pathname === "/client.js" || pathname === "/wall-visualizer.js" || pathname === "/map.js" || pathname.startsWith("/uploads/listings/"))) {
+    if (method === "GET" && (pathname === "/style.css" || pathname === "/client.js" || pathname === "/wall-visualizer.js" || pathname === "/map.js" || pathname === "/google-map.js" || pathname.startsWith("/uploads/listings/"))) {
       if (serveStatic(req, res, pathname)) return;
     }
 

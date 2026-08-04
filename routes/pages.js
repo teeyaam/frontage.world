@@ -107,6 +107,11 @@ export async function browsePage(req, res, query) {
     })
     .join(" ");
 
+  // Google Maps when a key is configured (see .env.example) — otherwise the
+  // free Leaflet/OpenStreetMap map, same as before. Either way the toggle
+  // and card layout behave identically; only the map engine differs.
+  const googleMapsKey = process.env.GOOGLE_MAPS_API_KEY;
+
   const body = `
     <div style="margin-bottom:4px;font-family:'Space Grotesk',sans-serif;font-weight:700;color:var(--orange);font-size:13px;letter-spacing:.02em;text-transform:uppercase">Free space, free money.</div>
     <div class="row-between" style="margin-bottom:16px;flex-wrap:wrap;gap:10px">
@@ -140,7 +145,18 @@ export async function browsePage(req, res, query) {
           if (!loaded) {
             loaded = true;
             window.FRONTAGE_MAP_TARGET = "browse-map";
-            var link = document.createElement("link");
+            ${
+              googleMapsKey
+                ? `var loaderScript = document.createElement("script");
+            loaderScript.src = "/google-map.js";
+            loaderScript.onload = function () {
+              var gScript = document.createElement("script");
+              gScript.src = "https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(googleMapsKey)}&callback=frontageInitGoogleMap";
+              gScript.async = true;
+              document.head.appendChild(gScript);
+            };
+            document.body.appendChild(loaderScript);`
+                : `var link = document.createElement("link");
             link.rel = "stylesheet";
             link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
             document.head.appendChild(link);
@@ -151,9 +167,16 @@ export async function browsePage(req, res, query) {
               mapScript.src = "/map.js";
               document.body.appendChild(mapScript);
             };
-            document.body.appendChild(leafletScript);
+            document.body.appendChild(leafletScript);`
+            }
           } else if (window.__frontageMap) {
-            setTimeout(function () { window.__frontageMap.invalidateSize(); }, 50);
+            setTimeout(function () {
+              if (window.google && window.google.maps) {
+                google.maps.event.trigger(window.__frontageMap, "resize");
+              } else if (window.__frontageMap.invalidateSize) {
+                window.__frontageMap.invalidateSize();
+              }
+            }, 50);
           }
         });
       })();
