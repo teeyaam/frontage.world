@@ -716,9 +716,11 @@ export async function editListingPage(req, res, id, query) {
       <form method="POST" action="/api/listings/${id}/photos" enctype="multipart/form-data" style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <input type="file" name="photos" accept="image/*" multiple />
         <button class="btn btn-outline btn-sm" type="submit">Add photos</button>
+        <button type="button" id="ar-preview-btn" class="btn btn-outline btn-sm">📷 Mock up on your wall</button>
       </form>
       <div class="small muted" style="margin-top:8px">${photos.length}/8 photos used.</div>
     </div>
+    <script src="/wall-visualizer.js"></script>
 
     <div class="form-card form-card-wide" style="margin-bottom:24px">
       <h2 style="font-size:16px;margin-bottom:14px">Space details</h2>
