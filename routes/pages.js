@@ -6,6 +6,7 @@ import { CATEGORIES, CATEGORY_LABEL } from "../lib/categories.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { isStripeConfigured } from "../lib/payments.js";
 import { isEmailConfigured } from "../lib/email.js";
+import { adUnitMarkup } from "../lib/ads.js";
 import { PASSWORD_PATTERN, PASSWORD_HINT } from "../lib/auth.js";
 import { COUNTRIES } from "../lib/countries.js";
 
@@ -73,13 +74,49 @@ async function requireSuperAdmin(req, res, nextPath) {
 }
 
 // ---------------- Browse ----------------
+const SORT_OPTIONS = {
+  newest: { label: "Newest", cmp: (a, b) => (b.__seq || 0) - (a.__seq || 0) },
+  price_asc: { label: "Price: low to high", cmp: (a, b) => a.price - b.price },
+  price_desc: { label: "Price: high to low", cmp: (a, b) => b.price - a.price },
+  exposure_desc: { label: "Most exposure", cmp: (a, b) => (b.estimatedEyesPerDay || 0) - (a.estimatedEyesPerDay || 0) },
+};
+
+// Every filter/sort param that should survive a category-chip click or a
+// filter-form submit, carried forward as hidden fields / querystring so
+// browsing never silently drops an active filter.
+const FILTER_PARAM_KEYS = ["q", "minPrice", "maxPrice", "minArea", "minEyes", "sort"];
+
 export async function browsePage(req, res, query) {
   const user = await currentUser(req);
   let listings = await db.getListings();
   const cat = query.get("category");
   const q = (query.get("q") || "").toLowerCase();
+  const minPrice = parseFloat(query.get("minPrice"));
+  const maxPrice = parseFloat(query.get("maxPrice"));
+  const minArea = parseFloat(query.get("minArea")); // buyer-facing unit: m²
+  const minEyes = parseInt(query.get("minEyes"), 10);
+  const sortKey = SORT_OPTIONS[query.get("sort")] ? query.get("sort") : "newest";
+
   if (cat && cat !== "all") listings = listings.filter((l) => l.category === cat);
   if (q) listings = listings.filter((l) => `${l.title} ${l.venue} ${l.suburb}`.toLowerCase().includes(q));
+  if (Number.isFinite(minPrice)) listings = listings.filter((l) => l.price >= minPrice);
+  if (Number.isFinite(maxPrice)) listings = listings.filter((l) => l.price <= maxPrice);
+  if (Number.isFinite(minArea)) listings = listings.filter((l) => (l.sizeW * l.sizeH) / 1e6 >= minArea);
+  if (Number.isFinite(minEyes)) listings = listings.filter((l) => (l.estimatedEyesPerDay || 0) >= minEyes);
+  listings = listings.slice().sort(SORT_OPTIONS[sortKey].cmp);
+
+  // Carries every active filter/sort param forward into a link's querystring
+  // (used by category chips) so switching category never resets a filter.
+  function withParams(extra) {
+    const params = new URLSearchParams();
+    for (const key of FILTER_PARAM_KEYS) {
+      const val = query.get(key);
+      if (val) params.set(key, val);
+    }
+    Object.entries(extra).forEach(([k, v]) => (v ? params.set(k, v) : params.delete(k)));
+    const qs = params.toString();
+    return qs ? `/?${qs}` : "/";
+  }
 
   const cards = listings
     .map(
@@ -88,8 +125,8 @@ export async function browsePage(req, res, query) {
         <div class="card-diagram">${l.photos && l.photos.length ? `<img src="${escapeHtml(l.photos[0])}" alt="" style="width:100%;height:100%;object-fit:cover" />` : svgSpaceDiagram(l.sizeW, l.sizeH)}</div>
         <div class="card-body">
           <div class="row-between" style="margin-bottom:8px">
-            <div class="badge badge-blue">Verified · ★ ${l.rating} (${l.reviews})</div>
-            ${l.estimatedEyesPerDay ? svgEyesGauge(l.estimatedEyesPerDay) : ""}
+            <div class="badge badge-blue">✓ Verified · ★ ${l.rating} (${l.reviews})</div>
+            ${l.estimatedEyesPerDay ? `<div class="badge badge-steel">${l.estimatedEyesPerDay >= 1000 ? (l.estimatedEyesPerDay / 1000).toFixed(1) + "k" : l.estimatedEyesPerDay} eyes/day</div>` : ""}
           </div>
           <h3 style="font-size:16px">${escapeHtml(l.title)}</h3>
           <div class="muted small">${escapeHtml(l.venue)} · ${escapeHtml(l.suburb)}, Sydney${l.subtype ? ` · ${escapeHtml(l.subtype)}` : ""}</div>
@@ -105,9 +142,15 @@ export async function browsePage(req, res, query) {
   const categoryChips = ["all", ...CATEGORIES]
     .map((c) => {
       const active = (cat || "all") === c;
-      return `<a href="/?category=${c}" class="btn btn-sm ${active ? "btn-dark" : "btn-outline"}">${c === "all" ? "All spaces" : CATEGORY_LABEL[c]}</a>`;
+      return `<a href="${withParams({ category: c === "all" ? "" : c })}" class="btn btn-sm ${active ? "btn-dark" : "btn-outline"}">${c === "all" ? "All spaces" : CATEGORY_LABEL[c]}</a>`;
     })
     .join(" ");
+
+  const sortOptionsHtml = Object.entries(SORT_OPTIONS)
+    .map(([key, opt]) => `<option value="${key}"${key === sortKey ? " selected" : ""}>${opt.label}</option>`)
+    .join("");
+
+  const activeFilterCount = [minPrice, maxPrice, minArea, minEyes].filter(Number.isFinite).length;
 
   // Google Maps when a key is configured (see .env.example) — otherwise the
   // free Leaflet/OpenStreetMap map, same as before. Either way the toggle
@@ -115,11 +158,20 @@ export async function browsePage(req, res, query) {
   const googleMapsKey = process.env.GOOGLE_MAPS_API_KEY;
 
   const body = `
-    <div style="margin-bottom:4px;font-family:'Space Grotesk',sans-serif;font-weight:700;color:var(--orange);font-size:13px;letter-spacing:.02em;text-transform:uppercase">Free space, free money.</div>
+    <div class="hero-row">
+      <div>
+        <h1 class="hero-headline">FREE SPACE,<br/><span style="color:var(--orange)">FREE MONEY.</span></h1>
+        <p class="hero-sub">List your wall, window, or fence space and start earning from advertisers — or find the right spot to put your ad up.</p>
+      </div>
+      ${user ? `<a href="/sell/new" class="btn btn-primary btn-lg">List a space</a>` : `<a href="/onboarding" class="btn btn-primary btn-lg">Get started</a>`}
+    </div>
+
     <div class="row-between" style="margin-bottom:16px;flex-wrap:wrap;gap:10px">
-      <h1 style="font-size:22px">Browse spaces</h1>
+      <h2 style="font-size:20px">Browse spaces</h2>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <form method="GET" action="/" style="display:flex;gap:8px">
+          ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
+          ${FILTER_PARAM_KEYS.filter((k) => k !== "q").map((k) => (query.get(k) ? `<input type="hidden" name="${k}" value="${escapeHtml(query.get(k))}" />` : "")).join("")}
           <input type="text" name="q" placeholder="Search suburb, venue, or space" value="${escapeHtml(query.get("q") || "")}"
             style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:var(--white);font-size:13px;min-width:220px" />
           <button class="btn btn-outline btn-sm" type="submit">Search</button>
@@ -128,8 +180,29 @@ export async function browsePage(req, res, query) {
       </div>
     </div>
     <div id="browse-map" style="display:none;height:420px;border-radius:10px;overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
-    <div style="margin-bottom:18px">${categoryChips}</div>
+    <div class="row-between" style="margin-bottom:18px;flex-wrap:wrap;gap:10px">
+      <div style="display:flex;flex-wrap:wrap;gap:8px">${categoryChips}</div>
+      <details class="nav-dropdown" id="filters-details">
+        <summary class="btn btn-outline btn-sm" style="cursor:pointer;list-style:none">⚙️ Filters${activeFilterCount ? ` (${activeFilterCount})` : ""}</summary>
+        <form method="GET" action="/" class="nav-dropdown-menu" style="padding:16px;min-width:260px;right:0;left:auto">
+          ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
+          ${query.get("q") ? `<input type="hidden" name="q" value="${escapeHtml(query.get("q"))}" />` : ""}
+          <div class="form-row">
+            <div class="field" style="margin-bottom:10px"><label>Min price/mo</label><input type="number" name="minPrice" value="${Number.isFinite(minPrice) ? minPrice : ""}" placeholder="$0" /></div>
+            <div class="field" style="margin-bottom:10px"><label>Max price/mo</label><input type="number" name="maxPrice" value="${Number.isFinite(maxPrice) ? maxPrice : ""}" placeholder="Any" /></div>
+          </div>
+          <div class="field" style="margin-bottom:10px"><label>Min size (m²)</label><input type="number" step="0.1" name="minArea" value="${Number.isFinite(minArea) ? minArea : ""}" placeholder="Any" /></div>
+          <div class="field" style="margin-bottom:10px"><label>Min exposure (eyes/day)</label><input type="number" name="minEyes" value="${Number.isFinite(minEyes) ? minEyes : ""}" placeholder="Any" /></div>
+          <div class="field" style="margin-bottom:12px"><label>Sort by</label><select name="sort">${sortOptionsHtml}</select></div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-primary btn-sm" type="submit" style="flex:1">Apply</button>
+            <a href="${withParams({ minPrice: "", maxPrice: "", minArea: "", minEyes: "", sort: "" })}" class="btn btn-outline btn-sm">Clear</a>
+          </div>
+        </form>
+      </details>
+    </div>
     ${listings.length === 0 ? `<p class="muted">No spaces match that search.</p>` : `<div class="grid">${cards}</div>`}
+    <div style="margin-top:24px">${adUnitMarkup("ADSENSE_SLOT_BROWSE")}</div>
     <script>
       (function () {
         var btn = document.getElementById("map-toggle-btn");
@@ -356,13 +429,37 @@ export async function listingDetailPage(req, res, id) {
           ${listing.estimatedEyesPerDay ? svgEyesGauge(listing.estimatedEyesPerDay, { big: true }) : ""}
         </div>
         <h1 style="font-size:26px">${escapeHtml(listing.title)}</h1>
-        <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(listing.suburb)}, Sydney${listing.subtype ? ` · ${escapeHtml(listing.subtype)}` : ""}${owner ? ` · listed by ${escapeHtml(owner.fullName)}` : ""}${owner && owner.googleBusinessUrl ? ` · <a href="${escapeHtml(owner.googleBusinessUrl)}" target="_blank" rel="noopener" style="color:var(--blue)">View on Google →</a>` : ""}</div>
+        <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(listing.suburb)}, Sydney${listing.subtype ? ` · ${escapeHtml(listing.subtype)}` : ""}</div>
         <p style="margin-bottom:18px">${escapeHtml(listing.desc)}</p>
         <div class="panel-tint stat-grid-3" style="margin-bottom:18px">
           <div><div class="mono" style="font-weight:700">${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)}</div><div class="small muted">Space size</div></div>
           <div><div class="mono" style="font-weight:700">${money(listing.price)}/mo</div><div class="small muted">Lease rate</div></div>
           <div><div class="mono" style="font-weight:700">${escapeHtml(listing.footfall)}</div><div class="small muted">Exposure</div></div>
         </div>
+        ${
+          listing.lat != null && listing.lng != null
+            ? `<div id="listing-mini-map" style="height:170px;border-radius:10px;overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
+               <script>window.FRONTAGE_SINGLE_LISTING = { lat: ${listing.lat}, lng: ${listing.lng}, title: ${JSON.stringify(listing.title)} };</script>
+               <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+               <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+               <script src="/listing-map.js"></script>`
+            : ""
+        }
+        ${
+          owner
+            ? `<div class="panel" style="margin-bottom:18px;display:flex;gap:12px;align-items:center">
+                 <div style="width:44px;height:44px;border-radius:50%;background:var(--concrete);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--ink);flex-shrink:0">${escapeHtml(
+                   (owner.businessName || owner.fullName || "?").charAt(0).toUpperCase()
+                 )}</div>
+                 <div style="flex:1;min-width:0">
+                   <div style="font-weight:700">${escapeHtml(owner.businessName || owner.fullName)}</div>
+                   <div class="small muted">Listed by ${escapeHtml(owner.fullName)}</div>
+                   ${owner.googleBusinessUrl ? `<a href="${escapeHtml(owner.googleBusinessUrl)}" target="_blank" rel="noopener" class="small" style="color:var(--blue)">View on Google →</a>` : ""}
+                 </div>
+               </div>`
+            : ""
+        }
+        <div style="margin-bottom:18px">${adUnitMarkup("ADSENSE_SLOT_LISTING")}</div>
         ${
           isOwner
             ? `<div class="badge badge-blue" style="margin-bottom:12px;display:block;padding:10px">This is your listing.</div>

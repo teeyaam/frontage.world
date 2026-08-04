@@ -67,7 +67,7 @@ function gatePage(res, wrong) {
 }
 async function handleGate(req, res, pathname) {
   if (!process.env.SITE_PASSCODE) return false; // public — no gate
-  if (pathname === "/api/stripe/webhook") return false;
+  if (pathname === "/api/stripe/webhook" || pathname === "/ads.txt") return false;
   const cookies = parseCookies(req);
   if (cookies["frontage_gate"] === gateHash()) return false; // already through
   if (req.method === "POST" && pathname === "/gate") {
@@ -94,8 +94,25 @@ const server = http.createServer(async (req, res) => {
     if (await handleGate(req, res, pathname)) return;
 
     // static assets
-    if (method === "GET" && (pathname === "/style.css" || pathname === "/client.js" || pathname === "/wall-visualizer.js" || pathname === "/map.js" || pathname === "/google-map.js" || pathname.startsWith("/uploads/listings/"))) {
+    if (
+      method === "GET" &&
+      (pathname === "/style.css" ||
+        pathname === "/client.js" ||
+        pathname === "/wall-visualizer.js" ||
+        pathname === "/map.js" ||
+        pathname === "/google-map.js" ||
+        pathname === "/listing-map.js" ||
+        pathname.startsWith("/uploads/listings/"))
+    ) {
       if (serveStatic(req, res, pathname)) return;
+    }
+
+    // AdSense verifies ad placements via a file at the domain root — only
+    // meaningful once ADSENSE_CLIENT_ID is set (see lib/ads.js).
+    if (method === "GET" && pathname === "/ads.txt") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      const pubId = (process.env.ADSENSE_CLIENT_ID || "").replace(/^ca-/, "");
+      return res.end(pubId ? `google.com, ${pubId}, DIRECT, f08c47fec0942fa0\n` : "");
     }
 
     // ---------- GET pages ----------
