@@ -201,21 +201,27 @@ export async function browsePage(req, res, query) {
         </form>
       </details>
     </div>
-    ${listings.length === 0 ? `<p class="muted">No spaces match that search.</p>` : `<div class="grid">${cards}</div>`}
-    <div style="margin-top:24px">${adUnitMarkup("ADSENSE_SLOT_BROWSE")}</div>
+    <div id="browse-results">${listings.length === 0 ? `<p class="muted">No spaces match that search.</p>` : `<div class="grid">${cards}</div>`}</div>
+    <div id="browse-below-fold" style="margin-top:24px">${adUnitMarkup("ADSENSE_SLOT_BROWSE")}</div>
     <script>
       (function () {
         var btn = document.getElementById("map-toggle-btn");
         var mapEl = document.getElementById("browse-map");
+        var resultsEl = document.getElementById("browse-results");
+        var belowFoldEl = document.getElementById("browse-below-fold");
         var loaded = false;
         btn.addEventListener("click", function () {
           var showing = mapEl.style.display !== "none";
           if (showing) {
             mapEl.style.display = "none";
+            resultsEl.style.display = "";
+            belowFoldEl.style.display = "";
             btn.textContent = "🗺️ Map view";
             return;
           }
           mapEl.style.display = "block";
+          resultsEl.style.display = "none";
+          belowFoldEl.style.display = "none";
           btn.textContent = "📋 List view";
           if (!loaded) {
             loaded = true;
