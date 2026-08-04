@@ -30,6 +30,14 @@ async function requireUser(req, res, nextPath) {
 // single footer link only), each admin page renders this strip so a staff
 // member can reach whichever other admin sections they have permission for
 // once they've landed on any one of them.
+// Suburb/city + postcode + country, however much of it a listing actually
+// has — replaces the old hardcoded ", Sydney" so listings anywhere in the
+// world display correctly. Existing listings created before country/
+// postcode existed just show the suburb, same as before.
+function locationLine(l) {
+  return [l.suburb, l.postcode].filter(Boolean).join(" ") + (l.country ? `, ${l.country}` : "");
+}
+
 function adminSubnav(user, activeKey) {
   const items = [];
   if (hasPermission(user, "canApproveContractors")) items.push({ key: "contractor-apps", href: "/admin/contractor-applications", label: "Contractor department" });
@@ -84,21 +92,35 @@ const SORT_OPTIONS = {
 // Every filter/sort param that should survive a category-chip click or a
 // filter-form submit, carried forward as hidden fields / querystring so
 // browsing never silently drops an active filter.
-const FILTER_PARAM_KEYS = ["q", "minPrice", "maxPrice", "minArea", "minEyes", "sort"];
+const FILTER_PARAM_KEYS = ["q", "country", "city", "minPrice", "maxPrice", "minArea", "minEyes", "sort"];
 
 export async function browsePage(req, res, query) {
   const user = await currentUser(req);
-  let listings = await db.getListings();
+  const allListings = await db.getListings();
+  let listings = allListings;
+  // Distinct values across every live listing, for the country/city filter
+  // datalists — autocomplete that reflects what's actually listed, rather
+  // than a static country list that may not match any real inventory.
+  const knownCountries = [...new Set(allListings.map((l) => l.country).filter(Boolean))].sort();
+  const knownCities = [...new Set(allListings.map((l) => l.suburb).filter(Boolean))].sort();
   const cat = query.get("category");
   const q = (query.get("q") || "").toLowerCase();
-  const minPrice = parseFloat(query.get("minPrice"));
-  const maxPrice = parseFloat(query.get("maxPrice"));
-  const minArea = parseFloat(query.get("minArea")); // buyer-facing unit: m²
-  const minEyes = parseInt(query.get("minEyes"), 10);
+  const countryFilter = (query.get("country") || "").toLowerCase();
+  const cityFilter = (query.get("city") || "").toLowerCase();
+  // Math.max(0, ...) clamps a negative/malformed querystring value to "not
+  // set" rather than letting it silently do nothing (a negative min is
+  // harmless as a filter, but nonsensical to show back in the form).
+  const clampNonNegative = (n) => (Number.isFinite(n) && n >= 0 ? n : NaN);
+  const minPrice = clampNonNegative(parseFloat(query.get("minPrice")));
+  const maxPrice = clampNonNegative(parseFloat(query.get("maxPrice")));
+  const minArea = clampNonNegative(parseFloat(query.get("minArea"))); // buyer-facing unit: m²
+  const minEyes = clampNonNegative(parseInt(query.get("minEyes"), 10));
   const sortKey = SORT_OPTIONS[query.get("sort")] ? query.get("sort") : "newest";
 
   if (cat && cat !== "all") listings = listings.filter((l) => l.category === cat);
-  if (q) listings = listings.filter((l) => `${l.title} ${l.venue} ${l.suburb}`.toLowerCase().includes(q));
+  if (q) listings = listings.filter((l) => `${l.title} ${l.venue} ${l.suburb} ${l.postcode || ""} ${l.country || ""}`.toLowerCase().includes(q));
+  if (countryFilter) listings = listings.filter((l) => (l.country || "").toLowerCase().includes(countryFilter));
+  if (cityFilter) listings = listings.filter((l) => (l.suburb || "").toLowerCase().includes(cityFilter));
   if (Number.isFinite(minPrice)) listings = listings.filter((l) => l.price >= minPrice);
   if (Number.isFinite(maxPrice)) listings = listings.filter((l) => l.price <= maxPrice);
   if (Number.isFinite(minArea)) listings = listings.filter((l) => (l.sizeW * l.sizeH) / 1e6 >= minArea);
@@ -124,12 +146,13 @@ export async function browsePage(req, res, query) {
       <a class="card" href="/listing/${l.id}">
         <div class="card-diagram">${l.photos && l.photos.length ? `<img src="${escapeHtml(l.photos[0])}" alt="" style="width:100%;height:100%;object-fit:cover" />` : svgSpaceDiagram(l.sizeW, l.sizeH)}</div>
         <div class="card-body">
-          <div class="row-between" style="margin-bottom:8px">
-            <div class="badge badge-blue">✓ Verified · ★ ${l.rating} (${l.reviews})</div>
-            ${l.estimatedEyesPerDay ? `<div class="badge badge-steel">${l.estimatedEyesPerDay >= 1000 ? (l.estimatedEyesPerDay / 1000).toFixed(1) + "k" : l.estimatedEyesPerDay} eyes/day</div>` : ""}
-          </div>
+          ${
+            l.estimatedEyesPerDay
+              ? `<div style="margin-bottom:8px"><div class="badge badge-steel">${l.estimatedEyesPerDay >= 1000 ? (l.estimatedEyesPerDay / 1000).toFixed(1) + "k" : l.estimatedEyesPerDay} eyes/day</div></div>`
+              : ""
+          }
           <h3 style="font-size:16px">${escapeHtml(l.title)}</h3>
-          <div class="muted small">${escapeHtml(l.venue)} · ${escapeHtml(l.suburb)}, Sydney${l.subtype ? ` · ${escapeHtml(l.subtype)}` : ""}</div>
+          <div class="muted small">${escapeHtml(l.venue)} · ${escapeHtml(locationLine(l))}${l.subtype ? ` · ${escapeHtml(l.subtype)}` : ""}</div>
           <div class="row-between" style="margin-top:12px;padding-top:12px;border-top:1px solid #EAE7DF">
             <div class="mono" style="font-weight:700">${money(l.price)}<span class="muted small"> /mo</span></div>
             <span class="small" style="color:var(--orange);font-weight:600">View space →</span>
@@ -150,7 +173,7 @@ export async function browsePage(req, res, query) {
     .map(([key, opt]) => `<option value="${key}"${key === sortKey ? " selected" : ""}>${opt.label}</option>`)
     .join("");
 
-  const activeFilterCount = [minPrice, maxPrice, minArea, minEyes].filter(Number.isFinite).length;
+  const activeFilterCount = [minPrice, maxPrice, minArea, minEyes].filter(Number.isFinite).length + (countryFilter ? 1 : 0) + (cityFilter ? 1 : 0);
 
   // Google Maps when a key is configured (see .env.example) — otherwise the
   // free Leaflet/OpenStreetMap map, same as before. Either way the toggle
@@ -160,7 +183,7 @@ export async function browsePage(req, res, query) {
   const body = `
     <div class="hero-row">
       <div>
-        <h1 class="hero-headline">FREE SPACE,<br/><span style="color:var(--orange)">FREE MONEY.</span></h1>
+        <h1 class="hero-headline">FREE SPACE, <span style="color:var(--orange)">FREE MONEY.</span></h1>
         <p class="hero-sub">List your wall, window, or fence space and start earning from advertisers — or find the right spot to put your ad up.</p>
       </div>
       ${user ? `<a href="/sell/new" class="btn btn-primary btn-lg">List a space</a>` : `<a href="/onboarding" class="btn btn-primary btn-lg">Get started</a>`}
@@ -188,15 +211,21 @@ export async function browsePage(req, res, query) {
           ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
           ${query.get("q") ? `<input type="hidden" name="q" value="${escapeHtml(query.get("q"))}" />` : ""}
           <div class="form-row">
-            <div class="field" style="margin-bottom:10px"><label>Min price/mo</label><input type="number" name="minPrice" value="${Number.isFinite(minPrice) ? minPrice : ""}" placeholder="$0" /></div>
-            <div class="field" style="margin-bottom:10px"><label>Max price/mo</label><input type="number" name="maxPrice" value="${Number.isFinite(maxPrice) ? maxPrice : ""}" placeholder="Any" /></div>
+            <div class="field" style="margin-bottom:10px"><label>Country</label><input list="filter-countries" name="country" value="${escapeHtml(query.get("country") || "")}" placeholder="Any" /></div>
+            <div class="field" style="margin-bottom:10px"><label>City / Suburb</label><input list="filter-cities" name="city" value="${escapeHtml(query.get("city") || "")}" placeholder="Any" /></div>
           </div>
-          <div class="field" style="margin-bottom:10px"><label>Min size (m²)</label><input type="number" step="0.1" name="minArea" value="${Number.isFinite(minArea) ? minArea : ""}" placeholder="Any" /></div>
-          <div class="field" style="margin-bottom:10px"><label>Min exposure (eyes/day)</label><input type="number" name="minEyes" value="${Number.isFinite(minEyes) ? minEyes : ""}" placeholder="Any" /></div>
+          <datalist id="filter-countries">${knownCountries.map((c) => `<option value="${escapeHtml(c)}"></option>`).join("")}</datalist>
+          <datalist id="filter-cities">${knownCities.map((c) => `<option value="${escapeHtml(c)}"></option>`).join("")}</datalist>
+          <div class="form-row">
+            <div class="field" style="margin-bottom:10px"><label>Min price/mo</label><input type="number" name="minPrice" min="0" value="${Number.isFinite(minPrice) ? minPrice : ""}" placeholder="$0" /></div>
+            <div class="field" style="margin-bottom:10px"><label>Max price/mo</label><input type="number" name="maxPrice" min="0" value="${Number.isFinite(maxPrice) ? maxPrice : ""}" placeholder="Any" /></div>
+          </div>
+          <div class="field" style="margin-bottom:10px"><label>Min size (m²)</label><input type="number" step="0.1" min="0" name="minArea" value="${Number.isFinite(minArea) ? minArea : ""}" placeholder="Any" /></div>
+          <div class="field" style="margin-bottom:10px"><label>Min exposure (eyes/day)</label><input type="number" name="minEyes" min="0" value="${Number.isFinite(minEyes) ? minEyes : ""}" placeholder="Any" /></div>
           <div class="field" style="margin-bottom:12px"><label>Sort by</label><select name="sort">${sortOptionsHtml}</select></div>
           <div style="display:flex;gap:8px">
             <button class="btn btn-primary btn-sm" type="submit" style="flex:1">Apply</button>
-            <a href="${withParams({ minPrice: "", maxPrice: "", minArea: "", minEyes: "", sort: "" })}" class="btn btn-outline btn-sm">Clear</a>
+            <a href="${withParams({ country: "", city: "", minPrice: "", maxPrice: "", minArea: "", minEyes: "", sort: "" })}" class="btn btn-outline btn-sm">Clear</a>
           </div>
         </form>
       </details>
@@ -430,12 +459,9 @@ export async function listingDetailPage(req, res, id) {
         ${photos.length ? lightboxMarkup(photos) : ""}
       </div>
       <div>
-        <div class="row-between" style="margin-bottom:8px">
-          <div class="badge badge-blue">Verified · ★ ${listing.rating} (${listing.reviews} reviews)</div>
-          ${listing.estimatedEyesPerDay ? svgEyesGauge(listing.estimatedEyesPerDay, { big: true }) : ""}
-        </div>
+        ${listing.estimatedEyesPerDay ? `<div style="margin-bottom:8px">${svgEyesGauge(listing.estimatedEyesPerDay, { big: true })}</div>` : ""}
         <h1 style="font-size:26px">${escapeHtml(listing.title)}</h1>
-        <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(listing.suburb)}, Sydney${listing.subtype ? ` · ${escapeHtml(listing.subtype)}` : ""}</div>
+        <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(locationLine(listing))}${listing.subtype ? ` · ${escapeHtml(listing.subtype)}` : ""}</div>
         <p style="margin-bottom:18px">${escapeHtml(listing.desc)}</p>
         <div class="panel-tint stat-grid-3" style="margin-bottom:18px">
           <div><div class="mono" style="font-weight:700">${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)}</div><div class="small muted">Space size</div></div>
@@ -732,21 +758,25 @@ export async function sellNewPage(req, res, query) {
           <div class="field"><label>Space type (optional)</label><input name="subtype" placeholder="e.g. front fence panel, driveway sign board" /></div>
         </div>
         <div class="form-row">
-          <div class="field"><label>Suburb</label><input name="suburb" required placeholder="Castle Hill" /></div>
+          <div class="field"><label>Suburb / City</label><input name="suburb" required placeholder="Castle Hill" /></div>
           <div class="field"><label>Premises address</label><input name="address" required value="${escapeHtml(user.address || "")}" placeholder="14 Wattle St, Castle Hill NSW" /></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>Postcode (optional)</label><input name="postcode" placeholder="2154" /></div>
+          <div class="field"><label>Country</label><input name="country" value="Australia" placeholder="Australia" /></div>
         </div>
         <div class="form-row">
           <div class="field"><label>Map latitude (optional)</label><input type="number" step="any" name="lat" placeholder="auto from suburb" /></div>
           <div class="field"><label>Map longitude (optional)</label><input type="number" step="any" name="lng" placeholder="auto from suburb" /></div>
         </div>
         <div class="form-row">
-          <div class="field"><label>Width (mm)</label><input type="number" id="sizeW" name="sizeW" required placeholder="2000" /></div>
-          <div class="field"><label>Height (mm)</label><input type="number" id="sizeH" name="sizeH" required placeholder="3000" /></div>
+          <div class="field"><label>Width (mm)</label><input type="number" id="sizeW" name="sizeW" required min="1" placeholder="2000" /></div>
+          <div class="field"><label>Height (mm)</label><input type="number" id="sizeH" name="sizeH" required min="1" placeholder="3000" /></div>
         </div>
         <button type="button" id="ar-preview-btn" class="btn btn-outline btn-block" style="margin-bottom:14px">📷 Preview on your wall</button>
         <div class="form-row">
-          <div class="field"><label>Monthly rate (AUD)</label><input type="number" name="price" required placeholder="100" /></div>
-          <div class="field"><label>Estimated daily eyes (leave blank to auto-estimate)</label><input type="number" name="estimatedEyesPerDay" placeholder="e.g. 250" /></div>
+          <div class="field"><label>Monthly rate (AUD)</label><input type="number" name="price" required min="1" step="0.01" placeholder="100" /></div>
+          <div class="field"><label>Estimated daily eyes (leave blank to auto-estimate)</label><input type="number" name="estimatedEyesPerDay" min="0" placeholder="e.g. 250" /></div>
         </div>
         <div class="field"><label>Description</label><textarea name="desc" rows="3" placeholder="What makes this space worth advertising on?"></textarea></div>
         <div class="field"><label>Photos (up to 8)</label><input type="file" name="photos" accept="image/*" multiple /></div>
@@ -841,20 +871,24 @@ export async function editListingPage(req, res, id, query) {
           <div class="field"><label>Space type (optional)</label><input name="subtype" value="${escapeHtml(listing.subtype || "")}" /></div>
         </div>
         <div class="form-row">
-          <div class="field"><label>Suburb</label><input name="suburb" required value="${escapeHtml(listing.suburb)}" /></div>
+          <div class="field"><label>Suburb / City</label><input name="suburb" required value="${escapeHtml(listing.suburb)}" /></div>
           <div class="field"><label>Premises address</label><input name="address" required value="${escapeHtml(listing.address)}" /></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>Postcode (optional)</label><input name="postcode" value="${escapeHtml(listing.postcode || "")}" placeholder="2154" /></div>
+          <div class="field"><label>Country</label><input name="country" value="${escapeHtml(listing.country || "Australia")}" /></div>
         </div>
         <div class="form-row">
           <div class="field"><label>Map latitude (optional)</label><input type="number" step="any" name="lat" value="${listing.lat != null ? listing.lat : ""}" /></div>
           <div class="field"><label>Map longitude (optional)</label><input type="number" step="any" name="lng" value="${listing.lng != null ? listing.lng : ""}" /></div>
         </div>
         <div class="form-row">
-          <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required value="${listing.sizeW}" /></div>
-          <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required value="${listing.sizeH}" /></div>
+          <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required min="1" value="${listing.sizeW}" /></div>
+          <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required min="1" value="${listing.sizeH}" /></div>
         </div>
         <div class="form-row">
-          <div class="field"><label>Monthly rate (AUD)</label><input type="number" name="price" required value="${listing.price}" /></div>
-          <div class="field"><label>Estimated daily eyes</label><input type="number" name="estimatedEyesPerDay" value="${listing.estimatedEyesPerDay || ""}" /></div>
+          <div class="field"><label>Monthly rate (AUD)</label><input type="number" name="price" required min="1" step="0.01" value="${listing.price}" /></div>
+          <div class="field"><label>Estimated daily eyes</label><input type="number" name="estimatedEyesPerDay" min="0" value="${listing.estimatedEyesPerDay || ""}" /></div>
         </div>
         <div class="field"><label>Description</label><textarea name="desc" rows="3">${escapeHtml(listing.desc || "")}</textarea></div>
         <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Save changes</button>
@@ -938,14 +972,18 @@ export async function bdrNewListingPage(req, res, query) {
           <div class="field"><label>Space type (optional)</label><input name="subtype" /></div>
         </div>
         <div class="form-row">
-          <div class="field"><label>Suburb</label><input name="suburb" required /></div>
+          <div class="field"><label>Suburb / City</label><input name="suburb" required /></div>
           <div class="field"><label>Premises address</label><input name="address" required /></div>
         </div>
         <div class="form-row">
-          <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required placeholder="2000" /></div>
-          <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required placeholder="3000" /></div>
+          <div class="field"><label>Postcode (optional)</label><input name="postcode" placeholder="2154" /></div>
+          <div class="field"><label>Country</label><input name="country" value="Australia" /></div>
         </div>
-        <div class="field"><label>Monthly rate (AUD)</label><input type="number" name="price" required placeholder="100" /></div>
+        <div class="form-row">
+          <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required min="1" placeholder="2000" /></div>
+          <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required min="1" placeholder="3000" /></div>
+        </div>
+        <div class="field"><label>Monthly rate (AUD)</label><input type="number" name="price" required min="1" step="0.01" placeholder="100" /></div>
         <div class="field"><label>Description</label><textarea name="desc" rows="3"></textarea></div>
         <div class="field"><label>Photos (up to 8)</label><input type="file" name="photos" accept="image/*" multiple /></div>
         <div class="divider"></div>
@@ -969,7 +1007,7 @@ export async function claimListingPage(req, res, token) {
     <div class="panel" style="max-width:520px;margin:0 auto">
       <div class="badge badge-blue" style="margin-bottom:12px">Pre-built listing</div>
       <h1 style="font-size:22px;margin-bottom:6px">${escapeHtml(listing.title)}</h1>
-      <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(listing.suburb)}, Sydney</div>
+      <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(locationLine(listing))}</div>
       <div class="panel-tint" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;text-align:center;margin-bottom:18px">
         <div><div class="mono" style="font-weight:700">${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)}</div><div class="small muted">Space size</div></div>
         <div><div class="mono" style="font-weight:700">${money(listing.price)}/mo</div><div class="small muted">Lease rate</div></div>
@@ -1369,9 +1407,9 @@ export async function contractorBoardPage(req, res) {
         } else if (j.status === "site_confirmed") {
           actionBlock = `<form method="POST" action="/api/joborders/${j.id}/quote">
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-            <div class="field" style="flex:1;min-width:100px;margin-bottom:0"><label>Print</label><input type="number" name="print" value="340" required /></div>
-            <div class="field" style="flex:1;min-width:100px;margin-bottom:0"><label>Install</label><input type="number" name="install" value="260" required /></div>
-            <div class="field" style="flex:1;min-width:100px;margin-bottom:0"><label>Uninstall</label><input type="number" name="uninstall" value="120" required /></div>
+            <div class="field" style="flex:1;min-width:100px;margin-bottom:0"><label>Print</label><input type="number" name="print" value="340" min="0" required /></div>
+            <div class="field" style="flex:1;min-width:100px;margin-bottom:0"><label>Install</label><input type="number" name="install" value="260" min="0" required /></div>
+            <div class="field" style="flex:1;min-width:100px;margin-bottom:0"><label>Uninstall</label><input type="number" name="uninstall" value="120" min="0" required /></div>
           </div>
           <button class="btn btn-primary btn-sm" type="submit">Send quote to buyer</button>
         </form>`;

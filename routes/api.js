@@ -183,8 +183,8 @@ export async function createListingHandler(req, res) {
   const sizeW = parseInt(b.sizeW, 10);
   const sizeH = parseInt(b.sizeH, 10);
   const price = parseFloat(b.price);
-  if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price) {
-    return badRequest(res, "Missing required listing fields.");
+  if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price || sizeW <= 0 || sizeH <= 0 || price <= 0) {
+    return badRequest(res, "Missing required listing fields, or width/height/price must be greater than zero.");
   }
   const category = isValidCategory(b.category) ? b.category : "gym";
 
@@ -206,7 +206,8 @@ export async function createListingHandler(req, res) {
   const estimatedEyesPerDay = parseInt(b.estimatedEyesPerDay, 10) || estimateEyes({ category, sizeW, sizeH });
   const manualLat = parseFloat(b.lat);
   const manualLng = parseFloat(b.lng);
-  const coords = Number.isFinite(manualLat) && Number.isFinite(manualLng) ? { lat: manualLat, lng: manualLng } : approximateCoords(b.suburb);
+  const coords =
+    Number.isFinite(manualLat) && Number.isFinite(manualLng) ? { lat: manualLat, lng: manualLng } : await approximateCoords(b.suburb, b.country);
 
   await db.createListing({
     ownerId: user.id,
@@ -215,6 +216,8 @@ export async function createListingHandler(req, res) {
     category,
     subtype: b.subtype || null,
     suburb: b.suburb,
+    postcode: b.postcode || null,
+    country: b.country || null,
     address: b.address,
     sizeW,
     sizeH,
@@ -241,13 +244,13 @@ export async function createBdrListingHandler(req, res) {
   const sizeW = parseInt(b.sizeW, 10);
   const sizeH = parseInt(b.sizeH, 10);
   const price = parseFloat(b.price);
-  if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price) {
-    return badRequest(res, "Missing required listing fields.");
+  if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price || sizeW <= 0 || sizeH <= 0 || price <= 0) {
+    return badRequest(res, "Missing required listing fields, or width/height/price must be greater than zero.");
   }
   const category = isValidCategory(b.category) ? b.category : "gym";
   const photos = (req.files || []).map((f) => photoPublicUrl(f));
   const estimatedEyesPerDay = estimateEyes({ category, sizeW, sizeH });
-  const coords = approximateCoords(b.suburb);
+  const coords = await approximateCoords(b.suburb, b.country);
 
   const listing = await db.createDraftListing({
     title: b.title,
@@ -255,6 +258,8 @@ export async function createBdrListingHandler(req, res) {
     category,
     subtype: b.subtype || null,
     suburb: b.suburb,
+    postcode: b.postcode || null,
+    country: b.country || null,
     address: b.address,
     sizeW,
     sizeH,
@@ -323,14 +328,22 @@ export async function updateListingHandler(req, res, id) {
   const sizeW = parseInt(b.sizeW, 10);
   const sizeH = parseInt(b.sizeH, 10);
   const price = parseFloat(b.price);
-  if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price) {
-    return badRequest(res, "Missing required listing fields.");
+  if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price || sizeW <= 0 || sizeH <= 0 || price <= 0) {
+    return badRequest(res, "Missing required listing fields, or width/height/price must be greater than zero.");
   }
   const category = isValidCategory(b.category) ? b.category : listing.category;
   const estimatedEyesPerDay = parseInt(b.estimatedEyesPerDay, 10) || estimateEyes({ category, sizeW, sizeH });
   const manualLat = parseFloat(b.lat);
   const manualLng = parseFloat(b.lng);
-  const coords = Number.isFinite(manualLat) && Number.isFinite(manualLng) ? { lat: manualLat, lng: manualLng } : { lat: listing.lat, lng: listing.lng };
+  const locationChanged = b.suburb !== listing.suburb || (b.country || null) !== (listing.country || null);
+  let coords;
+  if (Number.isFinite(manualLat) && Number.isFinite(manualLng)) {
+    coords = { lat: manualLat, lng: manualLng };
+  } else if (locationChanged) {
+    coords = await approximateCoords(b.suburb, b.country);
+  } else {
+    coords = { lat: listing.lat, lng: listing.lng };
+  }
 
   await db.updateListing(id, {
     title: b.title,
@@ -338,6 +351,8 @@ export async function updateListingHandler(req, res, id) {
     category,
     subtype: b.subtype || null,
     suburb: b.suburb,
+    postcode: b.postcode || null,
+    country: b.country || null,
     address: b.address,
     sizeW,
     sizeH,
@@ -598,7 +613,7 @@ export async function jobOrderQuote(req, res, id) {
   const job = await db.getJobOrderById(id);
   if (!contractor || !job || job.contractorId !== contractor.id) return badRequest(res, "Not your job order.");
   const b = await readBody(req);
-  const quote = { print: Number(b.print) || 0, install: Number(b.install) || 0, uninstall: Number(b.uninstall) || 0 };
+  const quote = { print: Math.max(0, Number(b.print) || 0), install: Math.max(0, Number(b.install) || 0), uninstall: Math.max(0, Number(b.uninstall) || 0) };
   await db.updateJobOrder(id, { status: "quote_sent", quote });
   redirect(res, "/contractor/board");
 }

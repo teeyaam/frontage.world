@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS listings (
   category TEXT NOT NULL,
   subtype TEXT,
   suburb TEXT NOT NULL,
+  postcode TEXT,
+  country TEXT,
   address TEXT NOT NULL,
   size_w INTEGER NOT NULL,
   size_h INTEGER NOT NULL,
