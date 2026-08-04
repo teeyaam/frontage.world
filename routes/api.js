@@ -13,6 +13,8 @@ import {
   clearContractorCookieHeader,
   parseCookies,
   CONTRACTOR_SESSION_COOKIE,
+  isStrongPassword,
+  PASSWORD_HINT,
 } from "../lib/auth.js";
 import { runUpload, uploadContractorDocs, uploadListingPhotos, CONTRACTOR_DOCS_DIR, getContractorDocUrl, isS3Configured, photoPublicUrl } from "../lib/upload.js";
 import { isValidCategory } from "../lib/categories.js";
@@ -56,9 +58,15 @@ function badRequest(res, message) {
 // ---------------- Auth ----------------
 export async function signup(req, res) {
   const body = await readBody(req);
-  const { fullName, email, mobile, password, next } = body;
-  if (!fullName || !email || !mobile || !password || password.length < 6) {
-    return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("Please fill every field — password needs at least 6 characters.")}`);
+  const { fullName, email, mobile, password, confirmPassword, next } = body;
+  if (!fullName || !email || !mobile || !password) {
+    return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("Please fill every field.")}`);
+  }
+  if (!isStrongPassword(password)) {
+    return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("Password too weak — " + PASSWORD_HINT)}`);
+  }
+  if (password !== confirmPassword) {
+    return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("Password and confirmation don't match.")}`);
   }
   if (await db.getUserByEmail(email)) {
     return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("An account with that email already exists — try logging in instead.")}`);
@@ -125,9 +133,15 @@ export async function logout(req, res) {
 // ---------------- Contractor auth (fully separate identity space) ----------------
 export async function contractorSignup(req, res) {
   const body = await readBody(req);
-  const { fullName, email, mobile, password, next } = body;
-  if (!fullName || !email || !mobile || !password || password.length < 6) {
-    return redirect(res, `/contractor/signup?next=${encodeURIComponent(next || "/contractor/apply")}&err=${encodeURIComponent("Please fill every field — password needs at least 6 characters.")}`);
+  const { fullName, email, mobile, password, confirmPassword, next } = body;
+  if (!fullName || !email || !mobile || !password) {
+    return redirect(res, `/contractor/signup?next=${encodeURIComponent(next || "/contractor/apply")}&err=${encodeURIComponent("Please fill every field.")}`);
+  }
+  if (!isStrongPassword(password)) {
+    return redirect(res, `/contractor/signup?next=${encodeURIComponent(next || "/contractor/apply")}&err=${encodeURIComponent("Password too weak — " + PASSWORD_HINT)}`);
+  }
+  if (password !== confirmPassword) {
+    return redirect(res, `/contractor/signup?next=${encodeURIComponent(next || "/contractor/apply")}&err=${encodeURIComponent("Password and confirmation don't match.")}`);
   }
   if (await db.getContractorByEmail(email)) {
     return redirect(res, `/contractor/signup?next=${encodeURIComponent(next || "/contractor/apply")}&err=${encodeURIComponent("An account with that email already exists — try logging in instead.")}`);
@@ -674,8 +688,11 @@ export async function updateAccountPassword(req, res) {
   if (!verifyPassword(b.currentPassword || "", user.passwordHash, user.passwordSalt)) {
     return redirect(res, `/account?err=${encodeURIComponent("Current password is incorrect.")}`);
   }
-  if (!b.newPassword || b.newPassword.length < 6 || b.newPassword !== b.confirmPassword) {
-    return redirect(res, `/account?err=${encodeURIComponent("New password must be at least 6 characters and match the confirmation.")}`);
+  if (!isStrongPassword(b.newPassword)) {
+    return redirect(res, `/account?err=${encodeURIComponent("Password too weak — " + PASSWORD_HINT)}`);
+  }
+  if (b.newPassword !== b.confirmPassword) {
+    return redirect(res, `/account?err=${encodeURIComponent("New password and confirmation don't match.")}`);
   }
   const { hash, salt } = hashPassword(b.newPassword);
   await db.updateUser(user.id, { passwordHash: hash, passwordSalt: salt });
@@ -770,8 +787,11 @@ export async function createStaffUser(req, res) {
   const user = await currentUser(req);
   if (!user || !user.isAdmin) return badRequest(res, "Super-admin only.");
   const b = await readBody(req);
-  if (!b.fullName || !b.email || !b.mobile || !b.password || b.password.length < 6) {
-    return badRequest(res, "Full name, email, mobile, and a password of at least 6 characters are required.");
+  if (!b.fullName || !b.email || !b.mobile || !b.password) {
+    return badRequest(res, "Full name, email, mobile, and a password are all required.");
+  }
+  if (!isStrongPassword(b.password)) {
+    return badRequest(res, "Password too weak — " + PASSWORD_HINT);
   }
   if (await db.getUserByEmail(b.email)) return badRequest(res, "An account with that email already exists.");
   const { hash, salt } = hashPassword(b.password);

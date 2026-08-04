@@ -21,12 +21,14 @@ window.frontageInitGoogleMap = function () {
     .then(function (data) {
       var listings = (data && data.listings) || [];
       var bounds = new google.maps.LatLngBounds();
-      var any = false;
+      var count = 0;
+      var lastPosition = null;
 
       listings.forEach(function (l) {
         if (typeof l.lat !== "number" || typeof l.lng !== "number") return;
-        any = true;
+        count++;
         var position = { lat: l.lat, lng: l.lng };
+        lastPosition = position;
         var marker = new google.maps.Marker({ position: position, map: map, title: l.title });
         bounds.extend(position);
 
@@ -64,7 +66,13 @@ window.frontageInitGoogleMap = function () {
         });
       });
 
-      if (any) {
+      if (count === 1) {
+        // fitBounds on a single (zero-area) point snaps Google to its
+        // maximum zoom — an unhelpfully close-up, mostly blank view. Just
+        // center on the one listing at a normal city zoom instead.
+        map.setCenter(lastPosition);
+        map.setZoom(14);
+      } else if (count > 1) {
         map.fitBounds(bounds, 30);
         google.maps.event.addListenerOnce(map, "bounds_changed", function () {
           if (map.getZoom() > 14) map.setZoom(14);

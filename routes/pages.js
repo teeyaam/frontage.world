@@ -6,6 +6,8 @@ import { CATEGORIES, CATEGORY_LABEL } from "../lib/categories.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { isStripeConfigured } from "../lib/payments.js";
 import { isEmailConfigured } from "../lib/email.js";
+import { PASSWORD_PATTERN, PASSWORD_HINT } from "../lib/auth.js";
+import { COUNTRIES } from "../lib/countries.js";
 
 function send(res, status, html) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
@@ -186,6 +188,131 @@ export async function browsePage(req, res, query) {
   send(res, 200, await layout({ title: "Browse spaces", activeNav: "browse", user, body }));
 }
 
+// Full-screen photo viewer with prev/next — replaces the old
+// `<a target="_blank">` navigation, which some browsers/OSes treated as a
+// download prompt for images served from R2 instead of opening them.
+// Clicking a photo now only ever opens this in-page overlay.
+function lightboxMarkup(photos) {
+  // Raw JS source inside a <script> tag, not an HTML attribute — no
+  // HTML-escaping needed, just guard against a literal "</script>" if a
+  // photo URL ever contained one.
+  const photosJs = JSON.stringify(photos).replace(/</g, "\\u003c");
+  return `
+    <div id="frontage-lightbox" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:200;align-items:center;justify-content:center;flex-direction:column">
+      <button type="button" onclick="frontageCloseLightbox()" aria-label="Close" style="position:absolute;top:16px;right:20px;background:none;border:none;color:#fff;font-size:30px;cursor:pointer;line-height:1;padding:6px">&times;</button>
+      <button type="button" onclick="frontagePrevPhoto()" aria-label="Previous photo" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:#fff;font-size:38px;cursor:pointer;padding:10px">&#8249;</button>
+      <img id="frontage-lightbox-img" src="" alt="" style="max-width:88vw;max-height:78vh;object-fit:contain;border-radius:6px" />
+      <button type="button" onclick="frontageNextPhoto()" aria-label="Next photo" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:#fff;font-size:38px;cursor:pointer;padding:10px">&#8250;</button>
+      <div id="frontage-lightbox-counter" class="small" style="color:#fff;margin-top:10px"></div>
+    </div>
+    <script>
+      (function () {
+        var photos = ${photosJs};
+        var idx = 0;
+        var overlay = document.getElementById("frontage-lightbox");
+        var imgEl = document.getElementById("frontage-lightbox-img");
+        var counterEl = document.getElementById("frontage-lightbox-counter");
+        function render() {
+          imgEl.src = photos[idx];
+          counterEl.textContent = (idx + 1) + " / " + photos.length;
+        }
+        window.frontageOpenLightbox = function (i) {
+          idx = i;
+          render();
+          overlay.style.display = "flex";
+        };
+        window.frontageCloseLightbox = function () {
+          overlay.style.display = "none";
+        };
+        window.frontagePrevPhoto = function () {
+          idx = (idx - 1 + photos.length) % photos.length;
+          render();
+        };
+        window.frontageNextPhoto = function () {
+          idx = (idx + 1) % photos.length;
+          render();
+        };
+        overlay.addEventListener("click", function (e) {
+          if (e.target === overlay) window.frontageCloseLightbox();
+        });
+        document.addEventListener("keydown", function (e) {
+          if (overlay.style.display === "none") return;
+          if (e.key === "Escape") window.frontageCloseLightbox();
+          if (e.key === "ArrowLeft") window.frontagePrevPhoto();
+          if (e.key === "ArrowRight") window.frontageNextPhoto();
+        });
+      })();
+    </script>
+  `;
+}
+
+// Country-code select + national-number input, combined into a single
+// "mobile" value (e.g. "+61 412 345 678") by the client script right
+// before submit — the server just receives one mobile field either way.
+function mobileFieldMarkup({ idPrefix = "mobile" } = {}) {
+  const options = COUNTRIES.map(
+    (c) => `<option value="${c.dial}" data-min="${c.digits[0]}" data-max="${c.digits[1]}"${c.iso === "AU" ? " selected" : ""}>${escapeHtml(c.name)} (${c.dial})</option>`
+  ).join("");
+  return `<div class="field">
+    <label>Mobile</label>
+    <div style="display:flex;gap:8px">
+      <select id="${idPrefix}-dial" style="flex:0 0 168px">${options}</select>
+      <input type="tel" id="${idPrefix}-number" required inputmode="numeric" pattern="[0-9]*" placeholder="412 345 678" style="flex:1" />
+    </div>
+    <div class="hint" id="${idPrefix}-hint"></div>
+  </div>
+  <script>
+    (function () {
+      var sel = document.getElementById("${idPrefix}-dial");
+      var num = document.getElementById("${idPrefix}-number");
+      var hint = document.getElementById("${idPrefix}-hint");
+      var form = num.closest("form");
+      function update() {
+        var opt = sel.options[sel.selectedIndex];
+        num.setAttribute("maxlength", opt.getAttribute("data-max"));
+        var min = opt.getAttribute("data-min"), max = opt.getAttribute("data-max");
+        hint.textContent = (min === max ? min : min + "–" + max) + " digits, no spaces";
+      }
+      sel.addEventListener("change", update);
+      update();
+      if (form) {
+        form.addEventListener("submit", function () {
+          var hidden = document.createElement("input");
+          hidden.type = "hidden";
+          hidden.name = "mobile";
+          hidden.value = sel.value + " " + num.value;
+          form.appendChild(hidden);
+        });
+      }
+    })();
+  </script>`;
+}
+
+// Password + confirm-password pair with a live "do these match" hint. The
+// `pattern`/`title` mirror lib/auth.js's isStrongPassword() exactly so a
+// password the client accepts is never rejected as a surprise server-side.
+function passwordFieldsMarkup({ idPrefix = "pw", label = "Password" } = {}) {
+  return `
+    <div class="field"><label>${escapeHtml(label)}</label><input type="password" name="password" id="${idPrefix}-password" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" placeholder="At least 10 characters" minlength="10" /></div>
+    <div class="small muted" style="margin-top:-8px;margin-bottom:14px">${escapeHtml(PASSWORD_HINT)}</div>
+    <div class="field"><label>Confirm ${escapeHtml(label.toLowerCase())}</label><input type="password" name="confirmPassword" id="${idPrefix}-confirm" required /></div>
+    <div class="small" id="${idPrefix}-match-hint" style="margin-top:-8px;margin-bottom:14px"></div>
+    <script>
+      (function () {
+        var pw = document.getElementById("${idPrefix}-password");
+        var cf = document.getElementById("${idPrefix}-confirm");
+        var hint = document.getElementById("${idPrefix}-match-hint");
+        function check() {
+          if (!cf.value) { hint.textContent = ""; return; }
+          if (pw.value === cf.value) { hint.textContent = "✓ Passwords match"; hint.style.color = "var(--green)"; }
+          else { hint.textContent = "Passwords do not match"; hint.style.color = "var(--red)"; }
+        }
+        pw.addEventListener("input", check);
+        cf.addEventListener("input", check);
+      })();
+    </script>`;
+}
+
 // ---------------- Listing detail ----------------
 export async function listingDetailPage(req, res, id) {
   const user = await currentUser(req);
@@ -202,8 +329,8 @@ export async function listingDetailPage(req, res, id) {
       ? `<div style="display:flex;gap:6px;margin-top:6px">${photos
           .slice(1)
           .map(
-            (p) =>
-              `<a href="${escapeHtml(p)}" target="_blank" rel="noopener"><img src="${escapeHtml(p)}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px;border:1px solid var(--border)" /></a>`
+            (p, i) =>
+              `<button type="button" onclick="frontageOpenLightbox(${i + 1})" style="padding:0;border:1px solid var(--border);border-radius:6px;cursor:zoom-in;background:none"><img src="${escapeHtml(p)}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:5px;display:block" /></button>`
           )
           .join("")}</div>`
       : "";
@@ -215,12 +342,13 @@ export async function listingDetailPage(req, res, id) {
         <div class="panel" style="padding:0;overflow:hidden">
           <div class="card-diagram" style="height:280px;background:var(--concrete)">${
             photos.length
-              ? `<a href="${escapeHtml(photos[0])}" target="_blank" rel="noopener" title="View full photo"><img src="${escapeHtml(photos[0])}" alt="" style="width:100%;height:100%;object-fit:contain;cursor:zoom-in" /></a>`
+              ? `<button type="button" onclick="frontageOpenLightbox(0)" title="View full photo" style="width:100%;height:100%;padding:0;border:none;background:none;cursor:zoom-in"><img src="${escapeHtml(photos[0])}" alt="" style="width:100%;height:100%;object-fit:contain" /></button>`
               : svgSpaceDiagram(listing.sizeW, listing.sizeH, { big: true })
           }</div>
         </div>
         ${photos.length ? `<div class="small muted" style="margin-top:6px">Click the photo to view it full size.</div>` : ""}
         ${thumbStrip}
+        ${photos.length ? lightboxMarkup(photos) : ""}
       </div>
       <div>
         <div class="row-between" style="margin-bottom:8px">
@@ -422,8 +550,8 @@ export async function onboardingPage(req, res, query, errorMsg) {
           <input type="hidden" name="next" value="${escapeHtml(next)}" />
           <div class="field"><label>Full name</label><input name="fullName" required placeholder="Jordan Reyes" /></div>
           <div class="field"><label>Email</label><input type="email" name="email" required placeholder="jordan@email.com" /></div>
-          <div class="field"><label>Mobile</label><input name="mobile" required placeholder="04XX XXX XXX" /></div>
-          <div class="field"><label>Password</label><input type="password" name="password" required minlength="6" placeholder="At least 6 characters" /></div>
+          ${mobileFieldMarkup({ idPrefix: "signup-mobile" })}
+          ${passwordFieldsMarkup({ idPrefix: "signup-pw" })}
           <button class="btn btn-primary btn-block" type="submit">Create free account</button>
         </form>
       </div>
@@ -1323,8 +1451,8 @@ export async function contractorSignupPage(req, res, query) {
         <input type="hidden" name="next" value="${escapeHtml(next)}" />
         <div class="field"><label>Full name</label><input name="fullName" required /></div>
         <div class="field"><label>Email</label><input type="email" name="email" required /></div>
-        <div class="field"><label>Mobile</label><input name="mobile" required /></div>
-        <div class="field"><label>Password</label><input type="password" name="password" required minlength="6" /></div>
+        ${mobileFieldMarkup({ idPrefix: "csignup-mobile" })}
+        ${passwordFieldsMarkup({ idPrefix: "csignup-pw" })}
         <button class="btn btn-primary btn-block" type="submit">Create account</button>
       </form>
       <div class="divider"></div>
@@ -1424,7 +1552,8 @@ export async function adminStaffPage(req, res, query) {
         <div class="field"><label>Full name</label><input name="fullName" required /></div>
         <div class="field"><label>Email</label><input type="email" name="email" required /></div>
         <div class="field"><label>Mobile</label><input name="mobile" required /></div>
-        <div class="field"><label>Temporary password</label><input type="password" name="password" required minlength="6" /></div>
+        <div class="field"><label>Temporary password</label><input type="password" name="password" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" minlength="10" placeholder="At least 10 characters" /></div>
+        <div class="small muted" style="margin-top:-8px;margin-bottom:14px">${escapeHtml(PASSWORD_HINT)}</div>
         ${PERMISSIONS.map(
           (p) => `<label class="small" style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
             <input type="checkbox" name="${p.key}" value="1" /> ${escapeHtml(p.label)}
@@ -1480,10 +1609,26 @@ export async function accountPage(req, res, query) {
       <h2 style="font-size:16px;margin-bottom:14px">Password</h2>
       <form method="POST" action="/api/account/password">
         <div class="field"><label>Current password</label><input type="password" name="currentPassword" required /></div>
-        <div class="field"><label>New password</label><input type="password" name="newPassword" required minlength="6" /></div>
-        <div class="field"><label>Confirm new password</label><input type="password" name="confirmPassword" required minlength="6" /></div>
+        <div class="field"><label>New password</label><input type="password" name="newPassword" id="acct-pw-new" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" minlength="10" /></div>
+        <div class="small muted" style="margin-top:-8px;margin-bottom:14px">${escapeHtml(PASSWORD_HINT)}</div>
+        <div class="field"><label>Confirm new password</label><input type="password" name="confirmPassword" id="acct-pw-confirm" required /></div>
+        <div class="small" id="acct-pw-hint" style="margin-top:-8px;margin-bottom:14px"></div>
         <button class="btn btn-outline btn-block" type="submit">Update password</button>
       </form>
+      <script>
+        (function () {
+          var pw = document.getElementById("acct-pw-new");
+          var cf = document.getElementById("acct-pw-confirm");
+          var hint = document.getElementById("acct-pw-hint");
+          function check() {
+            if (!cf.value) { hint.textContent = ""; return; }
+            if (pw.value === cf.value) { hint.textContent = "✓ Passwords match"; hint.style.color = "var(--green)"; }
+            else { hint.textContent = "Passwords do not match"; hint.style.color = "var(--red)"; }
+          }
+          pw.addEventListener("input", check);
+          cf.addEventListener("input", check);
+        })();
+      </script>
     </div>
 
     <div class="form-card">
