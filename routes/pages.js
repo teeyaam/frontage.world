@@ -434,13 +434,14 @@ export async function sellNewPage(req, res, query) {
   const needsPayout = !user.bankAccount;
 
   const created = query.get("created");
+  const deleted = query.get("deleted");
   const err = query.get("err");
 
   const listRows = myListings
     .map(
       (l) => `<div class="job-row row-between">
         <div><strong>${escapeHtml(l.title)}</strong><div class="small muted">${escapeHtml(l.venue)} · ${money(l.price)}/mo</div></div>
-        <div><a href="/listing/${l.id}" class="small" style="color:var(--orange)">View →</a> &nbsp; <a href="/sell/insights/${l.id}" class="small" style="color:var(--blue)">Insights →</a></div>
+        <div><a href="/listing/${l.id}" class="small" style="color:var(--orange)">View →</a> &nbsp; <a href="/sell/edit/${l.id}" class="small" style="color:var(--ink)">Edit →</a> &nbsp; <a href="/sell/insights/${l.id}" class="small" style="color:var(--blue)">Insights →</a></div>
       </div>`
     )
     .join("");
@@ -449,6 +450,7 @@ export async function sellNewPage(req, res, query) {
     <h1 style="font-size:22px;margin-bottom:6px">List your space</h1>
     <p class="muted" style="margin-bottom:20px">We only ask for business and payout details the first time you list.</p>
     ${created ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Listing created — it's live on the marketplace.</div>` : ""}
+    ${deleted ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Listing deleted.</div>` : ""}
     ${err ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(err)}</div>` : ""}
 
     ${myListings.length ? `<div class="panel" style="margin-bottom:24px"><h3 style="font-size:14px;margin-bottom:10px">Your listings</h3><div class="job-list">${listRows}</div></div>` : ""}
@@ -507,6 +509,104 @@ export async function sellNewPage(req, res, query) {
     <script src="/wall-visualizer.js"></script>
   `;
   send(res, 200, await layout({ title: "List your space", activeNav: "sell", user, body }));
+}
+
+// ---------------- Edit an existing listing (owner only) ----------------
+export async function editListingPage(req, res, id, query) {
+  const user = await requireUser(req, res, `/sell/edit/${id}`);
+  if (!user) return;
+  const listing = await db.getListingById(id);
+  if (!listing || listing.ownerId !== user.id) {
+    return send(res, 404, await layout({ title: "Not found", user, body: "<p>Listing not found.</p>" }));
+  }
+
+  const updated = query.get("updated");
+  const err = query.get("err");
+  const photos = listing.photos || [];
+
+  const photoRows = photos
+    .map(
+      (p, i) => `<div class="row-between" style="margin-bottom:8px;gap:10px">
+        <img src="${escapeHtml(p)}" alt="" style="width:72px;height:54px;object-fit:cover;border-radius:6px;border:1px solid var(--border)" />
+        <div style="display:flex;gap:6px;flex:1;justify-content:flex-end;flex-wrap:wrap">
+          ${
+            i > 0
+              ? `<form method="POST" action="/api/listings/${id}/photos/${i}/move/up"><button class="btn btn-outline btn-sm" type="submit">↑ Move up</button></form>`
+              : ""
+          }
+          ${
+            i < photos.length - 1
+              ? `<form method="POST" action="/api/listings/${id}/photos/${i}/move/down"><button class="btn btn-outline btn-sm" type="submit">↓ Move down</button></form>`
+              : ""
+          }
+          <form method="POST" action="/api/listings/${id}/photos/${i}/remove"><button class="btn btn-outline btn-sm" type="submit">Remove</button></form>
+        </div>
+      </div>`
+    )
+    .join("");
+
+  const body = `
+    <a href="/sell/new" class="small muted">← Back to your listings</a>
+    <h1 style="font-size:22px;margin:10px 0 6px">Edit listing</h1>
+    <p class="muted" style="margin-bottom:20px">${escapeHtml(listing.title)} · ${escapeHtml(listing.venue)}</p>
+    ${updated ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Listing updated.</div>` : ""}
+    ${err ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(err)}</div>` : ""}
+
+    <div class="panel" style="margin-bottom:24px">
+      <h2 style="font-size:15px;margin-bottom:12px">Photos</h2>
+      ${photos.length ? photoRows : `<p class="small muted" style="margin-bottom:12px">No photos yet.</p>`}
+      <form method="POST" action="/api/listings/${id}/photos" enctype="multipart/form-data" style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input type="file" name="photos" accept="image/*" multiple />
+        <button class="btn btn-outline btn-sm" type="submit">Add photos</button>
+      </form>
+      <div class="small muted" style="margin-top:8px">${photos.length}/8 photos used.</div>
+    </div>
+
+    <div class="form-card form-card-wide" style="margin-bottom:24px">
+      <h2 style="font-size:16px;margin-bottom:14px">Space details</h2>
+      <form method="POST" action="/api/listings/${id}/update">
+        <div class="form-row">
+          <div class="field"><label>Business or venue name</label><input name="venue" required value="${escapeHtml(listing.venue)}" /></div>
+          <div class="field"><label>Listing title</label><input name="title" required value="${escapeHtml(listing.title)}" /></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>Category</label>
+            <select name="category">
+              ${CATEGORIES.map((c) => `<option value="${c}"${c === listing.category ? " selected" : ""}>${CATEGORY_LABEL[c]}</option>`).join("")}
+            </select>
+          </div>
+          <div class="field"><label>Space type (optional)</label><input name="subtype" value="${escapeHtml(listing.subtype || "")}" /></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>Suburb</label><input name="suburb" required value="${escapeHtml(listing.suburb)}" /></div>
+          <div class="field"><label>Premises address</label><input name="address" required value="${escapeHtml(listing.address)}" /></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>Map latitude (optional)</label><input type="number" step="any" name="lat" value="${listing.lat != null ? listing.lat : ""}" /></div>
+          <div class="field"><label>Map longitude (optional)</label><input type="number" step="any" name="lng" value="${listing.lng != null ? listing.lng : ""}" /></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required value="${listing.sizeW}" /></div>
+          <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required value="${listing.sizeH}" /></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>Monthly rate (AUD)</label><input type="number" name="price" required value="${listing.price}" /></div>
+          <div class="field"><label>Estimated daily eyes</label><input type="number" name="estimatedEyesPerDay" value="${listing.estimatedEyesPerDay || ""}" /></div>
+        </div>
+        <div class="field"><label>Description</label><textarea name="desc" rows="3">${escapeHtml(listing.desc || "")}</textarea></div>
+        <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Save changes</button>
+      </form>
+    </div>
+
+    <div class="panel" style="border-color:var(--red)">
+      <h2 style="font-size:15px;margin-bottom:8px;color:var(--red)">Delete this listing</h2>
+      <p class="small muted" style="margin-bottom:12px">Takes it off the marketplace immediately. Existing leases and their history are kept — this only affects new bookings.</p>
+      <form method="POST" action="/api/listings/${id}/delete" onsubmit="return confirm('Delete this listing? It will come off the marketplace immediately.');">
+        <button class="btn btn-outline btn-block" type="submit" style="color:var(--red);border-color:var(--red)">Delete listing</button>
+      </form>
+    </div>
+  `;
+  send(res, 200, await layout({ title: "Edit listing", activeNav: "sell", user, body }));
 }
 
 // ---------------- Seller listing insights ----------------

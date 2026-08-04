@@ -217,6 +217,107 @@ export async function claimListingHandler(req, res, token) {
   redirect(res, `/listing/${claimed.id}`);
 }
 
+// ---------------- Listing management (owner: edit details / photos / delete) ----------------
+async function requireOwnedListing(req, res, id) {
+  const user = await currentUser(req);
+  if (!user) {
+    redirect(res, `/onboarding?next=${encodeURIComponent(`/sell/edit/${id}`)}`);
+    return null;
+  }
+  const listing = await db.getListingById(id);
+  if (!listing || listing.ownerId !== user.id) {
+    badRequest(res, "Not your listing.");
+    return null;
+  }
+  return listing;
+}
+
+export async function updateListingHandler(req, res, id) {
+  const listing = await requireOwnedListing(req, res, id);
+  if (!listing) return;
+  const b = await readBody(req);
+  const sizeW = parseInt(b.sizeW, 10);
+  const sizeH = parseInt(b.sizeH, 10);
+  const price = parseFloat(b.price);
+  if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price) {
+    return badRequest(res, "Missing required listing fields.");
+  }
+  const category = isValidCategory(b.category) ? b.category : listing.category;
+  const estimatedEyesPerDay = parseInt(b.estimatedEyesPerDay, 10) || estimateEyes({ category, sizeW, sizeH });
+  const manualLat = parseFloat(b.lat);
+  const manualLng = parseFloat(b.lng);
+  const coords = Number.isFinite(manualLat) && Number.isFinite(manualLng) ? { lat: manualLat, lng: manualLng } : { lat: listing.lat, lng: listing.lng };
+
+  await db.updateListing(id, {
+    title: b.title,
+    venue: b.venue,
+    category,
+    subtype: b.subtype || null,
+    suburb: b.suburb,
+    address: b.address,
+    sizeW,
+    sizeH,
+    price,
+    desc: b.desc || "",
+    estimatedEyesPerDay,
+    lat: coords.lat,
+    lng: coords.lng,
+  });
+  redirect(res, `/sell/edit/${id}?updated=1`);
+}
+
+export async function addListingPhotosHandler(req, res, id) {
+  const listing = await requireOwnedListing(req, res, id);
+  if (!listing) return;
+  const ok = await runUpload(req, res, uploadListingPhotos, {
+    onError: (message) => redirect(res, `/sell/edit/${id}?err=${encodeURIComponent(message)}`),
+  });
+  if (!ok) return;
+  const existingPhotos = listing.photos || [];
+  const newPhotos = (req.files || []).map((f) => photoPublicUrl(f));
+  if (existingPhotos.length + newPhotos.length > 8) {
+    return badRequest(res, "A listing can have at most 8 photos — remove some before adding more.");
+  }
+  await db.updateListing(id, { photos: [...existingPhotos, ...newPhotos] });
+  redirect(res, `/sell/edit/${id}?updated=1`);
+}
+
+export async function removeListingPhotoHandler(req, res, id, index) {
+  const listing = await requireOwnedListing(req, res, id);
+  if (!listing) return;
+  const photos = (listing.photos || []).slice();
+  const i = parseInt(index, 10);
+  if (i >= 0 && i < photos.length) photos.splice(i, 1);
+  await db.updateListing(id, { photos });
+  redirect(res, `/sell/edit/${id}`);
+}
+
+export async function moveListingPhotoHandler(req, res, id, index, direction) {
+  const listing = await requireOwnedListing(req, res, id);
+  if (!listing) return;
+  const photos = (listing.photos || []).slice();
+  const i = parseInt(index, 10);
+  const j = direction === "up" ? i - 1 : i + 1;
+  if (i >= 0 && i < photos.length && j >= 0 && j < photos.length) {
+    [photos[i], photos[j]] = [photos[j], photos[i]];
+  }
+  await db.updateListing(id, { photos });
+  redirect(res, `/sell/edit/${id}`);
+}
+
+// Reuses the same removeListing() the admin moderation tools call — a
+// seller "deleting" their own listing and a customer-service rep removing
+// one for cause both just take it off browse (status: "removed"), keeping
+// booking/job-order history intact rather than a hard SQL delete (which
+// would violate the FK from bookings/job_orders to listings anyway once
+// a listing has ever been leased).
+export async function deleteListingHandler(req, res, id) {
+  const listing = await requireOwnedListing(req, res, id);
+  if (!listing) return;
+  await db.removeListing(id, "Removed by the listing owner.", listing.ownerId);
+  redirect(res, "/sell/new?deleted=1");
+}
+
 // ---------------- Bookings ----------------
 // Backs the embedded Stripe Elements card field on bookPage — creates a
 // PaymentIntent for exactly this listing+term, without creating a booking

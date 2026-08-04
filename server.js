@@ -89,6 +89,7 @@ const server = http.createServer(async (req, res) => {
     if (method === "GET" && (m = pathname.match(/^\/contract\/([^/]+)$/))) return await pages.contractViewPage(req, res, m[1]);
     if (method === "GET" && (m = pathname.match(/^\/admin\/deals\/([^/]+)$/))) return await pages.adminDealDetailPage(req, res, m[1]);
     if (method === "GET" && (m = pathname.match(/^\/claim\/([^/]+)$/))) return await pages.claimListingPage(req, res, m[1]);
+    if (method === "GET" && (m = pathname.match(/^\/sell\/edit\/([^/]+)$/))) return await pages.editListingPage(req, res, m[1], query);
     if (method === "GET" && (m = pathname.match(/^\/api\/contractor-applications\/([^/]+)\/doc\/([^/]+)$/))) return await api.downloadContractorDoc(req, res, m[1], m[2]);
     if (method === "GET" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/messages$/))) return await api.getJobOrderMessagesJson(req, res, m[1]);
     if (method === "GET" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/messages$/))) return await api.getListingMessagesJson(req, res, m[1], query);
@@ -105,6 +106,11 @@ const server = http.createServer(async (req, res) => {
     if (method === "POST" && pathname === "/api/bookings") return await api.createBookingHandler(req, res);
     if (method === "POST" && pathname === "/api/bdr/listings") return await api.createBdrListingHandler(req, res);
     if (method === "POST" && (m = pathname.match(/^\/api\/claim\/([^/]+)$/))) return await api.claimListingHandler(req, res, m[1]);
+    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/update$/))) return await api.updateListingHandler(req, res, m[1]);
+    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/photos$/))) return await api.addListingPhotosHandler(req, res, m[1]);
+    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/photos\/([^/]+)\/remove$/))) return await api.removeListingPhotoHandler(req, res, m[1], m[2]);
+    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/photos\/([^/]+)\/move\/(up|down)$/))) return await api.moveListingPhotoHandler(req, res, m[1], m[2], m[3]);
+    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/delete$/))) return await api.deleteListingHandler(req, res, m[1]);
     if (method === "POST" && pathname === "/api/account/profile") return await api.updateAccountProfile(req, res);
     if (method === "POST" && pathname === "/api/account/password") return await api.updateAccountPassword(req, res);
     if (method === "POST" && pathname === "/api/account/banking") return await api.updateAccountBanking(req, res);
