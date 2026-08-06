@@ -1,7 +1,22 @@
 import { layout, contractorLayout, escapeHtml } from "../lib/layout.js";
 import { currentUser, currentContractor } from "../lib/auth.js";
 import * as db from "../lib/db.js";
-import { money, formatMm, formatDate, svgSpaceDiagram, svgEyesGauge, STAGE_LABELS, STAGES, estimateJobFee, leaseEndIso, daysUntil } from "../lib/format.js";
+import {
+  money,
+  formatMm,
+  formatDate,
+  svgSpaceDiagram,
+  svgEyesGauge,
+  STAGE_LABELS,
+  STAGES,
+  estimateJobFee,
+  leaseEndIso,
+  daysUntil,
+  GST_RATE,
+  GST_LABEL,
+  gstOn,
+  withGst,
+} from "../lib/format.js";
 import { CATEGORIES, CATEGORY_LABEL } from "../lib/categories.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { isStripeConfigured } from "../lib/payments.js";
@@ -157,7 +172,7 @@ export async function browsePage(req, res, query) {
           <h3 style="font-size:16px">${escapeHtml(l.title)}</h3>
           <div class="muted small">${escapeHtml(l.venue)} · ${escapeHtml(locationLine(l))}${l.subtype ? ` · ${escapeHtml(l.subtype)}` : ""}</div>
           <div class="row-between" style="margin-top:12px;padding-top:12px;border-top:1px solid #EAE7DF">
-            <div class="mono" style="font-weight:700">${money(l.price)}<span class="muted small"> /mo</span></div>
+            <div class="mono" style="font-weight:700">${money(l.price)}<span class="muted small"> /mo + GST</span></div>
             <span class="small" style="color:var(--orange);font-weight:600">View space →</span>
           </div>
         </div>
@@ -525,13 +540,13 @@ export async function listingDetailPage(req, res, id) {
         <p style="margin-bottom:18px">${escapeHtml(listing.desc)}</p>
         <div class="panel-tint stat-grid-3" style="margin-bottom:10px">
           <div><div class="mono" style="font-weight:700">${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)}</div><div class="small muted">Space size</div></div>
-          <div><div class="mono" style="font-weight:700">${money(listing.price)}/mo</div><div class="small muted">Lease rate</div></div>
+          <div><div class="mono" style="font-weight:700">${money(listing.price)}/mo</div><div class="small muted">Lease rate (${GST_LABEL})</div></div>
           <div><div class="mono" style="font-weight:700">${escapeHtml(listing.footfall)}</div><div class="small muted">Foot traffic</div></div>
         </div>
         <details class="small muted" style="margin-bottom:18px">
           <summary style="cursor:pointer;color:var(--orange);font-weight:600">What do these numbers mean?</summary>
           <div style="margin-top:8px;line-height:1.6">
-            <strong>Lease rate</strong> is the monthly rent paid to the space owner. Installing and removing your ad is quoted separately by the contractor before you commit — it is not included in this rate.<br/>
+            <strong>Lease rate</strong> is the monthly rent paid to the space owner, shown excluding GST — GST is added at checkout. Installing and removing your ad is quoted separately by the contractor before you commit; it is not included in this rate.<br/>
             <strong>Foot traffic</strong> is the space owner's own description of how busy the location is.<br/>
             ${
               listing.estimatedEyesPerDay
@@ -570,7 +585,8 @@ export async function listingDetailPage(req, res, id) {
                <a href="/sell/insights/${listing.id}" class="btn btn-primary btn-block">View insights</a>
                <a href="/seller/inquiries" class="btn btn-outline btn-block" style="margin-top:10px">Buyer inquiries</a>`
             : `<a href="/book/${listing.id}" class="btn btn-primary btn-block">Book this space</a>
-               ${user ? `<a href="/listing/${listing.id}/chat" class="btn btn-outline btn-block" style="margin-top:10px">Ask the seller a question</a>` : ""}`
+               <a href="/listing/${listing.id}/chat" class="btn btn-outline btn-block" style="margin-top:10px">Ask the seller a question</a>
+               ${user ? "" : `<div class="small muted" style="text-align:center;margin-top:8px">You'll need an account to message — it's how the seller's reply reaches you.</div>`}`
         }
       </div>
     </div>
@@ -605,12 +621,41 @@ export async function listingChatPage(req, res, listingId, query) {
       <div class="chat-thread" data-poll-url="/api/listings/${listing.id}/messages?buyer=${encodeURIComponent(buyerId)}" data-current-user="${escapeHtml(user.id)}">
         ${await renderChatBubbles(messages, user.id)}
       </div>
+      ${
+        !isOwner && messages.length === 0
+          ? `<div style="margin-top:12px">
+               <div class="small muted" style="margin-bottom:8px">Not sure what to ask? Tap one to start:</div>
+               <div style="display:flex;flex-wrap:wrap;gap:8px">
+                 ${[
+                   "Is this space still available?",
+                   "Can I see more photos of the wall?",
+                   "What condition is the surface in?",
+                   "Are there any restrictions on what I can advertise?",
+                   "When could installation happen?",
+                 ]
+                   .map((q) => `<button type="button" class="btn btn-outline btn-sm starter-q">${escapeHtml(q)}</button>`)
+                   .join("")}
+               </div>
+             </div>`
+          : ""
+      }
       <form method="POST" action="/api/listings/${listing.id}/messages" class="chat-form" style="margin-top:10px">
         <input type="hidden" name="buyerId" value="${escapeHtml(buyerId)}" />
-        <input name="body" placeholder="Ask a question..." required />
+        <input name="body" id="chat-body" placeholder="Ask a question..." required />
         <button class="btn btn-primary btn-sm" type="submit">Send</button>
       </form>
     </div>
+    <script>
+      (function () {
+        var input = document.getElementById('chat-body');
+        [].forEach.call(document.querySelectorAll('.starter-q'), function (b) {
+          b.addEventListener('click', function () {
+            input.value = b.textContent;
+            input.focus();
+          });
+        });
+      })();
+    </script>
   `;
   send(res, 200, await layout({ title: "Messages", activeNav: isOwner ? "seller-inquiries" : "browse", user, body }));
 }
@@ -870,7 +915,7 @@ export async function sellNewPage(req, res, query) {
         </div>
         <button type="button" id="ar-preview-btn" class="btn btn-outline btn-block" style="margin-bottom:14px">📷 Preview on your wall</button>
         <div class="form-row">
-          <div class="field"><label>Monthly rate (AUD)</label><input type="number" name="price" required min="1" step="0.01" placeholder="100" /></div>
+          <div class="field"><label>Monthly rate (AUD, excl. GST)</label><input type="number" name="price" required min="1" step="0.01" placeholder="100" /></div>
           <div class="field"><label>Estimated daily eyes (leave blank to auto-estimate)</label><input type="number" name="estimatedEyesPerDay" min="0" placeholder="e.g. 250" /></div>
         </div>
         <div class="field"><label>Description</label><textarea name="desc" rows="3" placeholder="What makes this space worth advertising on?"></textarea></div>
@@ -982,7 +1027,7 @@ export async function editListingPage(req, res, id, query) {
           <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required min="1" value="${listing.sizeH}" /></div>
         </div>
         <div class="form-row">
-          <div class="field"><label>Monthly rate (AUD)</label><input type="number" name="price" required min="1" step="0.01" value="${listing.price}" /></div>
+          <div class="field"><label>Monthly rate (AUD, excl. GST)</label><input type="number" name="price" required min="1" step="0.01" value="${listing.price}" /></div>
           <div class="field"><label>Estimated daily eyes</label><input type="number" name="estimatedEyesPerDay" min="0" value="${listing.estimatedEyesPerDay || ""}" /></div>
         </div>
         <div class="field"><label>Description</label><textarea name="desc" rows="3">${escapeHtml(listing.desc || "")}</textarea></div>
@@ -1078,7 +1123,7 @@ export async function bdrNewListingPage(req, res, query) {
           <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required min="1" placeholder="2000" /></div>
           <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required min="1" placeholder="3000" /></div>
         </div>
-        <div class="field"><label>Monthly rate (AUD)</label><input type="number" name="price" required min="1" step="0.01" placeholder="100" /></div>
+        <div class="field"><label>Monthly rate (AUD, excl. GST)</label><input type="number" name="price" required min="1" step="0.01" placeholder="100" /></div>
         <div class="field"><label>Description</label><textarea name="desc" rows="3"></textarea></div>
         <div class="field"><label>Photos (up to 8)</label><input type="file" name="photos" accept="image/*" multiple /></div>
         <div class="divider"></div>
@@ -1130,20 +1175,41 @@ export async function bookPage(req, res, listingId, query) {
     const booking = await db.getBookingById(confirmedBookingId);
     const jobOrder = booking ? (await db.getJobOrdersForSeller(booking.sellerId)).find((j) => j.bookingId === booking.id) : null;
     const payment = booking ? await db.getPaymentByBookingId(booking.id) : null;
+    const subtotal = payment.subtotalAmount != null ? Number(payment.subtotalAmount) : Number(payment.totalAmount);
+    const gstAmount = payment.gstAmount != null ? Number(payment.gstAmount) : 0;
     const body = `
-      <div class="panel" style="max-width:520px;margin:0 auto;text-align:center">
-        <div class="badge badge-blue" style="margin:0 auto 12px">Booking confirmed</div>
-        <h1 style="font-size:22px">${escapeHtml(listing.title)}</h1>
-        <p class="muted" style="margin-bottom:18px">${booking.term}-month lease · ${money(listing.price)}/mo · ${escapeHtml(listing.venue)}</p>
-        <div class="panel-tint" style="text-align:left;margin-bottom:16px">
-          <div class="row-between small"><span class="muted">Total charged today</span><span class="mono">${money(payment.totalAmount)}</span></div>
-          <div class="row-between small" style="margin-top:6px"><span class="muted">Frontage fee (15%, from seller payout)</span><span class="mono">${money(payment.feeAmount)}</span></div>
+      <div style="max-width:620px;margin:0 auto">
+        <div class="panel" style="text-align:center;margin-bottom:16px">
+          <div style="font-size:40px;line-height:1;margin-bottom:8px">✅</div>
+          <h1 style="font-size:22px;margin-bottom:4px">You're booked in</h1>
+          <p class="muted" style="margin-bottom:0">${escapeHtml(listing.title)} — ${booking.term}-month lease at ${escapeHtml(listing.venue)}</p>
         </div>
-        <div class="panel-tint" style="text-align:left">
-          <div style="font-weight:600;font-size:13px;margin-bottom:6px">Job order ${jobOrder.id}</div>
-          <div class="small muted">Status: ${STAGE_LABELS[jobOrder.status]}. A contractor will pick this up from the job-ping queue — check back on the job order once one accepts.</div>
+
+        <div class="panel" style="margin-bottom:16px">
+          <div class="row-between" style="margin-bottom:10px">
+            <h2 style="font-size:15px;margin:0">Tax invoice</h2>
+            <span class="small muted mono">${escapeHtml(payment.id)}</span>
+          </div>
+          <div class="row-between small"><span class="muted">${booking.term} months × ${money(booking.monthlyRate)}/mo</span><span class="mono">${money(subtotal)}</span></div>
+          <div class="row-between small" style="margin-top:6px"><span class="muted">GST (10%)</span><span class="mono">${money(gstAmount)}</span></div>
+          <div class="row-between" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-weight:700">
+            <span>Total paid</span><span class="mono">${money(payment.totalAmount)}</span>
+          </div>
+          <div class="small muted" style="margin-top:10px">Paid by ${escapeHtml(user.businessName || user.fullName)}${user.abn ? ` · ABN ${escapeHtml(user.abn)}` : ""}. A copy of this invoice has been emailed to ${escapeHtml(user.email)}.</div>
         </div>
-        <a href="/" class="btn btn-outline" style="margin-top:18px">Back to browse</a>
+
+        <div class="panel" style="margin-bottom:16px">
+          <h2 style="font-size:15px;margin-bottom:10px">What happens next</h2>
+          <ol class="small" style="padding-left:18px;line-height:1.8;margin:0">
+            <li><strong>A contractor picks up the job</strong> (reference <span class="mono">${escapeHtml(jobOrder.id)}</span>, currently ${STAGE_LABELS[jobOrder.status]}).</li>
+            <li><strong>They quote you for printing, installation and removal.</strong> That's billed separately by the contractor and is not part of the amount above.</li>
+            <li><strong>The seller confirms site access</strong> and the contractor books an install date.</li>
+            <li><strong>Your lease starts the day installation is completed</strong> — not today — and runs ${booking.term} months from then.</li>
+          </ol>
+        </div>
+
+        <a href="/account/leases" class="btn btn-primary btn-block">Track this lease</a>
+        <a href="/" class="btn btn-outline btn-block" style="margin-top:10px">Back to browse</a>
       </div>
     `;
     return send(res, 200, await layout({ title: "Booking confirmed", activeNav: "browse", user, body }));
@@ -1155,89 +1221,168 @@ export async function bookPage(req, res, listingId, query) {
   // Not configured yet → the original plaintext-card stub flow, so the app
   // stays fully testable before real Stripe keys exist (see lib/payments.js).
   const stripeConfigured = isStripeConfigured() && Boolean(process.env.STRIPE_PUBLISHABLE_KEY);
+  const installEstimate = estimateJobFee(listing.sizeW, listing.sizeH);
+  const heroPhoto = (listing.photos || [])[0];
   const body = `
     <a href="/listing/${listing.id}" class="small muted">← Back to listing</a>
-    <div class="two-col" style="margin-top:14px;align-items:start">
-      <div class="panel">
-        <h2 style="font-size:16px;margin-bottom:10px">Lease terms</h2>
-        <p class="small" style="line-height:1.6">
-          <strong>1. Space.</strong> ${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)} at ${escapeHtml(listing.venue)}, as listed.<br/>
-          <strong>2. Term.</strong> Fixed term of 6 or 12 months, commencing the date the assigned contractor marks installation complete — not the date this is signed. Auto-renews monthly at term end unless cancelled with 30 days' notice.<br/>
-          <strong>3. Rate.</strong> ${money(listing.price)} per month, billed to the payment method on file.<br/>
-          <strong>4. Install & removal.</strong> You engage and pay a Frontage-network contractor directly for printing, install and uninstall — separate from this lease.<br/>
-          <strong>5. Platform fee.</strong> Frontage deducts 15% from the seller's payout on each payment.<br/>
-          <strong>6. Early termination.</strong> Ending this lease early incurs a break fee equal to one month's rent (${money(listing.price)}).<br/>
-          <strong>7. Content & conduct.</strong> Advertising content must be lawful and meet the standards in the <a href="/terms" target="_blank" style="color:var(--orange)">Terms &amp; Conditions</a>. The seller warrants they have authority over the listed space. Misrepresentation, unlawful content, or interference with an installed ad by either party is a breach.<br/>
-          <strong>8. Breach & liability.</strong> A party in breach is liable for the other party's resulting losses. Frontage is the marketplace facilitator, not a party to this lease — losses caused by a buyer's or seller's wrongdoing are borne by the party at fault, not by Frontage, and each party indemnifies Frontage against claims arising from their own breach.
-        </p>
-        <div class="panel-tint" style="margin-top:16px">
-          <div style="font-weight:600;font-size:13px;margin-bottom:6px">Estimated contractor cost</div>
-          <div class="row-between small"><span class="muted">Print + install + uninstall (est.)</span><span class="mono" style="font-weight:700">${money(estimateJobFee(listing.sizeW, listing.sizeH))}</span></div>
-          <div class="small muted" style="margin-top:8px">Paid directly to the contractor who takes this job — separate from the lease payment below. This is an estimate; the assigned contractor may send a different final quote once they've confirmed site details.</div>
+    <div class="checkout" style="margin-top:14px">
+      <form method="POST" action="/api/bookings" id="booking-form">
+        <input type="hidden" name="listingId" value="${listing.id}" />
+
+        <!-- 1. What you're booking -->
+        <div class="panel checkout-step">
+          <h2 class="checkout-step-title"><span class="step-num">1</span> What you're booking</h2>
+          <div style="display:flex;gap:14px;align-items:center">
+            ${heroPhoto ? `<img src="${escapeHtml(heroPhoto)}" alt="" style="width:88px;height:66px;object-fit:cover;border-radius:8px;flex-shrink:0" />` : ""}
+            <div style="min-width:0">
+              <div style="font-weight:700">${escapeHtml(listing.title)}</div>
+              <div class="small muted">${escapeHtml(listing.venue)} · ${escapeHtml(locationLine(listing))}</div>
+              <div class="small muted">${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)} advertising space</div>
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="form-card">
-        <h2 style="font-size:16px;margin-bottom:14px">Confirm & pay</h2>
-        <form method="POST" action="/api/bookings" id="booking-form">
-          <input type="hidden" name="listingId" value="${listing.id}" />
-          <div class="field"><label>Lease term</label>
-            <select name="term" id="term-select">
-              <option value="6">6 months</option>
-              <option value="12" selected>12 months</option>
-            </select>
+
+        <!-- 2. Lease term -->
+        <div class="panel checkout-step">
+          <h2 class="checkout-step-title"><span class="step-num">2</span> Choose your lease term</h2>
+          <div class="term-options">
+            <label class="term-option">
+              <input type="radio" name="term" value="6" />
+              <span><strong>6 months</strong><span class="small muted term-option-total" data-term="6"></span></span>
+            </label>
+            <label class="term-option">
+              <input type="radio" name="term" value="12" checked />
+              <span><strong>12 months</strong><span class="small muted term-option-total" data-term="12"></span></span>
+            </label>
           </div>
-          <div class="panel-tint" style="margin-bottom:14px">
-            <div class="row-between small"><span class="muted">Monthly rate</span><span class="mono">${money(listing.price)}</span></div>
-            <div class="row-between small" style="margin-top:6px"><span class="muted" id="term-label">Term (12mo)</span><span class="mono" id="term-total">${money(listing.price * 12)}</span></div>
+          <p class="small muted" style="margin:10px 0 0">Your lease starts the day installation is completed, not today, and runs for the full term from then.</p>
+        </div>
+
+        <!-- 3. Costs -->
+        <div class="panel checkout-step">
+          <h2 class="checkout-step-title"><span class="step-num">3</span> What it costs</h2>
+
+          <div class="cost-block">
+            <div class="cost-block-head">
+              <span>Paid now to Frontage</span>
+              <span class="mono" id="grand-total">${money(withGst(listing.price * 12))}</span>
+            </div>
+            <div class="row-between small"><span class="muted"><span id="term-label">12 months</span> × ${money(listing.price)}/mo</span><span class="mono" id="term-subtotal">${money(listing.price * 12)}</span></div>
+            <div class="row-between small" style="margin-top:6px"><span class="muted">GST (10%)</span><span class="mono" id="term-gst">${money(gstOn(listing.price * 12))}</span></div>
+            <div class="small muted" style="margin-top:8px">Charged once, upfront, for the whole term — there is no monthly billing and no price difference for choosing a longer term.</div>
           </div>
-          <div class="field"><label>Type your name to sign</label><input name="signature" required placeholder="${escapeHtml(user.fullName)}" />
-            <div class="signature" id="sig-preview"></div>
+
+          <div class="cost-block" style="margin-top:12px">
+            <div class="cost-block-head">
+              <span>Paid separately to your installer
+                <button type="button" class="info-btn" data-info="install-info" aria-label="More about installation costs">i</button>
+              </span>
+              <span class="mono">~${money(withGst(installEstimate))}</span>
+            </div>
+            <div class="small muted">Estimated cost of printing your artwork, putting it up, and taking it down at the end of the lease.</div>
+            <div class="info-pop" id="install-info" hidden>
+              <strong>About installation costs</strong>
+              <p class="small" style="margin:6px 0 0;line-height:1.6">
+                This is a <strong>one-off upfront cost covering both installation and removal</strong> — you are not charged again to take the ad down at the end of your lease.
+                It is billed by the independent contractor who takes your job, not by Frontage, so it is not included in the amount above.
+                The figure shown is an estimate based on your space's size; the contractor sends you a firm quote to approve before any work starts.
+              </p>
+            </div>
           </div>
-          <label class="small" style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px">
-            <input type="checkbox" required style="margin-top:2px" /> I have read and agree to the lease terms shown on this page.
-          </label>
-          <label class="small" style="display:flex;gap:8px;align-items:flex-start;margin-bottom:14px">
-            <input type="checkbox" required style="margin-top:2px" /> I have read and agree to the <a href="/terms" target="_blank" style="color:var(--orange)">Frontage Terms &amp; Conditions</a>, including the conduct, breach, and liability provisions.
-          </label>
+
+          <div class="cost-total">
+            <span>Estimated total cost of this campaign</span>
+            <span class="mono" id="campaign-total">${money(withGst(listing.price * 12) + withGst(installEstimate))}</span>
+          </div>
+        </div>
+
+        <!-- 4. Details & authorisation -->
+        <div class="panel checkout-step">
+          <h2 class="checkout-step-title"><span class="step-num">4</span> Your details &amp; payment</h2>
+
+          <div class="form-row">
+            <div class="field"><label>Business name <span class="muted">(for your invoice)</span></label><input name="businessName" value="${escapeHtml(user.businessName || "")}" placeholder="OpenHouse Realty" /></div>
+            <div class="field"><label>ABN <span class="muted">(optional)</span></label><input name="abn" value="${escapeHtml(user.abn || "")}" placeholder="12 345 678 901" inputmode="numeric" /></div>
+          </div>
+          <p class="small muted" style="margin:-4px 0 14px">Used on the tax invoice we email you. Leave blank if you're booking as an individual.</p>
+
           ${
             stripeConfigured
-              ? `<div class="divider"></div>
-          <h3 style="font-size:13px;margin-bottom:10px">Payment details</h3>
-          <div class="field"><label>Card</label>
+              ? `<div class="field"><label>Card details</label>
             <div id="card-element" style="padding:11px 13px;border-radius:8px;border:1px solid var(--border);background:var(--concrete)"></div>
             <div id="card-errors" class="small" style="color:var(--red);margin-top:6px"></div>
           </div>`
               : needsCard
-              ? `<div class="divider"></div>
-          <h3 style="font-size:13px;margin-bottom:10px">Add a payment method</h3>
-          <p class="small muted" style="margin-bottom:10px">Only asked the first time you book.</p>
-          <div class="field"><label>Card number</label><input name="cardNumber" required placeholder="4242 4242 4242 4242" maxlength="19" /></div>
+              ? `<div class="field"><label>Card number</label><input name="cardNumber" required placeholder="4242 4242 4242 4242" maxlength="19" /></div>
           <div style="display:flex;gap:10px">
             <div class="field" style="flex:1"><label>Expiry</label><input name="expiry" required placeholder="MM/YY" /></div>
             <div class="field" style="flex:1"><label>CVC</label><input name="cvc" required placeholder="123" /></div>
           </div>`
-              : `<div class="small muted" style="margin-bottom:14px">Charging card on file ending ${escapeHtml(user.cardLast4)}.</div>`
+              : `<div class="small muted" style="margin-bottom:14px">Charging your card on file ending ${escapeHtml(user.cardLast4)}.</div>`
           }
-          <button class="btn btn-primary btn-block" type="submit" id="pay-btn">Sign & pay ${money(listing.price * 12)}</button>
-        </form>
-      </div>
+
+          <div class="field"><label>Type your full name to sign the lease</label>
+            <input name="signature" required placeholder="${escapeHtml(user.fullName)}" />
+            <div class="signature" id="sig-preview"></div>
+            <div class="hint">This is your electronic signature on the lease agreement between you and the space owner — it's what makes the agreement binding, and it's recorded on your copy of the contract.</div>
+          </div>
+
+          <label class="small consent-row">
+            <input type="checkbox" name="agreeTerms" required />
+            <span>I have read and agree to the <a href="/terms/buyer" target="_blank" style="color:var(--orange)">Buyer Terms &amp; Conditions</a> and the lease agreement, and I authorise Frontage to charge the amount shown above.</span>
+          </label>
+
+          <button class="btn btn-primary btn-block btn-lg" type="submit" id="pay-btn">Pay ${money(withGst(listing.price * 12))} &amp; confirm booking</button>
+          <p class="small muted" style="text-align:center;margin:10px 0 0">You'll get a tax invoice by email straight away.</p>
+        </div>
+      </form>
     </div>
     ${stripeConfigured ? `<script src="https://js.stripe.com/v3/"></script>` : ""}
     <script>
       (function() {
         var rate = ${listing.price};
-        var sel = document.getElementById('term-select');
-        var total = document.getElementById('term-total');
-        var label = document.getElementById('term-label');
+        var installIncGst = ${withGst(installEstimate)};
+        var GST = ${GST_RATE};
         var btn = document.getElementById('pay-btn');
         function fmt(n) { return '$' + n.toLocaleString('en-AU', {minimumFractionDigits:2, maximumFractionDigits:2}); }
-        function update() {
-          var term = parseInt(sel.value, 10);
-          total.textContent = fmt(rate * term);
-          label.textContent = 'Term (' + term + 'mo)';
-          if (btn) btn.textContent = 'Sign & pay ' + fmt(rate * term);
+        function round2(n) { return Math.round(n * 100) / 100; }
+
+        function selectedTerm() {
+          var checked = document.querySelector('input[name=term]:checked');
+          return checked ? parseInt(checked.value, 10) : 12;
         }
-        sel.addEventListener('change', update);
+
+        function update() {
+          var term = selectedTerm();
+          var sub = round2(rate * term);
+          var gst = round2(sub * GST);
+          var incGst = round2(sub + gst);
+          document.getElementById('term-subtotal').textContent = fmt(sub);
+          document.getElementById('term-gst').textContent = fmt(gst);
+          document.getElementById('grand-total').textContent = fmt(incGst);
+          document.getElementById('term-label').textContent = term + ' months';
+          document.getElementById('campaign-total').textContent = fmt(round2(incGst + installIncGst));
+          if (btn) btn.innerHTML = 'Pay ' + fmt(incGst) + ' &amp; confirm booking';
+        }
+
+        // Per-option "total" hints inside the 6/12-month radio labels.
+        [].forEach.call(document.querySelectorAll('.term-option-total'), function (el) {
+          var t = parseInt(el.getAttribute('data-term'), 10);
+          el.textContent = fmt(round2(rate * t * (1 + GST))) + ' inc. GST';
+        });
+        [].forEach.call(document.querySelectorAll('input[name=term]'), function (r) {
+          r.addEventListener('change', update);
+        });
+        update();
+
+        // "i" buttons reveal their explanatory block in place.
+        [].forEach.call(document.querySelectorAll('.info-btn'), function (b) {
+          b.addEventListener('click', function () {
+            var pop = document.getElementById(b.getAttribute('data-info'));
+            if (pop) pop.hidden = !pop.hidden;
+          });
+        });
+
         var sigInput = document.querySelector('input[name=signature]');
         var sigPreview = document.getElementById('sig-preview');
         sigInput.addEventListener('input', function() { sigPreview.textContent = sigInput.value; });
@@ -1262,12 +1407,12 @@ export async function bookPage(req, res, listingId, query) {
         form.addEventListener('submit', function (e) {
           e.preventDefault();
           btn.disabled = true;
-          var originalText = btn.textContent;
+          var originalHtml = btn.innerHTML;
           btn.textContent = 'Processing payment...';
           fetch('/api/bookings/create-intent', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ listingId: listingId, term: parseInt(sel.value, 10) }),
+            body: JSON.stringify({ listingId: listingId, term: selectedTerm() }),
           })
             .then(function (r) { return r.json().then(function (data) { if (!r.ok) throw new Error(data.error || 'Could not start payment.'); return data; }); })
             .then(function (data) {
@@ -1287,7 +1432,7 @@ export async function bookPage(req, res, listingId, query) {
             .catch(function (err) {
               document.getElementById('card-errors').textContent = err.message;
               btn.disabled = false;
-              btn.textContent = originalText;
+              btn.innerHTML = originalHtml;
             });
         });
         `
@@ -1838,6 +1983,11 @@ export async function accountPage(req, res, query) {
         <div class="field"><label>Email</label><input type="email" name="email" required value="${escapeHtml(user.email)}" /></div>
         <div class="field"><label>Mobile</label><input name="mobile" required value="${escapeHtml(user.mobile)}" /></div>
         <div class="field"><label>Address</label><input name="address" value="${escapeHtml(user.address || "")}" /></div>
+        <div class="form-row">
+          <div class="field"><label>Business name (optional)</label><input name="businessName" value="${escapeHtml(user.businessName || "")}" placeholder="OpenHouse Realty" /></div>
+          <div class="field"><label>ABN (optional)</label><input name="abn" value="${escapeHtml(user.abn || "")}" placeholder="12 345 678 901" inputmode="numeric" /></div>
+        </div>
+        <div class="small muted" style="margin:-4px 0 14px">Shown on the tax invoices for spaces you book and the payouts you receive.</div>
         <div class="field"><label>Google Business Profile URL (optional)</label><input name="googleBusinessUrl" value="${escapeHtml(user.googleBusinessUrl || "")}" placeholder="https://g.page/your-business" /></div>
         <button class="btn btn-primary btn-block" type="submit">Save contact info</button>
       </form>
@@ -2175,12 +2325,122 @@ export async function howItWorksPage(req, res) {
   send(res, 200, await layout({ title: "How it works", activeNav: "how-it-works", user, body }));
 }
 
+// Terms come in three flavours sharing one set of clauses: a general version
+// (/terms, linked in the footer), and buyer- and seller-specific versions
+// linked from checkout and the listing form. A buyer signing a lease
+// shouldn't have to read the seller's payout obligations to find the two
+// clauses that bind them, and vice versa.
+function termsSection(id, heading, bodyHtml) {
+  return `<h3 id="${id}" style="font-size:14px;margin-bottom:6px">${heading}</h3>
+      <p class="small muted" style="margin-bottom:14px">${bodyHtml}</p>`;
+}
+
+const TERMS_CLAUSES = {
+  whatFrontageIs: `Frontage is a marketplace that connects owners of physical advertising space ("sellers"), advertisers who lease that space ("buyers"), and independent contractors who print, install, and remove advertising. Frontage facilitates introductions, contracts, and payments — it is not a party to the lease between buyer and seller, nor to the service agreement between a buyer and a contractor.`,
+  accounts: `You must provide accurate account information and keep your login credentials secure. You are responsible for all activity under your account. Accounts may be suspended or closed for breach of these terms.`,
+  gst: `All prices displayed on Frontage — listing rates, lease totals, and contractor estimates — are <strong>exclusive of GST</strong>. GST is calculated and added at checkout, and shown as a separate line on the tax invoice issued for every booking.`,
+  prohibited: `The following are breaches of these terms by any user: misrepresenting a listing, account, or credentials; displaying unlawful, misleading, or offensive advertising content; damaging, obscuring, or removing installed advertising before term end without agreement; circumventing Frontage to avoid platform fees on a connection made through the platform; and any fraudulent or unlawful use of the platform.`,
+  breach: `Frontage may suspend or terminate accounts, remove listings, cancel job orders, and withhold pending payouts connected to a breach while it is investigated. <strong>A party who breaches these terms or a lease is responsible for the losses their breach causes to the other party.</strong> Frontage may recover from the breaching party any costs, fees, or losses Frontage itself incurs because of the breach.`,
+  liability: `To the maximum extent permitted by law, Frontage is not liable for loss arising from the conduct of buyers, sellers, or contractors — including misrepresentation, breach of lease, defective installation, or property damage. Each user indemnifies Frontage against claims, losses, and costs arising from that user's own breach of these terms, their listings or advertising content, or their dealings with other users. Nothing in these terms excludes rights that cannot be excluded under applicable consumer law.`,
+  changes: `Frontage may update these terms; material changes will be notified via the platform. Continued use after a change is acceptance of the updated terms.`,
+  governingLaw: `These terms are governed by the laws of New South Wales, Australia.`,
+};
+
+export async function buyerTermsPage(req, res) {
+  const user = await currentUser(req);
+  const body = `
+    <div class="panel" style="max-width:720px;margin:0 auto">
+      <h1 style="font-size:22px;margin-bottom:4px">Buyer Terms &amp; Conditions</h1>
+      <p class="small muted" style="margin-bottom:18px">These terms apply when you lease advertising space through Frontage. Listing a space instead? See the <a href="/terms/seller" style="color:var(--orange)">Seller Terms</a>.</p>
+
+      ${termsSection("b1", "1. What Frontage is", TERMS_CLAUSES.whatFrontageIs)}
+      ${termsSection("b2", "2. Your account", TERMS_CLAUSES.accounts)}
+      ${termsSection(
+        "b3",
+        "3. What you're paying for",
+        `Booking a space charges you the full lease term up front, in one payment — there is no monthly billing, and the rate does not change with term length. The amount covers rent for the space only.`
+      )}
+      ${termsSection("b4", "4. Prices and GST", TERMS_CLAUSES.gst)}
+      ${termsSection(
+        "b5",
+        "5. Installation and removal",
+        `Printing your artwork, installing it, and removing it at the end of the lease are carried out by an independent contractor, not by Frontage or the space owner. The contractor quotes you directly and you pay them directly — this cost is separate from, and not included in, the amount Frontage charges you. <strong>It is a single upfront cost covering both installation and removal;</strong> you are not billed again to take the advertising down. Estimates shown before booking are indicative only, based on the size of the space — the assigned contractor issues a firm quote for your approval before any work begins.`
+      )}
+      ${termsSection(
+        "b6",
+        "6. When your lease starts and ends",
+        `Your lease term begins on the day the contractor confirms installation is complete — not the day you book or pay — and runs for the full 6 or 12 months from that date. It then auto-renews monthly unless cancelled with 30 days' notice. Ending the lease early incurs a break fee equal to one month's rent.`
+      )}
+      ${termsSection(
+        "b7",
+        "7. Your advertising content",
+        `You are responsible for the advertising you display: it must be lawful, accurate, not misleading, and must not be offensive. You warrant you hold the rights to any artwork, trade marks, or imagery you supply. Frontage may require removal of content that breaches this clause, at your cost.`
+      )}
+      ${termsSection("b8", "8. Prohibited conduct", TERMS_CLAUSES.prohibited)}
+      ${termsSection("b9", "9. Consequences of breach", TERMS_CLAUSES.breach)}
+      ${termsSection("b10", "10. Liability &amp; indemnity", TERMS_CLAUSES.liability)}
+      ${termsSection("b11", "11. Changes", TERMS_CLAUSES.changes)}
+      <h3 style="font-size:14px;margin-bottom:6px">12. Governing law</h3>
+      <p class="small muted">${TERMS_CLAUSES.governingLaw}</p>
+    </div>
+  `;
+  send(res, 200, await layout({ title: "Buyer Terms & Conditions", activeNav: "terms", user, body }));
+}
+
+export async function sellerTermsPage(req, res) {
+  const user = await currentUser(req);
+  const body = `
+    <div class="panel" style="max-width:720px;margin:0 auto">
+      <h1 style="font-size:22px;margin-bottom:4px">Seller Terms &amp; Conditions</h1>
+      <p class="small muted" style="margin-bottom:18px">These terms apply when you list advertising space on Frontage. Leasing a space instead? See the <a href="/terms/buyer" style="color:var(--orange)">Buyer Terms</a>.</p>
+
+      ${termsSection("s1", "1. What Frontage is", TERMS_CLAUSES.whatFrontageIs)}
+      ${termsSection("s2", "2. Your account", TERMS_CLAUSES.accounts)}
+      ${termsSection(
+        "s3",
+        "3. Listing a space",
+        `By listing a space you warrant that you own it or hold clear authority to lease it for advertising, that the details you provide (size, location, exposure, photographs) are accurate and current, and that displaying advertising there breaches no law, lease, strata by-law, or council requirement. Misrepresented listings may be removed and any held payouts withheld.`
+      )}
+      ${termsSection("s4", "4. Prices and GST", `${TERMS_CLAUSES.gst} Set your monthly rate exclusive of GST. If you are registered for GST, you are responsible for accounting for it on your payouts.`)}
+      ${termsSection(
+        "s5",
+        "5. Platform fee",
+        `Frontage deducts a <strong>15% platform fee</strong> from your payout on each booking, calculated on the GST-exclusive lease amount. The fee covers marketplace listing, buyer acquisition, contracting, and payment handling.`
+      )}
+      ${termsSection(
+        "s6",
+        "6. Getting paid",
+        `The buyer pays the full term up front. Frontage holds your payout until the contractor confirms installation is complete, then releases it (less the platform fee) to your connected payout account. Payouts are made through Stripe, which applies its own processing fees and settlement timing — funds typically reach your bank a few business days after release, though first payouts can take longer while Stripe verifies your account. You must complete payout onboarding before any funds can be released.`
+      )}
+      ${termsSection(
+        "s7",
+        "7. Access for installation",
+        `You must provide the assigned contractor reasonable access to the space within the agreed window, and must not obscure, damage, alter, or remove installed advertising for the duration of the lease. Denying access or interfering with installed advertising is a breach and may make you liable for the buyer's resulting losses.`
+      )}
+      ${termsSection("s8", "8. Prohibited conduct", TERMS_CLAUSES.prohibited)}
+      ${termsSection("s9", "9. Consequences of breach", TERMS_CLAUSES.breach)}
+      ${termsSection("s10", "10. Liability &amp; indemnity", TERMS_CLAUSES.liability)}
+      ${termsSection("s11", "11. Changes", TERMS_CLAUSES.changes)}
+      <h3 style="font-size:14px;margin-bottom:6px">12. Governing law</h3>
+      <p class="small muted">${TERMS_CLAUSES.governingLaw}</p>
+    </div>
+  `;
+  send(res, 200, await layout({ title: "Seller Terms & Conditions", activeNav: "terms", user, body }));
+}
+
 export async function termsPage(req, res) {
   const user = await currentUser(req);
   const body = `
     <div class="panel" style="max-width:720px;margin:0 auto">
       <h1 style="font-size:22px;margin-bottom:4px">Terms &amp; Conditions</h1>
-      <p class="small muted" style="margin-bottom:18px">These terms govern every account, listing, lease, and job order on Frontage. By using the platform you agree to them.</p>
+      <p class="small muted" style="margin-bottom:14px">These terms govern every account, listing, lease, and job order on Frontage. By using the platform you agree to them.</p>
+      <div class="panel-tint" style="margin-bottom:18px">
+        <div class="small" style="font-weight:600;margin-bottom:6px">Looking for the terms that apply to you?</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <a href="/terms/buyer" class="btn btn-outline btn-sm">Buyer Terms</a>
+          <a href="/terms/seller" class="btn btn-outline btn-sm">Seller Terms</a>
+        </div>
+      </div>
 
       <h3 style="font-size:14px;margin-bottom:6px">1. What Frontage is</h3>
       <p class="small muted" style="margin-bottom:14px">Frontage is a marketplace that connects owners of physical advertising space ("sellers"), advertisers who lease that space ("buyers"), and independent contractors who print, install, and remove advertising. Frontage facilitates introductions, contracts, and payments — it is not a party to the lease between buyer and seller, nor to the service agreement between a buyer and a contractor.</p>
@@ -2193,6 +2453,9 @@ export async function termsPage(req, res) {
 
       <h3 style="font-size:14px;margin-bottom:6px">4. Leases &amp; payments</h3>
       <p class="small muted" style="margin-bottom:14px">Leases run for a fixed term of 6 or 12 months, starting when installation is confirmed complete, and auto-renew monthly thereafter unless cancelled with 30 days' notice. The buyer pays the full term up front. Frontage holds the seller's payout until installation is confirmed, then releases it minus the 15% platform fee. Early termination by the buyer incurs a break fee of one month's rent.</p>
+
+      <h3 style="font-size:14px;margin-bottom:6px">4a. Prices and GST</h3>
+      <p class="small muted" style="margin-bottom:14px">${TERMS_CLAUSES.gst}</p>
 
       <h3 style="font-size:14px;margin-bottom:6px">5. Contractors</h3>
       <p class="small muted" style="margin-bottom:14px">Contractors are vetted before accessing job orders but act as independent businesses, not employees or agents of Frontage. Print, install, and removal work is quoted, agreed, and paid between the buyer and the contractor directly.</p>

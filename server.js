@@ -120,6 +120,8 @@ const server = http.createServer(async (req, res) => {
     if (method === "GET" && pathname === "/api/listings/map") return await api.listingsMapJson(req, res);
     if (method === "GET" && pathname === "/onboarding") return await pages.onboardingPage(req, res, query, query.get("err"));
     if (method === "GET" && pathname === "/welcome") return await pages.welcomePage(req, res, query);
+    if (method === "GET" && pathname === "/terms/buyer") return await pages.buyerTermsPage(req, res);
+    if (method === "GET" && pathname === "/terms/seller") return await pages.sellerTermsPage(req, res);
     if (method === "GET" && pathname === "/sell/new") return await pages.sellNewPage(req, res, query);
     if (method === "GET" && pathname === "/seller/jobs") return await pages.sellerJobsPage(req, res);
     if (method === "GET" && pathname === "/contractor/ping") return await pages.contractorPingPage(req, res);

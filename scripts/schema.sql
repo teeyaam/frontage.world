@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   password_salt TEXT NOT NULL,
   business_name TEXT,
+  abn TEXT, -- appears on the tax invoice for a booking; optional (individuals/sole traders may not have one)
   address TEXT,
   bank_bsb TEXT,
   bank_account TEXT,
@@ -153,7 +154,9 @@ CREATE TABLE IF NOT EXISTS payments (
   id TEXT PRIMARY KEY,
   seq INTEGER NOT NULL,
   booking_id TEXT NOT NULL REFERENCES bookings(id),
-  total_amount NUMERIC NOT NULL,
+  total_amount NUMERIC NOT NULL, -- GST-inclusive amount actually charged
+  subtotal_amount NUMERIC, -- lease total before GST (null on pre-GST bookings)
+  gst_amount NUMERIC, -- GST component of total_amount (null on pre-GST bookings)
   fee_amount NUMERIC NOT NULL,
   payout_amount NUMERIC NOT NULL,
   status TEXT NOT NULL, -- paid (stub/real charge outcome)

@@ -18,7 +18,7 @@ import {
 } from "../lib/auth.js";
 import { runUpload, uploadContractorDocs, uploadListingPhotos, CONTRACTOR_DOCS_DIR, getContractorDocUrl, isS3Configured, photoPublicUrl } from "../lib/upload.js";
 import { isValidCategory } from "../lib/categories.js";
-import { estimateEyes } from "../lib/format.js";
+import { estimateEyes, withGst } from "../lib/format.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { approximateCoords } from "../lib/geo.js";
 import { isStripeConfigured, createPaymentIntent, retrievePaymentIntent, constructWebhookEvent, createConnectAccount, createConnectOnboardingLink } from "../lib/payments.js";
@@ -444,7 +444,8 @@ export async function createBookingIntentHandler(req, res) {
   if (!listing || listing.status !== "live") return badRequest(res, "Listing not found.");
   const term = parseInt(b.term, 10);
   if (![6, 12].includes(term)) return badRequest(res, "Lease terms are 6 or 12 months.");
-  const amount = listing.price * term;
+  // Listing prices are GST-exclusive; the buyer is charged GST-inclusive.
+  const amount = withGst(listing.price * term);
   const intent = await createPaymentIntent({
     amount,
     description: `Frontage lease — ${listing.title}`,
@@ -463,6 +464,17 @@ export async function createBookingHandler(req, res) {
   if (!listing || listing.status !== "live") return badRequest(res, "Listing not found.");
   const term = parseInt(b.term, 10);
   if (![6, 12].includes(term) || !b.signature) return badRequest(res, "Lease terms are 6 or 12 months, and a signature is required.");
+  // The consent checkbox is `required` in the browser too, but a form post can
+  // always be replayed without it — agreeing to the terms is the one thing
+  // that must never be assumed.
+  if (!b.agreeTerms) return badRequest(res, "You must agree to the Buyer Terms & Conditions before booking.");
+
+  // Invoice details captured at checkout, kept on the account so a repeat
+  // booking pre-fills them.
+  const invoicePatch = {};
+  if (b.businessName && b.businessName !== user.businessName) invoicePatch.businessName = b.businessName;
+  if (b.abn && b.abn !== user.abn) invoicePatch.abn = b.abn;
+  if (Object.keys(invoicePatch).length) await db.updateUser(user.id, invoicePatch);
 
   let paymentIntentId = null;
   if (isStripeConfigured()) {
@@ -471,7 +483,7 @@ export async function createBookingHandler(req, res) {
     // before a booking (and the seller's payout entitlement) is created.
     if (!b.paymentIntentId) return badRequest(res, "Payment was not completed.");
     const intent = await retrievePaymentIntent(b.paymentIntentId);
-    const expectedTotal = listing.price * term;
+    const expectedTotal = withGst(listing.price * term);
     if (intent.status !== "succeeded" || Math.abs(intent.amount - expectedTotal) > 0.01) {
       return badRequest(res, "Payment could not be verified — please try again.");
     }
@@ -489,7 +501,10 @@ export async function createBookingHandler(req, res) {
 
   const seller = listing.ownerId ? await db.getUserById(listing.ownerId) : null;
   if (seller) await trySend(bookingSellerEmail(seller, listing, booking));
-  await trySend(bookingBuyerEmail(user, listing, booking));
+  // Re-read the buyer so the invoice carries the business name/ABN just saved.
+  const invoiceBuyer = (await db.getUserById(user.id)) || user;
+  const payment = await db.getPaymentByBookingId(booking.id);
+  await trySend(bookingBuyerEmail(invoiceBuyer, listing, booking, payment));
 
   redirect(res, `/book/${listing.id}?confirmed=${booking.id}`);
 }
@@ -701,6 +716,8 @@ export async function updateAccountProfile(req, res) {
     email: b.email,
     mobile: b.mobile,
     address: b.address || null,
+    businessName: b.businessName || null,
+    abn: b.abn || null,
     googleBusinessUrl: b.googleBusinessUrl || null,
   });
   redirect(res, "/account?updated=Contact info");
