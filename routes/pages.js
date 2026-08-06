@@ -92,7 +92,9 @@ const SORT_OPTIONS = {
 // Every filter/sort param that should survive a category-chip click or a
 // filter-form submit, carried forward as hidden fields / querystring so
 // browsing never silently drops an active filter.
-const FILTER_PARAM_KEYS = ["q", "country", "city", "minPrice", "maxPrice", "minArea", "minEyes", "sort"];
+// "view" rides along with the filters so switching category (a plain link)
+// keeps you in map view instead of snapping back to the list.
+const FILTER_PARAM_KEYS = ["q", "country", "city", "minPrice", "maxPrice", "minArea", "minEyes", "sort", "view"];
 
 export async function browsePage(req, res, query) {
   const user = await currentUser(req);
@@ -116,6 +118,7 @@ export async function browsePage(req, res, query) {
   const minArea = clampNonNegative(parseFloat(query.get("minArea"))); // buyer-facing unit: m²
   const minEyes = clampNonNegative(parseInt(query.get("minEyes"), 10));
   const sortKey = SORT_OPTIONS[query.get("sort")] ? query.get("sort") : "newest";
+  const mapView = query.get("view") === "map";
 
   if (cat && cat !== "all") listings = listings.filter((l) => l.category === cat);
   if (q) listings = listings.filter((l) => `${l.title} ${l.venue} ${l.suburb} ${l.postcode || ""} ${l.country || ""}`.toLowerCase().includes(q));
@@ -199,17 +202,18 @@ export async function browsePage(req, res, query) {
             style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:var(--white);font-size:13px;min-width:220px" />
           <button class="btn btn-outline btn-sm" type="submit">Search</button>
         </form>
-        <button type="button" id="map-toggle-btn" class="btn btn-outline btn-sm">🗺️ Map view</button>
+        <button type="button" id="map-toggle-btn" class="btn btn-outline btn-sm">${mapView ? "📋 List view" : "🗺️ Map view"}</button>
       </div>
     </div>
-    <div id="browse-map" style="display:none;height:420px;border-radius:10px;overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
+    <div id="browse-map" style="display:${mapView ? "block" : "none"};height:420px;border-radius:10px;overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
     <div class="row-between" style="margin-bottom:18px;flex-wrap:wrap;gap:10px">
       <div style="display:flex;flex-wrap:wrap;gap:8px">${categoryChips}</div>
       <details class="nav-dropdown" id="filters-details">
         <summary class="btn btn-outline btn-sm" style="cursor:pointer;list-style:none">⚙️ Filters${activeFilterCount ? ` (${activeFilterCount})` : ""}</summary>
-        <form method="GET" action="/" class="nav-dropdown-menu" style="padding:16px;min-width:260px;right:0;left:auto">
+        <form method="GET" action="/" class="nav-dropdown-menu filters-menu" style="padding:16px;min-width:260px;right:0;left:auto">
           ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
           ${query.get("q") ? `<input type="hidden" name="q" value="${escapeHtml(query.get("q"))}" />` : ""}
+          ${mapView ? `<input type="hidden" name="view" value="map" />` : ""}
           <div class="form-row">
             <div class="field" style="margin-bottom:10px"><label>Country</label><input list="filter-countries" name="country" value="${escapeHtml(query.get("country") || "")}" placeholder="Any" /></div>
             <div class="field" style="margin-bottom:10px"><label>City / Suburb</label><input list="filter-cities" name="city" value="${escapeHtml(query.get("city") || "")}" placeholder="Any" /></div>
@@ -230,8 +234,8 @@ export async function browsePage(req, res, query) {
         </form>
       </details>
     </div>
-    <div id="browse-results">${listings.length === 0 ? `<p class="muted">No spaces match that search.</p>` : `<div class="grid">${cards}</div>`}</div>
-    <div id="browse-below-fold" style="margin-top:24px">${adUnitMarkup("ADSENSE_SLOT_BROWSE")}</div>
+    <div id="browse-results"${mapView ? ` style="display:none"` : ""}>${listings.length === 0 ? `<p class="muted">No spaces match that search.</p>` : `<div class="grid">${cards}</div>`}</div>
+    <div id="browse-below-fold" style="margin-top:24px${mapView ? ";display:none" : ""}">${adUnitMarkup("ADSENSE_SLOT_BROWSE")}</div>
     <script>
       (function () {
         var btn = document.getElementById("map-toggle-btn");
@@ -239,19 +243,24 @@ export async function browsePage(req, res, query) {
         var resultsEl = document.getElementById("browse-results");
         var belowFoldEl = document.getElementById("browse-below-fold");
         var loaded = false;
-        btn.addEventListener("click", function () {
-          var showing = mapEl.style.display !== "none";
-          if (showing) {
-            mapEl.style.display = "none";
-            resultsEl.style.display = "";
-            belowFoldEl.style.display = "";
-            btn.textContent = "🗺️ Map view";
-            return;
-          }
+
+        // Mirrors the current mode into the URL (?view=map) without a reload,
+        // so category chips — which are plain links carrying the same param
+        // forward — come back in map view instead of snapping to the list.
+        function rememberView(isMap) {
+          if (!window.history || !window.history.replaceState) return;
+          var url = new URL(window.location.href);
+          if (isMap) url.searchParams.set("view", "map");
+          else url.searchParams.delete("view");
+          window.history.replaceState({}, "", url.toString());
+        }
+
+        function showMap() {
           mapEl.style.display = "block";
           resultsEl.style.display = "none";
           belowFoldEl.style.display = "none";
           btn.textContent = "📋 List view";
+          rememberView(true);
           if (!loaded) {
             loaded = true;
             window.FRONTAGE_MAP_TARGET = "browse-map";
@@ -288,7 +297,24 @@ export async function browsePage(req, res, query) {
               }
             }, 50);
           }
+        }
+
+        function showList() {
+          mapEl.style.display = "none";
+          resultsEl.style.display = "";
+          belowFoldEl.style.display = "";
+          btn.textContent = "🗺️ Map view";
+          rememberView(false);
+        }
+
+        btn.addEventListener("click", function () {
+          if (mapEl.style.display !== "none") showList();
+          else showMap();
         });
+
+        // Server rendered the page already in map view (?view=map) — kick the
+        // map engine off now rather than waiting for a click that won't come.
+        if (${mapView ? "true" : "false"}) showMap();
       })();
     </script>
   `;
@@ -357,15 +383,25 @@ function lightboxMarkup(photos) {
 // Country-code select + national-number input, combined into a single
 // "mobile" value (e.g. "+61 412 345 678") by the client script right
 // before submit — the server just receives one mobile field either way.
-function mobileFieldMarkup({ idPrefix = "mobile" } = {}) {
+function mobileFieldMarkup({ idPrefix = "mobile", value = "" } = {}) {
+  // A previously-entered mobile comes back as "+61 412345678" — split it so a
+  // failed submit repopulates both the dial-code select and the number.
+  const [priorDial, priorNumber] = (() => {
+    const trimmed = String(value || "").trim();
+    if (!trimmed) return ["", ""];
+    const spaceAt = trimmed.indexOf(" ");
+    return spaceAt === -1 ? ["", trimmed] : [trimmed.slice(0, spaceAt), trimmed.slice(spaceAt + 1)];
+  })();
   const options = COUNTRIES.map(
-    (c) => `<option value="${c.dial}" data-min="${c.digits[0]}" data-max="${c.digits[1]}"${c.iso === "AU" ? " selected" : ""}>${escapeHtml(c.name)} (${c.dial})</option>`
+    (c) => `<option value="${c.dial}" data-min="${c.digits[0]}" data-max="${c.digits[1]}"${
+      priorDial ? (c.dial === priorDial ? " selected" : "") : c.iso === "AU" ? " selected" : ""
+    }>${escapeHtml(c.name)} (${c.dial})</option>`
   ).join("");
   return `<div class="field">
     <label>Mobile</label>
     <div style="display:flex;gap:8px">
       <select id="${idPrefix}-dial" style="flex:0 0 168px">${options}</select>
-      <input type="tel" id="${idPrefix}-number" required inputmode="numeric" pattern="[0-9]*" placeholder="412 345 678" style="flex:1" />
+      <input type="tel" id="${idPrefix}-number" required inputmode="numeric" pattern="[0-9]*" placeholder="412 345 678" value="${escapeHtml(priorNumber)}" style="flex:1" />
     </div>
     <div class="hint" id="${idPrefix}-hint"></div>
   </div>
@@ -401,9 +437,21 @@ function mobileFieldMarkup({ idPrefix = "mobile" } = {}) {
 // password the client accepts is never rejected as a surprise server-side.
 function passwordFieldsMarkup({ idPrefix = "pw", label = "Password" } = {}) {
   return `
-    <div class="field"><label>${escapeHtml(label)}</label><input type="password" name="password" id="${idPrefix}-password" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" placeholder="At least 10 characters" minlength="10" /></div>
+    <div class="field">
+      <label>${escapeHtml(label)}</label>
+      <div class="pw-wrap">
+        <input type="password" name="password" id="${idPrefix}-password" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" placeholder="At least 10 characters" minlength="10" />
+        <button type="button" class="pw-toggle" id="${idPrefix}-reveal" aria-label="Show password">Show</button>
+      </div>
+    </div>
     <div class="small muted" style="margin-top:-8px;margin-bottom:14px">${escapeHtml(PASSWORD_HINT)}</div>
-    <div class="field"><label>Confirm ${escapeHtml(label.toLowerCase())}</label><input type="password" name="confirmPassword" id="${idPrefix}-confirm" required /></div>
+    <div class="field">
+      <label>Confirm ${escapeHtml(label.toLowerCase())}</label>
+      <div class="pw-wrap">
+        <input type="password" name="confirmPassword" id="${idPrefix}-confirm" required />
+        <button type="button" class="pw-toggle" id="${idPrefix}-confirm-reveal" aria-label="Show password">Show</button>
+      </div>
+    </div>
     <div class="small" id="${idPrefix}-match-hint" style="margin-top:-8px;margin-bottom:14px"></div>
     <script>
       (function () {
@@ -417,6 +465,19 @@ function passwordFieldsMarkup({ idPrefix = "pw", label = "Password" } = {}) {
         }
         pw.addEventListener("input", check);
         cf.addEventListener("input", check);
+
+        function wireReveal(btnId, input) {
+          var btn = document.getElementById(btnId);
+          if (!btn) return;
+          btn.addEventListener("click", function () {
+            var showing = input.type === "text";
+            input.type = showing ? "password" : "text";
+            btn.textContent = showing ? "Show" : "Hide";
+            btn.setAttribute("aria-label", showing ? "Show password" : "Hide password");
+          });
+        }
+        wireReveal("${idPrefix}-reveal", pw);
+        wireReveal("${idPrefix}-confirm-reveal", cf);
       })();
     </script>`;
 }
@@ -427,7 +488,6 @@ export async function listingDetailPage(req, res, id) {
   const listing = await db.getListingById(id);
   if (!listing || listing.status !== "live") return send(res, 404, await layout({ title: "Not found", user, body: "<p>Listing not found.</p>" }));
   const owner = await db.getUserById(listing.ownerId);
-  const feePreview = listing.price * 0.15;
   if (!user || user.id !== listing.ownerId) await db.incrementListingView(listing.id);
 
   const photos = listing.photos || [];
@@ -463,11 +523,23 @@ export async function listingDetailPage(req, res, id) {
         <h1 style="font-size:26px">${escapeHtml(listing.title)}</h1>
         <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(locationLine(listing))}${listing.subtype ? ` · ${escapeHtml(listing.subtype)}` : ""}</div>
         <p style="margin-bottom:18px">${escapeHtml(listing.desc)}</p>
-        <div class="panel-tint stat-grid-3" style="margin-bottom:18px">
+        <div class="panel-tint stat-grid-3" style="margin-bottom:10px">
           <div><div class="mono" style="font-weight:700">${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)}</div><div class="small muted">Space size</div></div>
           <div><div class="mono" style="font-weight:700">${money(listing.price)}/mo</div><div class="small muted">Lease rate</div></div>
-          <div><div class="mono" style="font-weight:700">${escapeHtml(listing.footfall)}</div><div class="small muted">Exposure</div></div>
+          <div><div class="mono" style="font-weight:700">${escapeHtml(listing.footfall)}</div><div class="small muted">Foot traffic</div></div>
         </div>
+        <details class="small muted" style="margin-bottom:18px">
+          <summary style="cursor:pointer;color:var(--orange);font-weight:600">What do these numbers mean?</summary>
+          <div style="margin-top:8px;line-height:1.6">
+            <strong>Lease rate</strong> is the monthly rent paid to the space owner. Installing and removing your ad is quoted separately by the contractor before you commit — it is not included in this rate.<br/>
+            <strong>Foot traffic</strong> is the space owner's own description of how busy the location is.<br/>
+            ${
+              listing.estimatedEyesPerDay
+                ? `<strong>Eyes/day</strong> (${listing.estimatedEyesPerDay.toLocaleString("en-AU")}) is Frontage's estimate of how many people pass the space each day, based on its category and size. It's a planning guide, not an audited impressions count.`
+                : ""
+            }
+          </div>
+        </details>
         ${
           listing.lat != null && listing.lng != null
             ? `<div id="listing-mini-map" style="height:170px;border-radius:10px;overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
@@ -497,10 +569,7 @@ export async function listingDetailPage(req, res, id) {
             ? `<div class="badge badge-blue" style="margin-bottom:12px;display:block;padding:10px">This is your listing.</div>
                <a href="/sell/insights/${listing.id}" class="btn btn-primary btn-block">View insights</a>
                <a href="/seller/inquiries" class="btn btn-outline btn-block" style="margin-top:10px">Buyer inquiries</a>`
-            : `<div class="small muted" style="border:1px dashed var(--steel);border-radius:8px;padding:10px;margin-bottom:18px">
-                 Platform fee on booking (15%) at this rate: ${money(feePreview)}/mo — deducted from the seller's payout.
-               </div>
-               <a href="/book/${listing.id}" class="btn btn-primary btn-block">Book this space</a>
+            : `<a href="/book/${listing.id}" class="btn btn-primary btn-block">Book this space</a>
                ${user ? `<a href="/listing/${listing.id}/chat" class="btn btn-outline btn-block" style="margin-top:10px">Ask the seller a question</a>` : ""}`
         }
       </div>
@@ -677,9 +746,9 @@ export async function onboardingPage(req, res, query, errorMsg) {
         ${errorMsg ? `<div class="badge badge-orange" style="margin-bottom:12px;display:block">${escapeHtml(errorMsg)}</div>` : ""}
         <form method="POST" action="/api/auth/signup">
           <input type="hidden" name="next" value="${escapeHtml(next)}" />
-          <div class="field"><label>Full name</label><input name="fullName" required placeholder="Jordan Reyes" /></div>
-          <div class="field"><label>Email</label><input type="email" name="email" required placeholder="jordan@email.com" /></div>
-          ${mobileFieldMarkup({ idPrefix: "signup-mobile" })}
+          <div class="field"><label>Full name</label><input name="fullName" required placeholder="Jordan Reyes" value="${escapeHtml(query.get("fullName") || "")}" /></div>
+          <div class="field"><label>Email</label><input type="email" name="email" required placeholder="jordan@email.com" value="${escapeHtml(query.get("email") || "")}" /></div>
+          ${mobileFieldMarkup({ idPrefix: "signup-mobile", value: query.get("mobile") || "" })}
           ${passwordFieldsMarkup({ idPrefix: "signup-pw" })}
           <button class="btn btn-primary btn-block" type="submit">Create free account</button>
         </form>
@@ -704,6 +773,32 @@ export async function onboardingPage(req, res, query, errorMsg) {
     </div>
   `;
   send(res, 200, await layout({ title: "Sign up / Log in", user: null, body }));
+}
+
+// Post-signup confirmation. The account is already created and logged in at
+// this point — this page exists so a new user is told, explicitly, that a
+// verification email is waiting, instead of being dropped back on browse.
+export async function welcomePage(req, res, query) {
+  const user = await currentUser(req);
+  if (!user) return redirect(res, "/onboarding");
+  const next = query.get("next") || "/";
+
+  const body = `
+    <div class="form-card" style="max-width:560px;margin:40px auto;text-align:center">
+      <div style="font-size:44px;line-height:1;margin-bottom:12px">📬</div>
+      <h1 style="font-size:24px;margin-bottom:8px">Thanks for signing up, ${escapeHtml((user.fullName || "").split(" ")[0] || "there")}!</h1>
+      <p class="muted" style="margin-bottom:18px">
+        We've sent a confirmation link to <strong>${escapeHtml(user.email)}</strong>.
+        Please open it to verify your email — you'll need a verified address before you can book a space.
+      </p>
+      <p class="small muted" style="margin-bottom:22px">Can't find it? Check your spam or promotions folder.</p>
+      <a href="${escapeHtml(next)}" class="btn btn-primary btn-block">Continue browsing</a>
+      <form method="POST" action="/api/account/resend-verification" style="margin-top:10px">
+        <button class="btn btn-outline btn-block" type="submit">Resend the email</button>
+      </form>
+    </div>
+  `;
+  send(res, 200, await layout({ title: "Check your email", user, body }));
 }
 
 // ---------------- List a space ----------------

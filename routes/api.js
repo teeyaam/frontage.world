@@ -59,32 +59,42 @@ function badRequest(res, message) {
 export async function signup(req, res) {
   const body = await readBody(req);
   const { fullName, email, mobile, password, confirmPassword, next } = body;
-  if (!fullName || !email || !mobile || !password) {
-    return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("Please fill every field.")}`);
-  }
-  if (!isStrongPassword(password)) {
-    return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("Password too weak — " + PASSWORD_HINT)}`);
-  }
-  if (password !== confirmPassword) {
-    return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("Password and confirmation don't match.")}`);
-  }
-  if (await db.getUserByEmail(email)) {
-    return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("An account with that email already exists — try logging in instead.")}`);
-  }
+
+  // Every rejection carries the non-secret fields back so the form repopulates
+  // — retyping name/email/mobile because the password was weak is needless
+  // friction. Passwords are deliberately never echoed back into the URL.
+  const reject = (msg) => {
+    const params = new URLSearchParams({ next: next || "/", err: msg });
+    if (fullName) params.set("fullName", fullName);
+    if (email) params.set("email", email);
+    if (mobile) params.set("mobile", mobile);
+    return redirect(res, `/onboarding?${params.toString()}`);
+  };
+
+  if (!fullName || !email || !mobile || !password) return reject("Please fill every field.");
+  if (!isStrongPassword(password)) return reject("Password too weak — " + PASSWORD_HINT);
+  if (password !== confirmPassword) return reject("Password and confirmation don't match.");
+  if (await db.getUserByEmail(email)) return reject("An account with that email already exists — try logging in instead.");
   const { hash, salt } = hashPassword(password);
   const user = await db.createUser({ fullName, email, mobile, passwordHash: hash, passwordSalt: salt });
   // Email verification: new accounts get a token and a verify link. When the
   // email service isn't configured yet, accounts are auto-verified so the
   // flow never dead-ends (nothing could deliver the link).
+  let sentVerification = false;
   if (isEmailConfigured()) {
     const token = crypto.randomBytes(24).toString("hex");
     await db.updateUser(user.id, { emailVerifyToken: token });
     await trySend(verificationEmail(user, token));
+    sentVerification = true;
   } else {
     await db.updateUser(user.id, { emailVerifiedAt: new Date().toISOString() });
   }
   const session = await db.createSession(user.id);
-  redirect(res, next || "/", sessionCookieHeader(session.token));
+  // Land on an explicit "check your inbox" confirmation rather than silently
+  // dropping the new user back on the browse page wondering what happened.
+  // With no email service configured there's nothing to check, so skip it.
+  const dest = sentVerification ? `/welcome?next=${encodeURIComponent(next || "/")}` : next || "/";
+  redirect(res, dest, sessionCookieHeader(session.token));
 }
 
 // GET /verify?token=... — the link from the verification email.

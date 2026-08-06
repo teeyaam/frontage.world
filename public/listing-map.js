@@ -7,7 +7,10 @@
   var mapEl = document.getElementById("listing-mini-map");
   if (!data || !mapEl || typeof L === "undefined") return;
 
-  var map = L.map(mapEl, { zoomControl: false, dragging: false, scrollWheelZoom: false, touchZoom: false, doubleClickZoom: false }).setView([data.lat, data.lng], 14);
+  // Pan/zoom are on so a buyer can actually explore the surrounding area —
+  // only scroll-wheel zoom stays off, so scrolling the page past the map
+  // doesn't get hijacked into zooming it.
+  var map = L.map(mapEl, { scrollWheelZoom: false }).setView([data.lat, data.lng], 14);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     maxZoom: 19,

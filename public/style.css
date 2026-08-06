@@ -63,6 +63,27 @@ a { color: inherit; text-decoration: none; }
 .nav-dropdown-menu a:hover { background: var(--concrete); }
 .nav-dropdown-menu a.active { color: var(--orange); font-weight: 700; }
 
+/* Browse filters panel. As an absolutely-positioned dropdown it hangs off the
+   right edge of a phone viewport and half of it is unreachable, so below the
+   tablet breakpoint it becomes an in-flow full-width sheet instead. */
+@media (max-width: 680px) {
+  .nav-dropdown-menu.filters-menu {
+    position: static;
+    min-width: 0;
+    width: 100%;
+    margin-top: 10px;
+    box-shadow: none;
+  }
+  #filters-details { width: 100%; }
+  #filters-details > summary { width: 100%; text-align: center; }
+}
+
+/* password field with a show/hide toggle */
+.pw-wrap { position: relative; display: block; }
+.pw-wrap input { width: 100%; padding-right: 62px; }
+.pw-toggle { position: absolute; top: 50%; right: 8px; transform: translateY(-50%); background: none; border: 0; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--steel); padding: 4px 6px; border-radius: 4px; }
+.pw-toggle:hover { color: var(--orange); background: var(--concrete); }
+
 /* cards / grid */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; }
 .card { background: var(--white); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; transition: box-shadow .15s, transform .15s; }
