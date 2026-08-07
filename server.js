@@ -117,7 +117,7 @@ const server = http.createServer(async (req, res) => {
 
     // ---------- GET pages ----------
     if (method === "GET" && pathname === "/") return await pages.browsePage(req, res, query);
-    if (method === "GET" && pathname === "/api/listings/map") return await api.listingsMapJson(req, res);
+    if (method === "GET" && pathname === "/api/listings/map") return await api.listingsMapJson(req, res, query);
     if (method === "GET" && pathname === "/onboarding") return await pages.onboardingPage(req, res, query, query.get("err"));
     if (method === "GET" && pathname === "/welcome") return await pages.welcomePage(req, res, query);
     if (method === "GET" && pathname === "/terms/buyer") return await pages.buyerTermsPage(req, res);

@@ -18,6 +18,7 @@ import {
 } from "../lib/auth.js";
 import { runUpload, uploadContractorDocs, uploadListingPhotos, CONTRACTOR_DOCS_DIR, getContractorDocUrl, isS3Configured, photoPublicUrl } from "../lib/upload.js";
 import { isValidCategory } from "../lib/categories.js";
+import { filterListings } from "../lib/listingFilters.js";
 import { estimateEyes, withGst } from "../lib/format.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { approximateCoords } from "../lib/geo.js";
@@ -288,9 +289,14 @@ export async function createBdrListingHandler(req, res) {
   redirect(res, `/sell/bdr-new?created=1&claimUrl=${encodeURIComponent(claimUrl)}`);
 }
 
-export async function listingsMapJson(req, res) {
+export async function listingsMapJson(req, res, query) {
+  // Filtered the same way as the browse page's list/grid (lib/listingFilters.js)
+  // so switching category/search/price while in map view narrows the pins
+  // shown, instead of the map always plotting every listing regardless of
+  // the active filter.
+  const filtered = filterListings(await db.getListings(), query);
   const listings = await Promise.all(
-    (await db.getListings()).map(async (l) => {
+    filtered.map(async (l) => {
       const owner = l.ownerId ? await db.getUserById(l.ownerId) : null;
       return {
         id: l.id,

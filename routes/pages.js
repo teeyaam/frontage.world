@@ -24,6 +24,7 @@ import { isEmailConfigured } from "../lib/email.js";
 import { adUnitMarkup } from "../lib/ads.js";
 import { PASSWORD_PATTERN, PASSWORD_HINT } from "../lib/auth.js";
 import { COUNTRIES } from "../lib/countries.js";
+import { filterListings } from "../lib/listingFilters.js";
 
 function send(res, status, html) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
@@ -121,9 +122,6 @@ export async function browsePage(req, res, query) {
   const knownCountries = [...new Set(allListings.map((l) => l.country).filter(Boolean))].sort();
   const knownCities = [...new Set(allListings.map((l) => l.suburb).filter(Boolean))].sort();
   const cat = query.get("category");
-  const q = (query.get("q") || "").toLowerCase();
-  const countryFilter = (query.get("country") || "").toLowerCase();
-  const cityFilter = (query.get("city") || "").toLowerCase();
   // Math.max(0, ...) clamps a negative/malformed querystring value to "not
   // set" rather than letting it silently do nothing (a negative min is
   // harmless as a filter, but nonsensical to show back in the form).
@@ -132,17 +130,15 @@ export async function browsePage(req, res, query) {
   const maxPrice = clampNonNegative(parseFloat(query.get("maxPrice")));
   const minArea = clampNonNegative(parseFloat(query.get("minArea"))); // buyer-facing unit: m²
   const minEyes = clampNonNegative(parseInt(query.get("minEyes"), 10));
+  const countryFilter = (query.get("country") || "").toLowerCase();
+  const cityFilter = (query.get("city") || "").toLowerCase();
   const sortKey = SORT_OPTIONS[query.get("sort")] ? query.get("sort") : "newest";
   const mapView = query.get("view") === "map";
 
-  if (cat && cat !== "all") listings = listings.filter((l) => l.category === cat);
-  if (q) listings = listings.filter((l) => `${l.title} ${l.venue} ${l.suburb} ${l.postcode || ""} ${l.country || ""}`.toLowerCase().includes(q));
-  if (countryFilter) listings = listings.filter((l) => (l.country || "").toLowerCase().includes(countryFilter));
-  if (cityFilter) listings = listings.filter((l) => (l.suburb || "").toLowerCase().includes(cityFilter));
-  if (Number.isFinite(minPrice)) listings = listings.filter((l) => l.price >= minPrice);
-  if (Number.isFinite(maxPrice)) listings = listings.filter((l) => l.price <= maxPrice);
-  if (Number.isFinite(minArea)) listings = listings.filter((l) => (l.sizeW * l.sizeH) / 1e6 >= minArea);
-  if (Number.isFinite(minEyes)) listings = listings.filter((l) => (l.estimatedEyesPerDay || 0) >= minEyes);
+  // Shared with the map data endpoint (lib/listingFilters.js) so the pins
+  // shown in map view are filtered exactly like the list/grid, instead of
+  // the map silently ignoring category/search/price filters.
+  listings = filterListings(listings, query);
   listings = listings.slice().sort(SORT_OPTIONS[sortKey].cmp);
 
   // Carries every active filter/sort param forward into a link's querystring
@@ -222,7 +218,7 @@ export async function browsePage(req, res, query) {
     </div>
     <div id="browse-map" style="display:${mapView ? "block" : "none"};height:420px;border-radius:10px;overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
     <div class="row-between" style="margin-bottom:18px;flex-wrap:wrap;gap:10px">
-      <div style="display:flex;flex-wrap:wrap;gap:8px">${categoryChips}</div>
+      <div id="category-chips" style="display:flex;flex-wrap:wrap;gap:8px">${categoryChips}</div>
       <details class="nav-dropdown" id="filters-details">
         <summary class="btn btn-outline btn-sm" style="cursor:pointer;list-style:none">⚙️ Filters${activeFilterCount ? ` (${activeFilterCount})` : ""}</summary>
         <form method="GET" action="/" class="nav-dropdown-menu filters-menu" style="padding:16px;min-width:260px;right:0;left:auto">
@@ -244,7 +240,7 @@ export async function browsePage(req, res, query) {
           <div class="field" style="margin-bottom:12px"><label>Sort by</label><select name="sort">${sortOptionsHtml}</select></div>
           <div style="display:flex;gap:8px">
             <button class="btn btn-primary btn-sm" type="submit" style="flex:1">Apply</button>
-            <a href="${withParams({ country: "", city: "", minPrice: "", maxPrice: "", minArea: "", minEyes: "", sort: "" })}" class="btn btn-outline btn-sm">Clear</a>
+            <a href="${withParams({ country: "", city: "", minPrice: "", maxPrice: "", minArea: "", minEyes: "", sort: "" })}" class="btn btn-outline btn-sm" data-filter-link>Clear</a>
           </div>
         </form>
       </details>
@@ -268,6 +264,22 @@ export async function browsePage(req, res, query) {
           if (isMap) url.searchParams.set("view", "map");
           else url.searchParams.delete("view");
           window.history.replaceState({}, "", url.toString());
+          syncFilterLinks(isMap);
+        }
+
+        // Category chips and the "Clear filters" link are plain <a href="/?...">
+        // tags rendered once at page load, so toggling map view client-side
+        // (no reload) left their href stuck on whatever "view" the page was
+        // rendered with — following one bounced you back to list view instead
+        // of staying in map view. Keep them in sync with the live toggle state.
+        function syncFilterLinks(isMap) {
+          var links = document.querySelectorAll('#category-chips a[href], [data-filter-link]');
+          links.forEach(function (a) {
+            var href = new URL(a.getAttribute("href"), window.location.href);
+            if (isMap) href.searchParams.set("view", "map");
+            else href.searchParams.delete("view");
+            a.setAttribute("href", href.pathname + href.search);
+          });
         }
 
         function showMap() {

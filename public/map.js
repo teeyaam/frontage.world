@@ -15,7 +15,10 @@
     maxZoom: 19,
   }).addTo(map);
 
-  fetch("/api/listings/map")
+  // Forward the page's current querystring (category, search, price, etc.)
+  // so the pins match whatever's active in the list/grid view instead of
+  // always plotting every listing regardless of the active filter.
+  fetch("/api/listings/map" + window.location.search)
     .then(function (r) { return r.json(); })
     .then(function (data) {
       var listings = (data && data.listings) || [];
