@@ -26,19 +26,23 @@
     if (overlay) {
       overlay.remove();
       overlay = null;
+      document.removeEventListener("keydown", onEscape);
     }
   }
+  function onEscape(e) {
+    if (e.key === "Escape") closeOverlay();
+  }
 
-  function showMessage(text) {
-    var msg = document.createElement("div");
-    msg.className = "small muted";
-    msg.style.marginTop = "-8px";
-    msg.style.marginBottom = "14px";
-    msg.textContent = text;
-    btn.insertAdjacentElement("afterend", msg);
+  function showToast(text) {
+    var existing = document.querySelector(".wm-toast");
+    if (existing) existing.remove();
+    var toast = document.createElement("div");
+    toast.className = "wm-toast";
+    toast.textContent = text;
+    document.body.appendChild(toast);
     setTimeout(function () {
-      msg.remove();
-    }, 6000);
+      toast.remove();
+    }, 5000);
   }
 
   // ---------- the placeholder ad graphic (white + Frontage wordmark) ----------
@@ -126,11 +130,22 @@
     }
   }
 
+  // ---------- overlay chrome ----------
+  function progressDots(step) {
+    return (
+      '<div class="wm-progress">' +
+      [1, 2].map(function (n) {
+        return '<span class="wm-progress-dot' + (n === step ? " wm-active" : "") + '"></span>';
+      }).join("") +
+      "</div>"
+    );
+  }
+
   btn.addEventListener("click", function () {
     var form = btn.closest("form");
     var fileInput = form ? form.querySelector('input[type="file"][name="photos"]') : null;
     if (!fileInput) {
-      showMessage("Couldn't find the photo upload field on this form.");
+      showToast("Couldn't find the photo upload field on this form.");
       return;
     }
 
@@ -142,50 +157,91 @@
     overlay.className = "ar-overlay";
     overlay.style.flexDirection = "column";
     overlay.style.overflowY = "auto";
-    overlay.style.padding = "20px 0";
+    overlay.style.padding = "24px 0";
     overlay.innerHTML =
-      '<div style="width:100%;max-width:640px;padding:14px;box-sizing:border-box">' +
-      '<div id="wm-step-pick" style="text-align:center">' +
-      '<p style="color:#fff;font-size:14px;margin-bottom:14px">Take or choose a photo of the wall or fence — you\'ll drag the four corners onto it next.</p>' +
-      '<input type="file" id="wm-photo-input" accept="image/*" capture="environment" style="display:block;margin:0 auto 14px;color:#fff" />' +
-      '<button type="button" class="btn btn-outline btn-sm wm-cancel" style="color:#fff;border-color:#fff">Cancel</button>' +
+      '<div class="wm-panel" style="position:relative">' +
+      '<button type="button" class="wm-close wm-cancel" aria-label="Close">&times;</button>' +
+      '<div id="wm-step-pick" class="wm-card">' +
+      '<div class="wm-eyebrow">Wall preview · Step 1 of 2</div>' +
+      '<div class="wm-title">Choose a photo of the space</div>' +
+      '<div class="wm-sub">Take a photo of the actual wall, window, or fence — you’ll drag the ad into place on it next.</div>' +
+      progressDots(1) +
+      '<label class="wm-dropzone" id="wm-dropzone">' +
+      '<div class="wm-dropzone-icon">📷</div>' +
+      '<div style="color:#fff;font-size:14px;font-weight:600;margin-bottom:4px">Take or choose a photo</div>' +
+      '<div style="color:rgba(255,255,255,0.55);font-size:12.5px">JPG or PNG, from your camera or your files</div>' +
+      '<input type="file" id="wm-photo-input" accept="image/*" capture="environment" style="display:none" />' +
+      "</label>" +
+      '<div class="wm-btn-row"><button type="button" class="wm-btn wm-cancel">Cancel</button></div>' +
       "</div>" +
-      '<div id="wm-step-warp" style="display:none;text-align:center">' +
-      '<p style="color:#fff;font-size:13px;margin-bottom:8px">Drag each corner dot to match where the ad goes on the wall.</p>' +
-      '<div style="position:relative;display:inline-block;max-width:100%;touch-action:none" id="wm-canvas-wrap"></div>' +
-      '<div style="margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
-      '<button type="button" class="btn btn-outline btn-sm wm-reset" style="color:#fff;border-color:#fff">Reset to rectangle</button>' +
-      '<button type="button" class="btn btn-outline btn-sm wm-retake" style="color:#fff;border-color:#fff">Choose a different photo</button>' +
-      '<button type="button" class="btn btn-primary btn-sm wm-use">Use this photo</button>' +
-      '<button type="button" class="btn btn-outline btn-sm wm-cancel" style="color:#fff;border-color:#fff">Cancel</button>' +
+      '<div id="wm-step-warp" class="wm-card" style="display:none;text-align:center">' +
+      '<div class="wm-eyebrow">Wall preview · Step 2 of 2</div>' +
+      '<div class="wm-title">Position the ad on your wall</div>' +
+      '<div class="wm-sub">Drag each orange dot to match the corner of where the ad will go.</div>' +
+      progressDots(2) +
+      '<div class="wm-canvas-frame" id="wm-canvas-wrap"></div>' +
+      '<div class="wm-btn-row">' +
+      '<button type="button" class="wm-btn wm-reset">↺ Reset to rectangle</button>' +
+      '<button type="button" class="wm-btn wm-retake">← Choose a different photo</button>' +
+      '<button type="button" class="wm-btn wm-btn-primary wm-use">✓ Use this photo</button>' +
       "</div>" +
+      '<div class="wm-btn-row" style="margin-top:0"><button type="button" class="wm-btn wm-cancel" style="border-color:transparent">Cancel</button></div>' +
       "</div>" +
       "</div>";
     document.body.appendChild(overlay);
+    document.addEventListener("keydown", onEscape);
 
     overlay.querySelectorAll(".wm-cancel").forEach(function (b) {
       b.addEventListener("click", closeOverlay);
+    });
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) closeOverlay();
     });
 
     var pickStep = overlay.querySelector("#wm-step-pick");
     var warpStep = overlay.querySelector("#wm-step-warp");
     var photoInput = overlay.querySelector("#wm-photo-input");
+    var dropzone = overlay.querySelector("#wm-dropzone");
     var canvasWrap = overlay.querySelector("#wm-canvas-wrap");
+
+    // Drag-and-drop onto the dropzone, in addition to the native file picker.
+    ["dragenter", "dragover"].forEach(function (evt) {
+      dropzone.addEventListener(evt, function (e) {
+        e.preventDefault();
+        dropzone.classList.add("wm-drag-over");
+      });
+    });
+    ["dragleave", "drop"].forEach(function (evt) {
+      dropzone.addEventListener(evt, function (e) {
+        e.preventDefault();
+        dropzone.classList.remove("wm-drag-over");
+      });
+    });
+    dropzone.addEventListener("drop", function (e) {
+      var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (file) loadPhoto(file);
+    });
 
     photoInput.addEventListener("change", function () {
       var file = photoInput.files && photoInput.files[0];
-      if (!file) return;
+      if (file) loadPhoto(file);
+    });
+
+    function loadPhoto(file) {
       var img = new Image();
       img.onload = function () {
         pickStep.style.display = "none";
         warpStep.style.display = "block";
-        setupWarpEditor(img, file.type || "image/jpeg");
+        setupWarpEditor(img);
+      };
+      img.onerror = function () {
+        showToast("That file couldn't be opened as an image — try a different photo.");
       };
       img.src = URL.createObjectURL(file);
-    });
+    }
 
-    function setupWarpEditor(img, mimeType) {
-      var maxW = Math.min(window.innerWidth - 40, 600);
+    function setupWarpEditor(img) {
+      var maxW = Math.min(window.innerWidth - 72, 560);
       var scale = Math.min(1, maxW / img.naturalWidth);
       var dispW = Math.round(img.naturalWidth * scale);
       var dispH = Math.round(img.naturalHeight * scale);
@@ -193,8 +249,10 @@
       var canvas = document.createElement("canvas");
       canvas.width = dispW;
       canvas.height = dispH;
-      canvas.style.borderRadius = "8px";
+      canvas.style.display = "block";
       canvas.style.maxWidth = "100%";
+      canvas.style.touchAction = "none";
+      canvas.style.cursor = "grab";
       canvasWrap.innerHTML = "";
       canvasWrap.appendChild(canvas);
       var ctx = canvas.getContext("2d");
@@ -226,13 +284,27 @@
         ctx.clearRect(0, 0, dispW, dispH);
         ctx.drawImage(img, 0, 0, dispW, dispH);
         warpImageToQuad(ctx, adGraphic, toPx(corners.tl), toPx(corners.tr), toPx(corners.br), toPx(corners.bl), 10);
+        // Quad outline so the four corners read as one connected shape,
+        // not four disconnected dots.
+        ctx.beginPath();
+        ["tl", "tr", "br", "bl"].forEach(function (key, i) {
+          var p = toPx(corners[key]);
+          if (i === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        });
+        ctx.closePath();
+        ctx.strokeStyle = "rgba(255,107,53,0.9)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
         ["tl", "tr", "br", "bl"].forEach(function (key) {
           var p = toPx(corners[key]);
           ctx.beginPath();
-          ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
+          ctx.arc(p.x, p.y, 11, 0, Math.PI * 2);
           ctx.fillStyle = "#FF6B35";
           ctx.fill();
-          ctx.lineWidth = 2;
+          ctx.lineWidth = 3;
           ctx.strokeStyle = "#fff";
           ctx.stroke();
         });
@@ -246,7 +318,7 @@
         var px = ((e.clientX - rect.left) / rect.width) * dispW;
         var py = ((e.clientY - rect.top) / rect.height) * dispH;
         var best = null,
-          bestDist = 26;
+          bestDist = 30;
         ["tl", "tr", "br", "bl"].forEach(function (key) {
           var p = toPx(corners[key]);
           var dist = Math.hypot(p.x - px, p.y - py);
@@ -257,6 +329,7 @@
         });
         if (best) {
           dragging = best;
+          canvas.style.cursor = "grabbing";
           canvas.setPointerCapture(e.pointerId);
         }
       });
@@ -270,6 +343,7 @@
       });
       function stopDrag() {
         dragging = null;
+        canvas.style.cursor = "grab";
       }
       canvas.addEventListener("pointerup", stopDrag);
       canvas.addEventListener("pointercancel", stopDrag);
@@ -284,6 +358,10 @@
         photoInput.value = "";
       };
       overlay.querySelector(".wm-use").onclick = function () {
+        var useBtn = overlay.querySelector(".wm-use");
+        useBtn.disabled = true;
+        useBtn.textContent = "Processing…";
+
         // Re-render at the photo's native resolution for the actual upload
         // (the on-screen canvas above is a scaled-down preview only).
         var full = document.createElement("canvas");
@@ -300,7 +378,9 @@
         full.toBlob(
           function (blob) {
             if (!blob) {
-              showMessage("Couldn't process that photo — please try again.");
+              showToast("Couldn't process that photo — please try again.");
+              useBtn.disabled = false;
+              useBtn.textContent = "✓ Use this photo";
               return;
             }
             var namedFile = new File([blob], "wall-mockup-" + Date.now() + ".jpg", { type: "image/jpeg" });
@@ -311,9 +391,9 @@
               for (var i = 0; i < existing.length; i++) dt.items.add(existing[i]);
               dt.items.add(namedFile);
               fileInput.files = dt.files;
-              showMessage("Added — it'll upload along with the rest of your photos when you submit.");
+              showToast("Added — it'll upload with the rest of your photos when you submit.");
             } catch (err) {
-              showMessage("Your browser doesn't support attaching this automatically — save the image and upload it manually instead.");
+              showToast("Your browser doesn't support attaching this automatically — save the image and upload it manually instead.");
             }
             closeOverlay();
           },

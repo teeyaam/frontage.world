@@ -6,7 +6,6 @@ import {
   formatMm,
   formatDate,
   svgSpaceDiagram,
-  svgEyesGauge,
   STAGE_LABELS,
   STAGES,
   estimateJobFee,
@@ -37,7 +36,7 @@ function redirect(res, location) {
 async function requireUser(req, res, nextPath) {
   const user = await currentUser(req);
   if (!user) {
-    redirect(res, `/onboarding?next=${encodeURIComponent(nextPath)}`);
+    redirect(res, `/login?next=${encodeURIComponent(nextPath)}`);
     return null;
   }
   return user;
@@ -75,7 +74,7 @@ async function requireContractor(req, res, nextPath) {
 async function requirePermission(req, res, key, nextPath) {
   const user = await currentUser(req);
   if (!user) {
-    redirect(res, `/onboarding?next=${encodeURIComponent(nextPath)}`);
+    redirect(res, `/login?next=${encodeURIComponent(nextPath)}`);
     return null;
   }
   if (!hasPermission(user, key)) {
@@ -87,7 +86,7 @@ async function requirePermission(req, res, key, nextPath) {
 async function requireSuperAdmin(req, res, nextPath) {
   const user = await currentUser(req);
   if (!user) {
-    redirect(res, `/onboarding?next=${encodeURIComponent(nextPath)}`);
+    redirect(res, `/login?next=${encodeURIComponent(nextPath)}`);
     return null;
   }
   if (!user.isAdmin) {
@@ -200,7 +199,7 @@ export async function browsePage(req, res, query) {
         <h1 class="hero-headline">FREE SPACE, <span style="color:var(--orange)">FREE MONEY.</span></h1>
         <p class="hero-sub">List your wall, window, or fence space and start earning from advertisers — or find the right spot to put your ad up.</p>
       </div>
-      ${user ? `<a href="/sell/new" class="btn btn-primary btn-lg">List a space</a>` : `<a href="/onboarding" class="btn btn-primary btn-lg">Get started</a>`}
+      ${user ? `<a href="/sell/new" class="btn btn-primary btn-lg">List a space</a>` : `<a href="/login" class="btn btn-primary btn-lg">Get started</a>`}
     </div>
 
     <div class="row-between" style="margin-bottom:16px;flex-wrap:wrap;gap:10px">
@@ -459,6 +458,46 @@ function mobileFieldMarkup({ idPrefix = "mobile", value = "" } = {}) {
   </script>`;
 }
 
+// Address + suburb/postcode/country + lat/lng, shared by the "list a space"
+// and "edit listing" forms. When GOOGLE_MAPS_API_KEY is configured, the
+// address input gets Google Places Autocomplete (public/address-autocomplete.js)
+// — start typing and pick a real address, which also silently fills
+// suburb/postcode/country/lat/lng. A "can't find it? enter manually" link
+// turns that off for anyone whose address doesn't come up, falling back to
+// plain typed fields exactly like before this existed. No manual lat/lng
+// inputs are ever shown — coordinates come from the picked place, or (if
+// typed manually / no API key) from lib/geo.js's suburb-based lookup at
+// submit time.
+function addressFieldsMarkup({ googleMapsKey, address = "", suburb = "", postcode = "", country = "Australia", lat = "", lng = "" } = {}) {
+  return `
+    <div class="field">
+      <label>Premises address</label>
+      <input type="text" name="address" id="frontage-address-input" required autocomplete="off"
+        value="${escapeHtml(address)}"
+        placeholder="${googleMapsKey ? "Start typing your address…" : "14 Wattle St, Castle Hill NSW"}" />
+      ${
+        googleMapsKey
+          ? `<div class="small muted" id="address-autocomplete-hint" style="margin-top:6px">Pick your address from the Google Maps suggestions as you type.</div>
+             <button type="button" id="address-manual-toggle" class="btn-link small" style="margin-top:4px">Can't find your address? Enter it manually</button>`
+          : ""
+      }
+    </div>
+    <div class="form-row">
+      <div class="field"><label>Suburb / City</label><input name="suburb" id="frontage-suburb-input" required value="${escapeHtml(suburb)}" placeholder="Castle Hill" /></div>
+      <div class="field"><label>Postcode (optional)</label><input name="postcode" id="frontage-postcode-input" value="${escapeHtml(postcode)}" placeholder="2154" /></div>
+    </div>
+    <div class="field"><label>Country</label><input name="country" id="frontage-country-input" value="${escapeHtml(country)}" placeholder="Australia" /></div>
+    <input type="hidden" name="lat" id="frontage-lat-input" value="${lat !== null && lat !== undefined ? lat : ""}" />
+    <input type="hidden" name="lng" id="frontage-lng-input" value="${lng !== null && lng !== undefined ? lng : ""}" />
+    ${
+      googleMapsKey
+        ? `<script src="/address-autocomplete.js"></script>
+           <script src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(googleMapsKey)}&libraries=places&callback=frontageInitAddressAutocomplete" async></script>`
+        : ""
+    }
+  `;
+}
+
 // Password + confirm-password pair with a live "do these match" hint. The
 // `pattern`/`title` mirror lib/auth.js's isStrongPassword() exactly so a
 // password the client accepts is never rejected as a surprise server-side.
@@ -519,6 +558,7 @@ export async function listingDetailPage(req, res, id) {
 
   const photos = listing.photos || [];
   const isOwner = Boolean(user && user.id === listing.ownerId);
+  const googleMapsKey = process.env.GOOGLE_MAPS_API_KEY;
   const thumbStrip =
     photos.length > 1
       ? `<div style="display:flex;gap:6px;margin-top:6px">${photos
@@ -546,14 +586,18 @@ export async function listingDetailPage(req, res, id) {
         ${photos.length ? lightboxMarkup(photos) : ""}
       </div>
       <div>
-        ${listing.estimatedEyesPerDay ? `<div style="margin-bottom:8px">${svgEyesGauge(listing.estimatedEyesPerDay, { big: true })}</div>` : ""}
         <h1 style="font-size:26px">${escapeHtml(listing.title)}</h1>
         <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(locationLine(listing))}${listing.subtype ? ` · ${escapeHtml(listing.subtype)}` : ""}</div>
         <p style="margin-bottom:18px">${escapeHtml(listing.desc)}</p>
-        <div class="panel-tint stat-grid-3" style="margin-bottom:10px">
+        <div class="panel-tint ${listing.estimatedEyesPerDay ? "stat-grid-4" : "stat-grid-3"}" style="margin-bottom:10px">
           <div><div class="mono" style="font-weight:700">${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)}</div><div class="small muted">Space size</div></div>
           <div><div class="mono" style="font-weight:700">${money(listing.price)}/mo</div><div class="small muted">Lease rate (${GST_LABEL})</div></div>
           <div><div class="mono" style="font-weight:700">${escapeHtml(listing.footfall)}</div><div class="small muted">Foot traffic</div></div>
+          ${
+            listing.estimatedEyesPerDay
+              ? `<div><div class="mono" style="font-weight:700">${listing.estimatedEyesPerDay >= 1000 ? (listing.estimatedEyesPerDay / 1000).toFixed(1) + "k" : listing.estimatedEyesPerDay}</div><div class="small muted">Eyes/day est.</div></div>`
+              : ""
+          }
         </div>
         <details class="small muted" style="margin-bottom:18px">
           <summary style="cursor:pointer;color:var(--orange);font-weight:600">What do these numbers mean?</summary>
@@ -571,9 +615,14 @@ export async function listingDetailPage(req, res, id) {
           listing.lat != null && listing.lng != null
             ? `<div id="listing-mini-map" style="height:170px;border-radius:10px;overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
                <script>window.FRONTAGE_SINGLE_LISTING = { lat: ${listing.lat}, lng: ${listing.lng}, title: ${JSON.stringify(listing.title)} };</script>
-               <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-               <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-               <script src="/listing-map.js"></script>`
+               ${
+                 googleMapsKey
+                   ? `<script src="/google-listing-map.js"></script>
+                      <script src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(googleMapsKey)}&callback=frontageInitGoogleListingMap" async></script>`
+                   : `<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+                      <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+                      <script src="/listing-map.js"></script>`
+               }`
             : ""
         }
         ${
@@ -756,7 +805,7 @@ export async function jobChatPage(req, res, id) {
   const asSeller = Boolean(job && user && job.sellerId === user.id);
   const asContractor = Boolean(job && contractor && job.contractorId === contractor.id);
 
-  if (!user && !contractor) return redirect(res, `/onboarding?next=${encodeURIComponent(`/job/${id}/chat`)}`);
+  if (!user && !contractor) return redirect(res, `/login?next=${encodeURIComponent(`/job/${id}/chat`)}`);
   if (!job || (!asSeller && !asContractor)) {
     // Not this job's seller or contractor — show a 404 in whichever portal
     // they're actually logged into, without leaking whether the job exists.
@@ -789,47 +838,140 @@ export async function jobChatPage(req, res, id) {
   send(res, 200, await renderLayout({ title: "Job chat", activeNav: asSeller ? "account-messages" : "contractor-messages", [identityKey]: person, body }));
 }
 
-// ---------------- Onboarding (unified signup/login) ----------------
-export async function onboardingPage(req, res, query, errorMsg) {
+// ---------------- Login ----------------
+// The only entry point into the marketplace identity space — signup, and
+// password reset, are both reachable only from links on this page, never
+// from the main nav directly. Keeps the nav CTA to one obvious action.
+export async function loginPage(req, res, query, errorMsg) {
   const user = await currentUser(req);
   const next = query.get("next") || "/";
   if (user) return redirect(res, next);
 
   const body = `
-    <div class="two-col" style="max-width:900px;margin:0 auto;gap:32px">
-      <div class="form-card">
-        <h2 style="margin-bottom:4px">Create your account</h2>
-        <p class="small muted" style="margin-bottom:16px">One account for browsing, booking, or listing space — no role to pick up front. We only ask for business or payment details later, right when you actually list or book.</p>
-        ${errorMsg ? `<div class="badge badge-orange" style="margin-bottom:12px;display:block">${escapeHtml(errorMsg)}</div>` : ""}
-        <form method="POST" action="/api/auth/signup">
-          <input type="hidden" name="next" value="${escapeHtml(next)}" />
-          <div class="field"><label>Full name</label><input name="fullName" required placeholder="Jordan Reyes" value="${escapeHtml(query.get("fullName") || "")}" /></div>
-          <div class="field"><label>Email</label><input type="email" name="email" required placeholder="jordan@email.com" value="${escapeHtml(query.get("email") || "")}" /></div>
-          ${mobileFieldMarkup({ idPrefix: "signup-mobile", value: query.get("mobile") || "" })}
-          ${passwordFieldsMarkup({ idPrefix: "signup-pw" })}
-          <button class="btn btn-primary btn-block" type="submit">Create free account</button>
-        </form>
-      </div>
-      <div class="form-card">
-        <h2 style="margin-bottom:4px">Already have an account?</h2>
-        <p class="small muted" style="margin-bottom:16px">Log in to pick up where you left off.</p>
-        <form method="POST" action="/api/auth/login">
-          <input type="hidden" name="next" value="${escapeHtml(next)}" />
-          <div class="field"><label>Email</label><input type="email" name="email" required /></div>
-          <div class="field"><label>Password</label><input type="password" name="password" required /></div>
-          <button class="btn btn-outline btn-block" type="submit">Log in</button>
-        </form>
-        <div class="divider"></div>
-        <p class="small muted">Demo accounts (password <span class="mono">password123</span>):</p>
-        <ul class="small muted" style="padding-left:18px">
-          <li>marco@castlehillbjj.com.au — seller</li>
-          <li>jordan@openhouserealty.com.au — buyer</li>
-        </ul>
-        <p class="small muted" style="margin-top:8px">Contractor? That's a separate login at <a href="/contractor/login" style="color:var(--orange)">/contractor/login</a>.</p>
-      </div>
+    <div class="form-card" style="max-width:420px;margin:32px auto">
+      <h2 style="margin-bottom:4px">Log in</h2>
+      <p class="small muted" style="margin-bottom:16px">Welcome back — pick up where you left off.</p>
+      ${errorMsg ? `<div class="badge badge-orange" style="margin-bottom:12px;display:block">${escapeHtml(errorMsg)}</div>` : ""}
+      <form method="POST" action="/api/auth/login">
+        <input type="hidden" name="next" value="${escapeHtml(next)}" />
+        <div class="field"><label>Email</label><input type="email" name="email" required autofocus /></div>
+        <div class="field">
+          <label>Password</label>
+          <div class="pw-wrap">
+            <input type="password" name="password" id="login-password" required />
+            <button type="button" class="pw-toggle" id="login-password-reveal" aria-label="Show password">Show</button>
+          </div>
+        </div>
+        <div class="small" style="margin:-8px 0 16px;text-align:right">
+          <a href="/forgot-password" style="color:var(--orange)">Can't remember your password? Click here to reset</a>
+        </div>
+        <button class="btn btn-primary btn-block" type="submit">Log in</button>
+      </form>
+      <div class="divider"></div>
+      <p class="small muted" style="text-align:center">Don't have an account? <a href="/signup?${new URLSearchParams({ next }).toString()}" style="color:var(--orange);font-weight:600">Click here to create an account</a></p>
+      <p class="small muted" style="margin-top:14px">Demo accounts (password <span class="mono">password123</span>):</p>
+      <ul class="small muted" style="padding-left:18px">
+        <li>marco@castlehillbjj.com.au — seller</li>
+        <li>jordan@openhouserealty.com.au — buyer</li>
+      </ul>
+      <p class="small muted" style="margin-top:8px">Contractor? That's a separate login at <a href="/contractor/login" style="color:var(--orange)">/contractor/login</a>.</p>
+    </div>
+    <script>
+      (function () {
+        var pw = document.getElementById("login-password");
+        var btn = document.getElementById("login-password-reveal");
+        if (!pw || !btn) return;
+        btn.addEventListener("click", function () {
+          var showing = pw.type === "text";
+          pw.type = showing ? "password" : "text";
+          btn.textContent = showing ? "Show" : "Hide";
+        });
+      })();
+    </script>
+  `;
+  send(res, 200, await layout({ title: "Log in", user: null, body }));
+}
+
+// ---------------- Sign up ----------------
+// Reachable only via the "create an account" link on the login page above —
+// there is deliberately no direct nav link to this page.
+export async function signupPage(req, res, query, errorMsg) {
+  const user = await currentUser(req);
+  const next = query.get("next") || "/";
+  if (user) return redirect(res, next);
+
+  const body = `
+    <div class="form-card" style="max-width:460px;margin:32px auto">
+      <h2 style="margin-bottom:4px">Create your account</h2>
+      <p class="small muted" style="margin-bottom:16px">One account for browsing, booking, or listing space — no role to pick up front. We only ask for business or payment details later, right when you actually list or book.</p>
+      ${errorMsg ? `<div class="badge badge-orange" style="margin-bottom:12px;display:block">${escapeHtml(errorMsg)}</div>` : ""}
+      <form method="POST" action="/api/auth/signup">
+        <input type="hidden" name="next" value="${escapeHtml(next)}" />
+        <div class="field"><label>Full name</label><input name="fullName" required placeholder="Jordan Reyes" value="${escapeHtml(query.get("fullName") || "")}" /></div>
+        <div class="field"><label>Email</label><input type="email" name="email" required placeholder="jordan@email.com" value="${escapeHtml(query.get("email") || "")}" /></div>
+        ${mobileFieldMarkup({ idPrefix: "signup-mobile", value: query.get("mobile") || "" })}
+        ${passwordFieldsMarkup({ idPrefix: "signup-pw" })}
+        <button class="btn btn-primary btn-block" type="submit">Create free account</button>
+      </form>
+      <div class="divider"></div>
+      <p class="small muted" style="text-align:center">Already have an account? <a href="/login?${new URLSearchParams({ next }).toString()}" style="color:var(--orange);font-weight:600">Log in instead</a></p>
     </div>
   `;
-  send(res, 200, await layout({ title: "Sign up / Log in", user: null, body }));
+  send(res, 200, await layout({ title: "Create your account", user: null, body }));
+}
+
+// ---------------- Forgot password ----------------
+export async function forgotPasswordPage(req, res, query, message) {
+  const user = await currentUser(req);
+  if (user) return redirect(res, "/account");
+
+  const body = `
+    <div class="form-card" style="max-width:420px;margin:32px auto">
+      <h2 style="margin-bottom:4px">Reset your password</h2>
+      <p class="small muted" style="margin-bottom:16px">Enter the email you signed up with — if we find an account, we'll send a link to reset your password.</p>
+      ${message ? `<div class="badge badge-blue" style="margin-bottom:12px;display:block">${escapeHtml(message)}</div>` : ""}
+      <form method="POST" action="/api/auth/forgot-password">
+        <div class="field"><label>Email</label><input type="email" name="email" required autofocus placeholder="jordan@email.com" /></div>
+        <button class="btn btn-primary btn-block" type="submit">Send reset link</button>
+      </form>
+      <div class="divider"></div>
+      <p class="small muted" style="text-align:center"><a href="/login" style="color:var(--orange)">← Back to login</a></p>
+    </div>
+  `;
+  send(res, 200, await layout({ title: "Reset your password", user: null, body }));
+}
+
+// GET /reset-password?token=... — the link from the reset email.
+export async function resetPasswordPage(req, res, query, errorMsg) {
+  const token = query.get("token") || "";
+  const user = await currentUser(req);
+  if (user) return redirect(res, "/account");
+
+  const valid = token && (await db.getUserByResetToken(token));
+  if (!valid) {
+    const body = `
+      <div class="form-card" style="max-width:420px;margin:32px auto;text-align:center">
+        <h2 style="margin-bottom:8px">This link isn't valid</h2>
+        <p class="small muted" style="margin-bottom:16px">It may have already been used, or has expired. Request a new one below.</p>
+        <a href="/forgot-password" class="btn btn-primary btn-block">Request a new reset link</a>
+      </div>
+    `;
+    return send(res, 200, await layout({ title: "Reset link invalid", user: null, body }));
+  }
+
+  const body = `
+    <div class="form-card" style="max-width:420px;margin:32px auto">
+      <h2 style="margin-bottom:4px">Choose a new password</h2>
+      <p class="small muted" style="margin-bottom:16px">Resetting the password for <strong>${escapeHtml(valid.email)}</strong>.</p>
+      ${errorMsg ? `<div class="badge badge-orange" style="margin-bottom:12px;display:block">${escapeHtml(errorMsg)}</div>` : ""}
+      <form method="POST" action="/api/auth/reset-password">
+        <input type="hidden" name="token" value="${escapeHtml(token)}" />
+        ${passwordFieldsMarkup({ idPrefix: "reset-pw", label: "New password" })}
+        <button class="btn btn-primary btn-block" type="submit">Set new password</button>
+      </form>
+    </div>
+  `;
+  send(res, 200, await layout({ title: "Choose a new password", user: null, body }));
 }
 
 // Post-signup confirmation. The account is already created and logged in at
@@ -837,7 +979,7 @@ export async function onboardingPage(req, res, query, errorMsg) {
 // verification email is waiting, instead of being dropped back on browse.
 export async function welcomePage(req, res, query) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding");
+  if (!user) return redirect(res, "/login");
   const next = query.get("next") || "/";
 
   const body = `
@@ -885,6 +1027,8 @@ export async function sellNewPage(req, res, query) {
     )
     .join("");
 
+  const googleMapsKey = process.env.GOOGLE_MAPS_API_KEY;
+
   const body = `
     <h1 style="font-size:22px;margin-bottom:6px">List your space</h1>
     <p class="muted" style="margin-bottom:20px">We only ask for business and payout details the first time you list.</p>
@@ -909,18 +1053,7 @@ export async function sellNewPage(req, res, query) {
           </div>
           <div class="field"><label>Space type (optional)</label><input name="subtype" placeholder="e.g. front fence panel, driveway sign board" /></div>
         </div>
-        <div class="form-row">
-          <div class="field"><label>Suburb / City</label><input name="suburb" required placeholder="Castle Hill" /></div>
-          <div class="field"><label>Premises address</label><input name="address" required value="${escapeHtml(user.address || "")}" placeholder="14 Wattle St, Castle Hill NSW" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Postcode (optional)</label><input name="postcode" placeholder="2154" /></div>
-          <div class="field"><label>Country</label><input name="country" value="Australia" placeholder="Australia" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Map latitude (optional)</label><input type="number" step="any" name="lat" placeholder="auto from suburb" /></div>
-          <div class="field"><label>Map longitude (optional)</label><input type="number" step="any" name="lng" placeholder="auto from suburb" /></div>
-        </div>
+        ${addressFieldsMarkup({ googleMapsKey, address: user.address || "" })}
         <div class="form-row">
           <div class="field"><label>Width (mm)</label><input type="number" id="sizeW" name="sizeW" required min="1" placeholder="2000" /></div>
           <div class="field"><label>Height (mm)</label><input type="number" id="sizeH" name="sizeH" required min="1" placeholder="3000" /></div>
@@ -930,6 +1063,7 @@ export async function sellNewPage(req, res, query) {
           <div class="field"><label>Monthly rate (AUD, excl. GST)</label><input type="number" name="price" required min="1" step="0.01" placeholder="100" /></div>
           <div class="field"><label>Estimated daily eyes (leave blank to auto-estimate)</label><input type="number" name="estimatedEyesPerDay" min="0" placeholder="e.g. 250" /></div>
         </div>
+        <div class="field"><label>Foot traffic</label><input name="footfall" placeholder="e.g. Busy — 500+ visitors a week" /></div>
         <div class="field"><label>Description</label><textarea name="desc" rows="3" placeholder="What makes this space worth advertising on?"></textarea></div>
         <div class="field"><label>Photos (up to 8)</label><input type="file" name="photos" accept="image/*" multiple /></div>
 
@@ -988,6 +1122,8 @@ export async function editListingPage(req, res, id, query) {
     )
     .join("");
 
+  const googleMapsKey = process.env.GOOGLE_MAPS_API_KEY;
+
   const body = `
     <a href="/sell/new" class="small muted">← Back to your listings</a>
     <h1 style="font-size:22px;margin:10px 0 6px">Edit listing</h1>
@@ -1022,18 +1158,15 @@ export async function editListingPage(req, res, id, query) {
           </div>
           <div class="field"><label>Space type (optional)</label><input name="subtype" value="${escapeHtml(listing.subtype || "")}" /></div>
         </div>
-        <div class="form-row">
-          <div class="field"><label>Suburb / City</label><input name="suburb" required value="${escapeHtml(listing.suburb)}" /></div>
-          <div class="field"><label>Premises address</label><input name="address" required value="${escapeHtml(listing.address)}" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Postcode (optional)</label><input name="postcode" value="${escapeHtml(listing.postcode || "")}" placeholder="2154" /></div>
-          <div class="field"><label>Country</label><input name="country" value="${escapeHtml(listing.country || "Australia")}" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Map latitude (optional)</label><input type="number" step="any" name="lat" value="${listing.lat != null ? listing.lat : ""}" /></div>
-          <div class="field"><label>Map longitude (optional)</label><input type="number" step="any" name="lng" value="${listing.lng != null ? listing.lng : ""}" /></div>
-        </div>
+        ${addressFieldsMarkup({
+          googleMapsKey,
+          address: listing.address,
+          suburb: listing.suburb,
+          postcode: listing.postcode || "",
+          country: listing.country || "Australia",
+          lat: listing.lat,
+          lng: listing.lng,
+        })}
         <div class="form-row">
           <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required min="1" value="${listing.sizeW}" /></div>
           <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required min="1" value="${listing.sizeH}" /></div>
@@ -1042,6 +1175,7 @@ export async function editListingPage(req, res, id, query) {
           <div class="field"><label>Monthly rate (AUD, excl. GST)</label><input type="number" name="price" required min="1" step="0.01" value="${listing.price}" /></div>
           <div class="field"><label>Estimated daily eyes</label><input type="number" name="estimatedEyesPerDay" min="0" value="${listing.estimatedEyesPerDay || ""}" /></div>
         </div>
+        <div class="field"><label>Foot traffic</label><input name="footfall" value="${escapeHtml(listing.footfall || "")}" placeholder="e.g. Busy — 500+ visitors a week" /></div>
         <div class="field"><label>Description</label><textarea name="desc" rows="3">${escapeHtml(listing.desc || "")}</textarea></div>
         <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Save changes</button>
       </form>
@@ -1168,7 +1302,7 @@ export async function claimListingPage(req, res, token) {
       ${
         user
           ? `<form method="POST" action="/api/claim/${token}"><button class="btn btn-primary btn-block" type="submit">Claim this listing as ${escapeHtml(user.fullName)}</button></form>`
-          : `<a href="/onboarding?next=${encodeURIComponent(`/claim/${token}`)}" class="btn btn-primary btn-block">Sign up or log in to claim this listing</a>`
+          : `<a href="/login?next=${encodeURIComponent(`/claim/${token}`)}" class="btn btn-primary btn-block">Sign up or log in to claim this listing</a>`
       }
     </div>
   `;

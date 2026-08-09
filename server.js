@@ -102,6 +102,8 @@ const server = http.createServer(async (req, res) => {
         pathname === "/map.js" ||
         pathname === "/google-map.js" ||
         pathname === "/listing-map.js" ||
+        pathname === "/google-listing-map.js" ||
+        pathname === "/address-autocomplete.js" ||
         pathname.startsWith("/uploads/listings/"))
     ) {
       if (serveStatic(req, res, pathname)) return;
@@ -118,7 +120,16 @@ const server = http.createServer(async (req, res) => {
     // ---------- GET pages ----------
     if (method === "GET" && pathname === "/") return await pages.browsePage(req, res, query);
     if (method === "GET" && pathname === "/api/listings/map") return await api.listingsMapJson(req, res, query);
-    if (method === "GET" && pathname === "/onboarding") return await pages.onboardingPage(req, res, query, query.get("err"));
+    // Legacy URL — this used to be the combined signup/login page, kept as a
+    // redirect so old bookmarks/indexed links don't 404.
+    if (method === "GET" && pathname === "/onboarding") {
+      res.writeHead(302, { Location: `/login${url.search}` });
+      return res.end();
+    }
+    if (method === "GET" && pathname === "/login") return await pages.loginPage(req, res, query, query.get("err"));
+    if (method === "GET" && pathname === "/signup") return await pages.signupPage(req, res, query, query.get("err"));
+    if (method === "GET" && pathname === "/forgot-password") return await pages.forgotPasswordPage(req, res, query, query.get("msg"));
+    if (method === "GET" && pathname === "/reset-password") return await pages.resetPasswordPage(req, res, query, query.get("err"));
     if (method === "GET" && pathname === "/welcome") return await pages.welcomePage(req, res, query);
     if (method === "GET" && pathname === "/terms/buyer") return await pages.buyerTermsPage(req, res);
     if (method === "GET" && pathname === "/terms/seller") return await pages.sellerTermsPage(req, res);
@@ -166,6 +177,8 @@ const server = http.createServer(async (req, res) => {
     if (method === "POST" && pathname === "/api/auth/signup") return await api.signup(req, res);
     if (method === "POST" && pathname === "/api/auth/login") return await api.login(req, res);
     if (method === "POST" && pathname === "/api/auth/logout") return await api.logout(req, res);
+    if (method === "POST" && pathname === "/api/auth/forgot-password") return await api.forgotPassword(req, res);
+    if (method === "POST" && pathname === "/api/auth/reset-password") return await api.resetPassword(req, res);
     if (method === "POST" && pathname === "/api/contractor-auth/signup") return await api.contractorSignup(req, res);
     if (method === "POST" && pathname === "/api/contractor-auth/login") return await api.contractorLogin(req, res);
     if (method === "POST" && pathname === "/api/contractor-auth/logout") return await api.contractorLogout(req, res);
@@ -217,8 +230,8 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`Frontage running at http://localhost:${PORT}`);
   console.log(`Demo accounts (password: password123):`);
-  console.log(`  marco@castlehillbjj.com.au   — seller (log in at /onboarding)`);
-  console.log(`  jordan@openhouserealty.com.au — buyer (log in at /onboarding)`);
+  console.log(`  marco@castlehillbjj.com.au   — seller (log in at /login)`);
+  console.log(`  jordan@openhouserealty.com.au — buyer (log in at /login)`);
   console.log(`  alex@thesigndepot.com.au     — contractor, pre-approved (log in at /contractor/login)`);
-  console.log(`  admin@frontage.app           — super-admin (log in at /onboarding, then visit /admin/staff)`);
+  console.log(`  admin@frontage.app           — super-admin (log in at /login, then visit /admin/staff)`);
 });

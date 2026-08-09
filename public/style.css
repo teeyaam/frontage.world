@@ -162,6 +162,7 @@ a { color: inherit; text-decoration: none; }
 .small { font-size: 12px; }
 .two-col { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
 .stat-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; text-align: center; }
+.stat-grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; text-align: center; }
 .steps { display: flex; gap: 10px; flex-wrap: wrap; }
 .step { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .step-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
@@ -183,12 +184,39 @@ a { color: inherit; text-decoration: none; }
 .chat-form input { flex: 1; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--concrete); font-size: 13px; font-family: inherit; }
 
 /* AR wall visualizer */
-.ar-overlay { position: fixed; inset: 0; background: #000; z-index: 100; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.ar-overlay { position: fixed; inset: 0; background: rgba(10,12,16,0.92); backdrop-filter: blur(2px); z-index: 100; display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .ar-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .ar-rect { position: relative; border: 3px dashed var(--orange); background: rgba(255,107,53,0.12); box-shadow: 0 0 0 2000px rgba(0,0,0,0.35); }
 .ar-tilt-badge { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.6); color: var(--white); font-family: 'IBM Plex Mono', monospace; font-size: 12px; padding: 6px 12px; border-radius: 999px; }
 .ar-controls { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex; gap: 12px; align-items: center; background: rgba(0,0,0,0.5); padding: 10px 14px; border-radius: 999px; }
 .ar-controls input[type="range"] { width: 140px; }
+
+/* Wall-mockup tool (public/wall-visualizer.js) — its own panel + button
+   styles, scoped under .wm-panel, so a plain .btn-outline never has to be
+   redefined for a dark backdrop (that mismatch — white text forced onto
+   .btn-outline's default white background — is what made these buttons
+   read as blank before). */
+.wm-panel { width: 100%; max-width: 640px; margin: 0 auto; padding: 0 16px; box-sizing: border-box; }
+.wm-card { background: var(--ink); border: 1px solid rgba(255,255,255,0.12); border-radius: 16px; padding: 24px 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+.wm-close { position: absolute; top: 18px; right: 18px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.06); color: var(--white); font-size: 18px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.wm-close:hover { background: rgba(255,255,255,0.16); }
+.wm-eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--orange); margin-bottom: 6px; }
+.wm-title { color: var(--white); font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+.wm-sub { color: rgba(255,255,255,0.65); font-size: 13px; line-height: 1.5; margin-bottom: 18px; }
+.wm-dropzone { border: 2px dashed rgba(255,255,255,0.25); border-radius: 12px; padding: 32px 20px; text-align: center; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+.wm-dropzone:hover, .wm-dropzone.wm-drag-over { border-color: var(--orange); background: rgba(255,107,53,0.08); }
+.wm-dropzone-icon { font-size: 30px; margin-bottom: 8px; }
+.wm-canvas-frame { border-radius: 12px; overflow: hidden; box-shadow: 0 8px 30px rgba(0,0,0,0.45); display: inline-block; line-height: 0; touch-action: none; }
+.wm-btn-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 18px; }
+.wm-btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; border: 1px solid rgba(255,255,255,0.25); background: transparent; color: rgba(255,255,255,0.85); transition: background 0.15s, border-color 0.15s, color 0.15s; }
+.wm-btn:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.5); color: var(--white); }
+.wm-btn-primary { background: var(--orange); border-color: var(--orange); color: var(--white); }
+.wm-btn-primary:hover { background: #E55A26; border-color: #E55A26; }
+.wm-hint { color: rgba(255,255,255,0.55); font-size: 12.5px; line-height: 1.5; margin-bottom: 14px; }
+.wm-progress { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 18px; }
+.wm-progress-dot { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,0.25); }
+.wm-progress-dot.wm-active { background: var(--orange); width: 20px; border-radius: 4px; }
+.wm-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--white); padding: 11px 18px; border-radius: 8px; font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 101; max-width: 90vw; text-align: center; }
 
 /* mobile */
 @media (max-width: 680px) {
@@ -197,6 +225,7 @@ a { color: inherit; text-decoration: none; }
   .nav { order: 3; width: 100%; flex-wrap: wrap; gap: 8px 16px; }
   .nav-user { flex-wrap: wrap; }
   .two-col, .stat-grid-3 { grid-template-columns: 1fr; }
+  .stat-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .site-main { padding: 16px 14px 40px; }
   .form-card { max-width: 100%; }
   .card-diagram { height: 160px; }

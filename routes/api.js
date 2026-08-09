@@ -27,6 +27,7 @@ import {
   isEmailConfigured,
   sendEmail,
   verificationEmail,
+  passwordResetEmail,
   bookingSellerEmail,
   bookingBuyerEmail,
   jobUpdateEmail,
@@ -69,7 +70,7 @@ export async function signup(req, res) {
     if (fullName) params.set("fullName", fullName);
     if (email) params.set("email", email);
     if (mobile) params.set("mobile", mobile);
-    return redirect(res, `/onboarding?${params.toString()}`);
+    return redirect(res, `/signup?${params.toString()}`);
   };
 
   if (!fullName || !email || !mobile || !password) return reject("Please fill every field.");
@@ -108,7 +109,7 @@ export async function verifyEmailHandler(req, res, query) {
 
 export async function resendVerificationHandler(req, res) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/account");
+  if (!user) return redirect(res, "/login?next=/account");
   if (user.emailVerifiedAt) return redirect(res, "/account");
   const token = user.emailVerifyToken || crypto.randomBytes(24).toString("hex");
   await db.updateUser(user.id, { emailVerifyToken: token });
@@ -128,7 +129,7 @@ export async function login(req, res) {
   const { email, password, next } = body;
   const user = await db.getUserByEmail(email || "");
   if (!user || !verifyPassword(password || "", user.passwordHash, user.passwordSalt)) {
-    return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("Incorrect email or password.")}`);
+    return redirect(res, `/login?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("Incorrect email or password.")}`);
   }
   const session = await db.createSession(user.id);
   redirect(res, next || "/", sessionCookieHeader(session.token));
@@ -139,6 +140,52 @@ export async function logout(req, res) {
   const token = cookies["frontage_session"];
   if (token) await db.destroySession(token);
   redirect(res, "/", clearCookieHeader());
+}
+
+// ---------------- Forgot / reset password ----------------
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+export async function forgotPassword(req, res) {
+  const b = await readBody(req);
+  const email = (b.email || "").trim();
+  const genericMsg = "If an account exists for that email, a reset link is on its way — check your inbox.";
+  if (!email) return redirect(res, `/forgot-password?msg=${encodeURIComponent("Please enter your email.")}`);
+
+  const user = await db.getUserByEmail(email);
+  // Never reveal whether the email matched an account — same message either
+  // way, so this can't be used to enumerate registered emails.
+  if (!user) return redirect(res, `/forgot-password?msg=${encodeURIComponent(genericMsg)}`);
+
+  if (!isEmailConfigured()) {
+    // Nothing can deliver the link yet — say so plainly rather than the
+    // generic message, which would otherwise look like a silent failure.
+    return redirect(res, `/forgot-password?msg=${encodeURIComponent("Password reset isn't available yet — email isn't configured. Contact support for help.")}`);
+  }
+
+  const token = crypto.randomBytes(24).toString("hex");
+  await db.setPasswordResetToken(user.id, token, Date.now() + RESET_TOKEN_TTL_MS);
+  await trySend(passwordResetEmail(user, token));
+  redirect(res, `/forgot-password?msg=${encodeURIComponent(genericMsg)}`);
+}
+
+export async function resetPassword(req, res) {
+  const b = await readBody(req);
+  const { token, password, confirmPassword } = b;
+  const user = token && (await db.getUserByResetToken(token));
+  if (!user) return redirect(res, `/reset-password?token=${encodeURIComponent(token || "")}&err=${encodeURIComponent("This reset link is invalid or has expired.")}`);
+  if (!isStrongPassword(password)) {
+    return redirect(res, `/reset-password?token=${encodeURIComponent(token)}&err=${encodeURIComponent("Password too weak — " + PASSWORD_HINT)}`);
+  }
+  if (password !== confirmPassword) {
+    return redirect(res, `/reset-password?token=${encodeURIComponent(token)}&err=${encodeURIComponent("Password and confirmation don't match.")}`);
+  }
+  const { hash, salt } = hashPassword(password);
+  await db.updateUser(user.id, { passwordHash: hash, passwordSalt: salt });
+  await db.clearPasswordResetToken(user.id);
+  // Log the user straight in — they just proved control of the account's
+  // email, no reason to make them re-enter the password they just set.
+  const session = await db.createSession(user.id);
+  redirect(res, "/account?updated=Password", sessionCookieHeader(session.token));
 }
 
 // ---------------- Contractor auth (fully separate identity space) ----------------
@@ -184,7 +231,7 @@ export async function contractorLogout(req, res) {
 // ---------------- Listings ----------------
 export async function createListingHandler(req, res) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/sell/new");
+  if (!user) return redirect(res, "/login?next=/sell/new");
   if (emailUnverified(user)) return redirect(res, `/sell/new?err=${encodeURIComponent("Please verify your email before listing a space — check your inbox, or resend the link from your Account page.")}`);
   const ok = await runUpload(req, res, uploadListingPhotos, {
     onError: (message) => redirect(res, `/sell/new?err=${encodeURIComponent(message)}`),
@@ -236,6 +283,7 @@ export async function createListingHandler(req, res) {
     desc: b.desc || "",
     photos,
     estimatedEyesPerDay,
+    footfall: b.footfall && b.footfall.trim() ? b.footfall.trim() : "New listing",
     lat: coords.lat,
     lng: coords.lng,
   });
@@ -316,7 +364,7 @@ export async function listingsMapJson(req, res, query) {
 
 export async function claimListingHandler(req, res, token) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, `/onboarding?next=${encodeURIComponent(`/claim/${token}`)}`);
+  if (!user) return redirect(res, `/login?next=${encodeURIComponent(`/claim/${token}`)}`);
   const claimed = await db.claimListing(token, user.id);
   if (!claimed) return badRequest(res, "This claim link is no longer valid.");
   redirect(res, `/listing/${claimed.id}`);
@@ -326,7 +374,7 @@ export async function claimListingHandler(req, res, token) {
 async function requireOwnedListing(req, res, id) {
   const user = await currentUser(req);
   if (!user) {
-    redirect(res, `/onboarding?next=${encodeURIComponent(`/sell/edit/${id}`)}`);
+    redirect(res, `/login?next=${encodeURIComponent(`/sell/edit/${id}`)}`);
     return null;
   }
   const listing = await db.getListingById(id);
@@ -375,6 +423,7 @@ export async function updateListingHandler(req, res, id) {
     price,
     desc: b.desc || "",
     estimatedEyesPerDay,
+    footfall: b.footfall && b.footfall.trim() ? b.footfall.trim() : listing.footfall,
     lat: coords.lat,
     lng: coords.lng,
   });
@@ -463,7 +512,7 @@ export async function createBookingIntentHandler(req, res) {
 
 export async function createBookingHandler(req, res) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/");
+  if (!user) return redirect(res, "/login?next=/");
   if (emailUnverified(user)) return badRequest(res, "Please verify your email before booking.");
   const b = await readBody(req);
   const listing = await db.getListingById(b.listingId);
@@ -564,7 +613,7 @@ export async function getJobOrderMessagesJson(req, res, id) {
 
 export async function postListingMessage(req, res, listingId) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, `/onboarding?next=/listing/${listingId}`);
+  if (!user) return redirect(res, `/login?next=/listing/${listingId}`);
   const listing = await db.getListingById(listingId);
   if (!listing) return badRequest(res, "Listing not found.");
   const b = await readBody(req);
@@ -610,7 +659,7 @@ export async function endLeaseHandler(req, res, id) {
 // ---------------- Job orders ----------------
 export async function jobOrderAccess(req, res, id) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/seller/jobs");
+  if (!user) return redirect(res, "/login?next=/seller/jobs");
   const job = await db.getJobOrderById(id);
   if (!job || job.sellerId !== user.id) return badRequest(res, "Not your job order.");
   const b = await readBody(req);
@@ -708,7 +757,7 @@ export async function contactSubmit(req, res) {
 // ---------------- Account ----------------
 export async function updateAccountProfile(req, res) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/account");
+  if (!user) return redirect(res, "/login?next=/account");
   const b = await readBody(req);
   if (!b.fullName || !b.email || !b.mobile) {
     return redirect(res, `/account?err=${encodeURIComponent("Name, email, and mobile are required.")}`);
@@ -731,7 +780,7 @@ export async function updateAccountProfile(req, res) {
 
 export async function updateAccountPassword(req, res) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/account");
+  if (!user) return redirect(res, "/login?next=/account");
   const b = await readBody(req);
   if (!verifyPassword(b.currentPassword || "", user.passwordHash, user.passwordSalt)) {
     return redirect(res, `/account?err=${encodeURIComponent("Current password is incorrect.")}`);
@@ -749,7 +798,7 @@ export async function updateAccountPassword(req, res) {
 
 export async function updateAccountBanking(req, res) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/account");
+  if (!user) return redirect(res, "/login?next=/account");
   const b = await readBody(req);
   if (!b.bankBsb || !b.bankAccount || !b.bankAccountName) {
     return redirect(res, `/account?err=${encodeURIComponent("BSB, account number, and account name are all required.")}`);
@@ -911,7 +960,7 @@ export async function stripeWebhook(req, res) {
 // ---------------- Stripe Connect Express onboarding (seller payouts) ----------------
 export async function connectPayoutsHandler(req, res) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/account");
+  if (!user) return redirect(res, "/login?next=/account");
   if (!isStripeConfigured()) return badRequest(res, "Stripe is not configured yet.");
 
   let accountId = user.stripeConnectAccountId;

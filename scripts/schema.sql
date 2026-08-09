@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS users (
   stripe_connect_account_id TEXT,
   email_verified_at TIMESTAMPTZ,
   email_verify_token TEXT,
+  password_reset_token TEXT,
+  password_reset_expires_at BIGINT, -- epoch ms, matches sessions.expires_at's convention
   last_messages_seen_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -57,6 +59,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at BIGINT NOT NULL -- epoch ms, matches Date.now()-based comparisons in lib/db.js
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_users_password_reset_token ON users(password_reset_token);
 
 -- ---------- contractors (wholly separate identity space) ----------
 CREATE TABLE IF NOT EXISTS contractors (
