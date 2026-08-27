@@ -25,6 +25,7 @@ import { adUnitMarkup } from "../lib/ads.js";
 import { PASSWORD_PATTERN, PASSWORD_HINT } from "../lib/auth.js";
 import { COUNTRIES } from "../lib/countries.js";
 import { filterListings } from "../lib/listingFilters.js";
+import { approximateCoords, distanceKm } from "../lib/geo.js";
 
 function send(res, status, html) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
@@ -141,6 +142,59 @@ export async function browsePage(req, res, query) {
   listings = filterListings(listings, query);
   listings = listings.slice().sort(SORT_OPTIONS[sortKey].cmp);
 
+  // Zero-results fallback: a search for a real but unlisted suburb used to
+  // just say "no spaces match" and leave the buyer stuck. If a location was
+  // actually searched (the City/Suburb filter, or the main search box),
+  // suggest the nearest suburbs that do have matching listings instead.
+  // "Matching" ignores only the location text — category/price/etc still
+  // apply, so the suggestions are still relevant, not just nearby noise.
+  const locationTerm = (query.get("city") || query.get("q") || "").trim();
+  let nearbySuggestions = [];
+  if (listings.length === 0 && locationTerm) {
+    const noLocationParams = new URLSearchParams(query);
+    noLocationParams.delete("q");
+    noLocationParams.delete("city");
+    const candidates = filterListings(allListings, noLocationParams);
+    if (candidates.length) {
+      const target = await approximateCoords(locationTerm, query.get("country") || undefined);
+      const bySuburb = new Map();
+      for (const l of candidates) {
+        if (typeof l.lat !== "number" || typeof l.lng !== "number" || !l.suburb) continue;
+        const key = l.suburb.toLowerCase();
+        if (key === locationTerm.toLowerCase()) continue;
+        const dist = distanceKm(target, { lat: l.lat, lng: l.lng });
+        const entry = bySuburb.get(key) || { suburb: l.suburb, dist: Infinity, count: 0 };
+        entry.count += 1;
+        if (dist < entry.dist) entry.dist = dist;
+        bySuburb.set(key, entry);
+      }
+      nearbySuggestions = [...bySuburb.values()].sort((a, b) => a.dist - b.dist).slice(0, 5);
+    }
+  }
+  // Same param set as withParams below, but also carries "category" (which
+  // withParams deliberately drops for the Clear-filters link) and swaps in
+  // the suggested suburb as the city filter, dropping the free-text search
+  // that came up empty.
+  function nearbySuburbHref(suburb) {
+    const params = new URLSearchParams();
+    for (const key of FILTER_PARAM_KEYS) {
+      if (key === "q") continue;
+      const val = query.get(key);
+      if (val) params.set(key, val);
+    }
+    if (cat && cat !== "all") params.set("category", cat);
+    params.set("city", suburb);
+    return `/?${params.toString()}`;
+  }
+  const noResultsHtml = nearbySuggestions.length
+    ? `<p class="muted">No spaces match "${escapeHtml(locationTerm)}". Try a nearby suburb instead:</p>
+       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+         ${nearbySuggestions
+           .map((s) => `<a href="${nearbySuburbHref(s.suburb)}" class="btn btn-outline btn-sm">${escapeHtml(s.suburb)} (${s.count})</a>`)
+           .join("")}
+       </div>`
+    : `<p class="muted">No spaces match that search.</p>`;
+
   // Carries every active filter/sort param forward into a link's querystring
   // (used by category chips) so switching category never resets a filter.
   function withParams(extra) {
@@ -245,7 +299,7 @@ export async function browsePage(req, res, query) {
         </form>
       </details>
     </div>
-    <div id="browse-results"${mapView ? ` style="display:none"` : ""}>${listings.length === 0 ? `<p class="muted">No spaces match that search.</p>` : `<div class="grid">${cards}</div>`}</div>
+    <div id="browse-results"${mapView ? ` style="display:none"` : ""}>${listings.length === 0 ? noResultsHtml : `<div class="grid">${cards}</div>`}</div>
     <div id="browse-below-fold" style="margin-top:24px${mapView ? ";display:none" : ""}">${adUnitMarkup("ADSENSE_SLOT_BROWSE")}</div>
     <script>
       (function () {
