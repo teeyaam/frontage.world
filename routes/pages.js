@@ -17,7 +17,7 @@ import {
   gstOn,
   withGst,
 } from "../lib/format.js";
-import { CATEGORIES, CATEGORY_LABEL } from "../lib/categories.js";
+import { CATEGORIES, CATEGORY_LABEL, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS } from "../lib/categories.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { isStripeConfigured } from "../lib/payments.js";
 import { isEmailConfigured } from "../lib/email.js";
@@ -896,14 +896,24 @@ export async function sellNewPage(req, res, query) {
 
     <div class="form-card form-card-wide">
       <h2 style="font-size:16px;margin-bottom:14px">Space details</h2>
-      <form method="POST" action="/api/listings" enctype="multipart/form-data">
+      <form method="POST" action="/api/listings" enctype="multipart/form-data" id="new-listing-form">
         <div class="form-row">
           <div class="field"><label>Business or venue name</label><input name="venue" required placeholder="${escapeHtml(user.businessName || "Castle Hill BJJ Academy")}" value="${escapeHtml(user.businessName || "")}" /></div>
-          <div class="field"><label>Listing title</label><input name="title" required placeholder="Wall above the mats" /></div>
+          <div class="field">
+            <label>Listing title
+              <button type="button" class="info-btn" data-info="title-info" aria-label="Tips for a good title">i</button>
+            </label>
+            <input name="title" id="title-input" required maxlength="${LISTING_TITLE_MAX_LENGTH}" placeholder="Wall above the mats" />
+            <div class="small muted" id="title-count" style="margin-top:4px">0/${LISTING_TITLE_MAX_LENGTH}</div>
+            <div class="info-pop" id="title-info" hidden>
+              <strong>Writing a good title</strong>
+              <p class="small" style="margin:6px 0 0;line-height:1.6">Say exactly where the space is — buyers scan titles fast. Good examples: "Wall above the mats", "Fence facing the highway", "Window beside the till". Skip vague titles like "Great spot!" — your venue name is already shown separately.</p>
+            </div>
+          </div>
         </div>
         <div class="form-row">
           <div class="field"><label>Category</label>
-            <select name="category">
+            <select name="category" id="category-select">
               ${CATEGORIES.map((c) => `<option value="${c}">${CATEGORY_LABEL[c]}</option>`).join("")}
             </select>
           </div>
@@ -917,21 +927,38 @@ export async function sellNewPage(req, res, query) {
           <div class="field"><label>Postcode (optional)</label><input name="postcode" placeholder="2154" /></div>
           <div class="field"><label>Country</label><input name="country" value="Australia" placeholder="Australia" /></div>
         </div>
-        <div class="form-row">
-          <div class="field"><label>Map latitude (optional)</label><input type="number" step="any" name="lat" placeholder="auto from suburb" /></div>
-          <div class="field"><label>Map longitude (optional)</label><input type="number" step="any" name="lng" placeholder="auto from suburb" /></div>
-        </div>
+        <div class="small muted" style="margin:-6px 0 14px">We'll place your pin on the map automatically from the suburb and address above.</div>
         <div class="form-row">
           <div class="field"><label>Width (mm)</label><input type="number" id="sizeW" name="sizeW" required min="1" placeholder="2000" /></div>
           <div class="field"><label>Height (mm)</label><input type="number" id="sizeH" name="sizeH" required min="1" placeholder="3000" /></div>
         </div>
         <button type="button" id="ar-preview-btn" class="btn btn-outline btn-block" style="margin-bottom:14px">📷 Preview on your wall</button>
         <div class="form-row">
-          <div class="field"><label>Monthly rate (AUD, excl. GST)</label><input type="number" name="price" required min="1" step="0.01" placeholder="100" /></div>
-          <div class="field"><label>Estimated daily eyes (leave blank to auto-estimate)</label><input type="number" name="estimatedEyesPerDay" min="0" placeholder="e.g. 250" /></div>
+          <div class="field">
+            <label>Monthly rate (AUD, excl. GST)
+              <button type="button" class="info-btn" data-info="price-info" aria-label="How to work out a rate">i</button>
+            </label>
+            <input type="number" name="price" required min="1" step="0.01" placeholder="100" />
+            <div class="info-pop" id="price-info" hidden>
+              <strong>Working out a rate</strong>
+              <p class="small" style="margin:6px 0 0;line-height:1.6">Check what similar spaces in your suburb are charging on <a href="/" target="_blank" style="color:var(--orange)">Browse</a> first. As a rough guide, low-traffic spots typically go for $50–150/mo and high-traffic prime locations $300+. This is what buyers pay before GST — you keep 85% of it, paid out monthly.</p>
+            </div>
+          </div>
+          <div class="field"><label>Estimated daily eyes</label><input type="number" name="estimatedEyesPerDay" id="eyes-input" min="0" placeholder="e.g. 250" />
+            <div class="small muted" style="margin-top:4px" id="eyes-hint">Auto-estimated from category and size — adjust it if you know better.</div>
+          </div>
         </div>
-        <div class="field"><label>Description</label><textarea name="desc" rows="3" placeholder="What makes this space worth advertising on?"></textarea></div>
-        <div class="field"><label>Photos (up to 8)</label><input type="file" name="photos" accept="image/*" multiple /></div>
+        <div class="field">
+          <label>Description</label>
+          <textarea name="desc" id="desc-input" rows="3" maxlength="${LISTING_DESC_MAX_LENGTH}" placeholder="What makes this space worth advertising on?"></textarea>
+          <div class="small muted" id="desc-count" style="margin-top:4px">0/${LISTING_DESC_MAX_LENGTH}</div>
+        </div>
+        <div class="field">
+          <label>Photos <span class="muted" style="text-transform:none">(at least ${LISTING_MIN_PHOTOS}, up to 8)</span></label>
+          <input type="file" id="photos-input" name="photos" accept="image/*" multiple required />
+          <div class="small muted" style="margin-top:4px">Clear, well-lit photos help buyers trust the listing — include a wide shot of the space and a close-up of the exact spot.</div>
+          <div class="small" id="photos-error" style="margin-top:4px;color:var(--red);display:none">Please choose at least ${LISTING_MIN_PHOTOS} photos.</div>
+        </div>
 
         ${
           needsPayout
@@ -950,6 +977,76 @@ export async function sellNewPage(req, res, query) {
       </form>
     </div>
     <script src="/wall-visualizer.js"></script>
+    <script>
+      (function () {
+        // "i" buttons reveal their explanatory block in place (same pattern
+        // as the checkout page's installer-cost tooltip).
+        [].forEach.call(document.querySelectorAll('.info-btn'), function (b) {
+          b.addEventListener('click', function () {
+            var pop = document.getElementById(b.getAttribute('data-info'));
+            if (pop) pop.hidden = !pop.hidden;
+          });
+        });
+
+        function wireCounter(inputId, countId, max) {
+          var el = document.getElementById(inputId);
+          var countEl = document.getElementById(countId);
+          if (!el || !countEl) return;
+          function update() { countEl.textContent = el.value.length + '/' + max; }
+          el.addEventListener('input', update);
+          update();
+        }
+        wireCounter('title-input', 'title-count', ${LISTING_TITLE_MAX_LENGTH});
+        wireCounter('desc-input', 'desc-count', ${LISTING_DESC_MAX_LENGTH});
+
+        // Prefills the eyes/day estimate as category/size are filled in,
+        // using the same formula the server falls back to on submit
+        // (lib/format.js#estimateEyes via /api/estimate-eyes) — but stops
+        // touching the field the moment the seller types into it themselves.
+        var eyesInput = document.getElementById('eyes-input');
+        var eyesTouched = false;
+        if (eyesInput) eyesInput.addEventListener('input', function () { eyesTouched = true; });
+        var categorySelect = document.getElementById('category-select');
+        var sizeWInput = document.getElementById('sizeW');
+        var sizeHInput = document.getElementById('sizeH');
+        function refreshEyesEstimate() {
+          if (eyesTouched || !eyesInput) return;
+          var sizeW = parseInt(sizeWInput && sizeWInput.value, 10) || 0;
+          var sizeH = parseInt(sizeHInput && sizeHInput.value, 10) || 0;
+          if (!sizeW || !sizeH) return;
+          var category = categorySelect ? categorySelect.value : 'gym';
+          fetch('/api/estimate-eyes?category=' + encodeURIComponent(category) + '&sizeW=' + sizeW + '&sizeH=' + sizeH)
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+              if (eyesTouched || !data || typeof data.eyes !== 'number') return;
+              eyesInput.value = data.eyes;
+            })
+            .catch(function () {});
+        }
+        if (categorySelect) categorySelect.addEventListener('change', refreshEyesEstimate);
+        if (sizeWInput) sizeWInput.addEventListener('input', refreshEyesEstimate);
+        if (sizeHInput) sizeHInput.addEventListener('input', refreshEyesEstimate);
+
+        // Client-side heads-up for the minimum-photos rule — the server
+        // enforces it too (routes/api.js#createListingHandler), this just
+        // saves a round trip when it's obviously not met.
+        var form = document.getElementById('new-listing-form');
+        var photosInput = document.getElementById('photos-input');
+        var photosError = document.getElementById('photos-error');
+        if (form && photosInput && photosError) {
+          form.addEventListener('submit', function (e) {
+            if (photosInput.files.length < ${LISTING_MIN_PHOTOS}) {
+              e.preventDefault();
+              photosError.style.display = 'block';
+              photosInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } else {
+              photosError.style.display = 'none';
+            }
+          });
+          photosInput.addEventListener('change', function () { photosError.style.display = 'none'; });
+        }
+      })();
+    </script>
   `;
   send(res, 200, await layout({ title: "List your space", activeNav: "sell", user, body }));
 }

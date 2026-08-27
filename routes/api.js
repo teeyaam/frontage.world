@@ -17,7 +17,7 @@ import {
   PASSWORD_HINT,
 } from "../lib/auth.js";
 import { runUpload, uploadContractorDocs, uploadListingPhotos, CONTRACTOR_DOCS_DIR, getContractorDocUrl, isS3Configured, photoPublicUrl } from "../lib/upload.js";
-import { isValidCategory } from "../lib/categories.js";
+import { isValidCategory, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS } from "../lib/categories.js";
 import { filterListings } from "../lib/listingFilters.js";
 import { estimateEyes, withGst } from "../lib/format.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
@@ -197,6 +197,21 @@ export async function createListingHandler(req, res) {
   if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price || sizeW <= 0 || sizeH <= 0 || price <= 0) {
     return badRequest(res, "Missing required listing fields, or width/height/price must be greater than zero.");
   }
+  // Mirrors the maxlength attributes on the form (routes/pages.js#sellNewPage)
+  // so a client that skips the browser's own enforcement can't sneak an
+  // oversized title/description into the datastore.
+  if (b.title.length > LISTING_TITLE_MAX_LENGTH) {
+    return badRequest(res, `Listing title must be ${LISTING_TITLE_MAX_LENGTH} characters or fewer.`);
+  }
+  if ((b.desc || "").length > LISTING_DESC_MAX_LENGTH) {
+    return badRequest(res, `Description must be ${LISTING_DESC_MAX_LENGTH} characters or fewer.`);
+  }
+  // Per the UI tester's feedback: a listing with too few photos gives buyers
+  // little to go on. Enforced here too, not just in the form's client-side
+  // check, so a direct POST can't skip it.
+  if (!req.files || req.files.length < LISTING_MIN_PHOTOS) {
+    return badRequest(res, `Please upload at least ${LISTING_MIN_PHOTOS} photos of the space.`);
+  }
   const category = isValidCategory(b.category) ? b.category : "gym";
 
   const patch = { businessName: user.businessName || b.venue, address: user.address || b.address };
@@ -287,6 +302,19 @@ export async function createBdrListingHandler(req, res) {
 
   const claimUrl = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}/claim/${listing.claimToken}`;
   redirect(res, `/sell/bdr-new?created=1&claimUrl=${encodeURIComponent(claimUrl)}`);
+}
+
+// Lets the "List a space" form prefill the eyes/day estimate live as a
+// seller fills in category/size, using the exact same formula the server
+// falls back to on submit (lib/format.js#estimateEyes) — so the number
+// shown while typing always matches what actually gets saved if left as-is.
+export async function estimateEyesJson(req, res, query) {
+  const category = isValidCategory(query.get("category")) ? query.get("category") : "gym";
+  const sizeW = parseInt(query.get("sizeW"), 10) || 0;
+  const sizeH = parseInt(query.get("sizeH"), 10) || 0;
+  const eyes = estimateEyes({ category, sizeW, sizeH });
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ eyes }));
 }
 
 export async function listingsMapJson(req, res, query) {
