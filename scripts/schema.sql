@@ -147,10 +147,15 @@ CREATE TABLE IF NOT EXISTS bookings (
   term INTEGER NOT NULL,
   monthly_rate NUMERIC NOT NULL,
   status TEXT NOT NULL DEFAULT 'signed', -- signed -> active -> ending/ended
-  lease_start_date TIMESTAMPTZ,
+  lease_start_date TIMESTAMPTZ, -- operational: when the job order actually confirmed installed
   auto_renew BOOLEAN NOT NULL DEFAULT TRUE,
   reminder_sent_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- 3-phase flight calendar (lib/flightCalendar.js) — the buyer-chosen
+  -- planned dates for the live phase, distinct from lease_start_date above
+  -- (which is the operational "it's actually up" confirmation).
+  campaign_start_date DATE,
+  campaign_end_date DATE
 );
 CREATE INDEX IF NOT EXISTS idx_bookings_buyer_id ON bookings(buyer_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_seller_id ON bookings(seller_id);

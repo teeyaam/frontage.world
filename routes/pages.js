@@ -38,6 +38,7 @@ import {
   PERMIT_STATUSES,
   PERMIT_STATUS_LABEL,
 } from "../lib/listingSpecs.js";
+import { earliestStartDate, computeLeadTimeDays } from "../lib/flightCalendar.js";
 
 function send(res, status, html) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
@@ -1513,8 +1514,8 @@ export async function bookPage(req, res, listingId, query) {
           <ol class="small" style="padding-left:18px;line-height:1.8;margin:0">
             <li><strong>A contractor picks up the job</strong> (reference <span class="mono">${escapeHtml(jobOrder.id)}</span>, currently ${STAGE_LABELS[jobOrder.status]}).</li>
             <li><strong>They quote you for printing, installation and removal.</strong> That's billed separately by the contractor and is not part of the amount above.</li>
-            <li><strong>The seller confirms site access</strong> and the contractor books an install date.</li>
-            <li><strong>Your lease starts the day installation is completed</strong> — not today — and runs ${booking.term} months from then.</li>
+            <li><strong>The seller confirms site access</strong> and the contractor books an install date ahead of your campaign start.</li>
+            <li><strong>Your campaign runs ${escapeHtml(booking.campaignStartDate || "")} to ${escapeHtml(booking.campaignEndDate || "")}</strong> (${booking.term} months) — installation happens before that start date, with lead time for artwork approval and printing.</li>
           </ol>
         </div>
 
@@ -1533,6 +1534,12 @@ export async function bookPage(req, res, listingId, query) {
   const stripeConfigured = isStripeConfigured() && Boolean(process.env.STRIPE_PUBLISHABLE_KEY);
   const installEstimate = estimateJobFee(listing.sizeW, listing.sizeH);
   const heroPhoto = (listing.photos || [])[0];
+  // 3-phase flight calendar (lib/flightCalendar.js) — the earliest date this
+  // site could actually go live, given its lead time (production/approval,
+  // plus any access-specific delay). "Available" isn't the same as
+  // "bookable from" (New Style Assets/03-AD-SPACE-TRANSLATION.md §5 §1).
+  const earliestStart = earliestStartDate(listing).toISOString().slice(0, 10);
+  const leadDays = computeLeadTimeDays(listing);
   const body = `
     <a href="/listing/${listing.id}" class="small muted">← Back to listing</a>
     <div class="checkout" style="margin-top:14px">
@@ -1565,7 +1572,16 @@ export async function bookPage(req, res, listingId, query) {
               <span><strong>12 months</strong><span class="small muted term-option-total" data-term="12"></span></span>
             </label>
           </div>
-          <p class="small muted" style="margin:10px 0 0">Your lease starts the day installation is completed, not today, and runs for the full term from then.</p>
+          <div class="field" style="margin-top:14px">
+            <label>Campaign start date</label>
+            <input type="date" name="campaignStartDate" id="campaign-start-input" required min="${earliestStart}" value="${earliestStart}" />
+            <div class="hint">Earliest possible: ${escapeHtml(earliestStart)} — this site needs ${leadDays} day${leadDays === 1 ? "" : "s"}' lead time for artwork approval, printing, and install before it can go live.</div>
+          </div>
+          <div class="panel-tint" style="margin-top:12px;display:flex;gap:0;font-size:12px" id="flight-phases">
+            <div style="flex:1;text-align:center"><div class="muted" style="text-transform:uppercase;font-size:10px;letter-spacing:.02em">Production</div><div class="mono" id="phase-production" style="margin-top:2px"></div></div>
+            <div style="flex:1;text-align:center;border-left:1px solid var(--border);border-right:1px solid var(--border)"><div class="muted" style="text-transform:uppercase;font-size:10px;letter-spacing:.02em">Live / flight</div><div class="mono" id="phase-live" style="margin-top:2px"></div></div>
+            <div style="flex:1;text-align:center"><div class="muted" style="text-transform:uppercase;font-size:10px;letter-spacing:.02em">Removal</div><div class="mono" id="phase-removal" style="margin-top:2px"></div></div>
+          </div>
         </div>
 
         <!-- 3. Costs -->
@@ -1681,9 +1697,35 @@ export async function bookPage(req, res, listingId, query) {
           el.textContent = fmt(round2(rate * t * (1 + GST))) + ' inc. GST';
         });
         [].forEach.call(document.querySelectorAll('input[name=term]'), function (r) {
-          r.addEventListener('change', update);
+          r.addEventListener('change', function () { update(); updatePhases(); });
         });
         update();
+
+        // 3-phase flight-calendar breakdown (lib/flightCalendar.js) — mirrors
+        // the server's own date math (production = start - leadDays, live
+        // runs the chosen term, removal = live end + 2 days) so what's shown
+        // here always matches what createBookingHandler actually validates
+        // and stores.
+        var LEAD_DAYS = ${leadDays};
+        var REMOVAL_DAYS = 2;
+        var startInput = document.getElementById('campaign-start-input');
+        function fmtDate(d) { return d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' }); }
+        function addDays(d, n) { var r = new Date(d); r.setDate(r.getDate() + n); return r; }
+        function addMonths(d, n) { var r = new Date(d); r.setMonth(r.getMonth() + n); return r; }
+        function updatePhases() {
+          if (!startInput || !startInput.value) return;
+          // new Date('YYYY-MM-DD') parses as UTC midnight — fine here since
+          // only the calendar date (not the time-of-day) is ever displayed.
+          var start = new Date(startInput.value + 'T00:00:00');
+          var term = selectedTerm();
+          var liveEnd = addMonths(start, term);
+          var removalEnd = addDays(liveEnd, REMOVAL_DAYS);
+          document.getElementById('phase-production').textContent = fmtDate(addDays(start, -LEAD_DAYS)) + ' → ' + fmtDate(start);
+          document.getElementById('phase-live').textContent = fmtDate(start) + ' → ' + fmtDate(liveEnd);
+          document.getElementById('phase-removal').textContent = fmtDate(liveEnd) + ' → ' + fmtDate(removalEnd);
+        }
+        if (startInput) startInput.addEventListener('change', updatePhases);
+        updatePhases();
 
         // "i" buttons reveal their explanatory block in place.
         [].forEach.call(document.querySelectorAll('.info-btn'), function (b) {

@@ -19,6 +19,7 @@ import {
 import { runUpload, uploadContractorDocs, uploadListingPhotos, CONTRACTOR_DOCS_DIR, getContractorDocUrl, isS3Configured, photoPublicUrl } from "../lib/upload.js";
 import { isValidCategory, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS } from "../lib/categories.js";
 import { parseListingSpecFields } from "../lib/listingSpecs.js";
+import { isValidStartDate, addMonths, earliestStartDate, campaignPhases } from "../lib/flightCalendar.js";
 import { filterListings } from "../lib/listingFilters.js";
 import { estimateEyes, withGst } from "../lib/format.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
@@ -508,6 +509,14 @@ export async function createBookingHandler(req, res) {
   // always be replayed without it — agreeing to the terms is the one thing
   // that must never be assumed.
   if (!b.agreeTerms) return badRequest(res, "You must agree to the Buyer Terms & Conditions before booking.");
+  // 3-phase flight calendar (lib/flightCalendar.js) — re-checks server-side
+  // the same earliest-start constraint the checkout page's date input
+  // expresses via min=, since a replayed/hand-crafted POST could pick any
+  // date otherwise.
+  if (!b.campaignStartDate || !isValidStartDate(listing, b.campaignStartDate)) {
+    return badRequest(res, "Please choose a valid campaign start date — it must allow time for artwork approval, printing, and install.");
+  }
+  const campaignEndDate = addMonths(new Date(b.campaignStartDate), term).toISOString().slice(0, 10);
 
   // Invoice details captured at checkout, kept on the account so a repeat
   // booking pre-fills them.
@@ -537,7 +546,15 @@ export async function createBookingHandler(req, res) {
     }
   }
 
-  const { booking } = await db.createBookingBundle({ listing, buyerId: user.id, term, signature: b.signature, paymentIntentId });
+  const { booking } = await db.createBookingBundle({
+    listing,
+    buyerId: user.id,
+    term,
+    signature: b.signature,
+    paymentIntentId,
+    campaignStartDate: b.campaignStartDate,
+    campaignEndDate,
+  });
 
   const seller = listing.ownerId ? await db.getUserById(listing.ownerId) : null;
   if (seller) await trySend(bookingSellerEmail(seller, listing, booking));
