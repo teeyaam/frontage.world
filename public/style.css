@@ -51,6 +51,15 @@ body {
   line-height: 1.5;
 }
 img { max-width: 100%; }
+/* Any author rule that sets `display` on an element (e.g. .btn's
+   display:inline-flex) beats the browser's own [hidden]{display:none} —
+   author styles always outrank user-agent styles regardless of
+   specificity. Without this, a hidden .btn (the wizard's Next/Back
+   buttons, toggled via el.hidden in JS) stays visibly on-screen even
+   though the `hidden` attribute is genuinely set. This restores the
+   expected behavior everywhere, once, rather than patching every
+   individual component that also sets its own display. */
+[hidden] { display: none !important; }
 /* Inter site-wide, including headings (was Space Grotesk) — New Style
    Assets/02-DESIGN-SYSTEM.md §0/§2 calls for one geometric-humanist family
    throughout rather than a separate display face. .mono (IBM Plex Mono, for

@@ -13,7 +13,6 @@ import {
   leaseEndIso,
   daysUntil,
   GST_RATE,
-  GST_LABEL,
   gstOn,
   withGst,
 } from "../lib/format.js";
@@ -266,12 +265,9 @@ export async function browsePage(req, res, query) {
   const googleMapsKey = process.env.GOOGLE_MAPS_API_KEY;
 
   const body = `
-    <div class="hero-row">
-      <div>
-        <h1 class="hero-headline">Free space,<br /><span style="color:var(--orange)">free money.</span></h1>
-        <p class="hero-sub">List your wall, window, or fence — or find the spot that gets your ad seen.</p>
-      </div>
-      ${user ? `<a href="/sell/new" class="btn btn-accent btn-lg">List a space →</a>` : `<a href="/onboarding" class="btn btn-accent btn-lg">Get started →</a>`}
+    <div class="row-between" style="margin-bottom:28px;flex-wrap:wrap;gap:16px;padding-top:8px">
+      <h1 style="font-size:28px;font-weight:700;letter-spacing:-0.01em;margin:0">Browse spaces</h1>
+      ${user ? `<a href="/sell/new" class="btn btn-accent">List a space →</a>` : `<a href="/onboarding" class="btn btn-accent">Get started →</a>`}
     </div>
 
     <div class="row-between" style="margin-bottom:22px;flex-wrap:wrap;gap:14px;padding-bottom:22px;border-bottom:1px solid var(--border)">
@@ -589,6 +585,18 @@ export async function listingDetailPage(req, res, id) {
 
   const photos = listing.photos || [];
   const isOwner = Boolean(user && user.id === listing.ownerId);
+  // Real audience data (Phase 1's site-spec fields) in place of the old
+  // free-text "footfall" column, which was never actually collected
+  // anywhere in the UI and only ever showed its seed default ("New
+  // listing") — a placeholder masquerading as a stat. Omitted entirely
+  // when the owner hasn't supplied anything, rather than showing a
+  // meaningless value just to fill a third column.
+  const audienceUnit = listing.audienceType === "vehicle" ? "vehicles" : listing.audienceType === "pedestrian" ? "people" : "people/vehicles";
+  const audienceLine = listing.dailyTrafficCount
+    ? `~${Number(listing.dailyTrafficCount).toLocaleString("en-AU")} ${audienceUnit}/day (owner-supplied)`
+    : listing.audienceType
+    ? AUDIENCE_TYPE_LABEL[listing.audienceType]
+    : null;
   const thumbStrip =
     photos.length > 1
       ? `<div style="display:flex;gap:6px;margin-top:6px">${photos
@@ -620,16 +628,18 @@ export async function listingDetailPage(req, res, id) {
         <h1 style="font-size:26px">${escapeHtml(listing.title)}</h1>
         <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(locationLine(listing))}${listing.subtype ? ` · ${escapeHtml(listing.subtype)}` : ""}</div>
         <p style="margin-bottom:18px">${escapeHtml(listing.desc)}</p>
-        <div class="panel-tint stat-grid-3" style="margin-bottom:10px">
-          <div><div class="mono" style="font-weight:700">${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)}</div><div class="small muted">Space size</div></div>
-          <div><div class="mono" style="font-weight:700">${money(listing.price)}/mo</div><div class="small muted">Lease rate (${GST_LABEL})</div></div>
-          <div><div class="mono" style="font-weight:700">${escapeHtml(listing.footfall)}</div><div class="small muted">Foot traffic</div></div>
+        <div style="font-size:15px;font-weight:600;margin-bottom:6px">
+          ${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)} <span class="muted" style="font-weight:400">·</span> ${money(listing.price)}/mo <span class="muted" style="font-weight:400">excl. GST</span>${audienceLine ? ` <span class="muted" style="font-weight:400">·</span> ${escapeHtml(audienceLine)}` : ""}
         </div>
         <details class="small muted" style="margin-bottom:18px">
           <summary style="cursor:pointer;color:var(--orange);font-weight:600">What do these numbers mean?</summary>
           <div style="margin-top:8px;line-height:1.6">
             <strong>Lease rate</strong> is the monthly rent paid to the space owner, shown excluding GST — GST is added at checkout. Installing and removing your ad is quoted separately by the contractor before you commit; it is not included in this rate.<br/>
-            <strong>Foot traffic</strong> is the space owner's own description of how busy the location is.<br/>
+            ${
+              audienceLine
+                ? `<strong>Audience</strong> is the space owner's own declaration, not independently verified by Frontage.<br/>`
+                : ""
+            }
             ${
               listing.estimatedEyesPerDay
                 ? `<strong>Eyes/day</strong> (${listing.estimatedEyesPerDay.toLocaleString("en-AU")}) is Frontage's estimate of how many people pass the space each day, based on its category and size. It's a planning guide, not an audited impressions count.`
