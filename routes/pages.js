@@ -40,6 +40,7 @@ import {
 } from "../lib/listingSpecs.js";
 import { earliestStartDate, computeLeadTimeDays } from "../lib/flightCalendar.js";
 import { determineCancellationTier, computeCancellationFee, CANCELLATION_TIER_LABEL } from "../lib/cancellation.js";
+import { termsSection, TERMS_CLAUSES, CANCELLATION_CLAUSE_BUYER } from "../lib/legal.js";
 
 function send(res, status, html) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
@@ -2730,11 +2731,11 @@ export async function myLeasesPage(req, res) {
 function leaseTermsBlock(booking, listing) {
   return `<p style="line-height:1.6">
     <strong>1. Space.</strong> ${listing ? `${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)} at ${escapeHtml(listing.venue)}` : "—"}, as listed.<br/>
-    <strong>2. Term.</strong> ${booking.term} months, commencing ${booking.leaseStartDate ? formatDate(booking.leaseStartDate) : "on install completion (not yet started)"}. ${booking.autoRenew ? "Auto-renews monthly unless cancelled with 30 days' notice." : "Set to end at term expiry — will not auto-renew."}<br/>
+    <strong>2. Term.</strong> ${booking.term} months, ${booking.campaignStartDate ? `campaign starting ${escapeHtml(booking.campaignStartDate)}` : booking.leaseStartDate ? `commencing ${formatDate(booking.leaseStartDate)}` : "start date not yet set"}. ${booking.autoRenew ? "Auto-renews monthly unless cancelled with 30 days' notice." : "Set to end at term expiry — will not auto-renew."}<br/>
     <strong>3. Rate.</strong> ${money(booking.monthlyRate)} per month.<br/>
     <strong>4. Install &amp; removal.</strong> Engaged and paid to a Frontage-network contractor directly, separate from this lease.<br/>
     <strong>5. Platform fee.</strong> Frontage deducts 15% from the seller's payout on each payment.<br/>
-    <strong>6. Early termination.</strong> Ending this lease early incurs a break fee equal to one month's rent${listing ? ` (${money(listing.price)})` : ""}.<br/>
+    <strong>6. Early termination.</strong> ${CANCELLATION_CLAUSE_BUYER}<br/>
     <strong>7. Content &amp; conduct.</strong> Advertising content must be lawful and meet the standards in the <a href="/terms" style="color:var(--orange)">Terms &amp; Conditions</a>, which both parties accepted at signing. The seller warrants authority over the listed space.<br/>
     <strong>8. Breach &amp; liability.</strong> A party in breach is liable for the other party's resulting losses. Frontage facilitates this marketplace and is not a party to the lease; each party indemnifies Frontage against claims arising from their own breach.
   </p>`;
@@ -2953,22 +2954,6 @@ export async function howItWorksPage(req, res) {
 // linked from checkout and the listing form. A buyer signing a lease
 // shouldn't have to read the seller's payout obligations to find the two
 // clauses that bind them, and vice versa.
-function termsSection(id, heading, bodyHtml) {
-  return `<h3 id="${id}" style="font-size:14px;margin-bottom:6px">${heading}</h3>
-      <p class="small muted" style="margin-bottom:14px">${bodyHtml}</p>`;
-}
-
-const TERMS_CLAUSES = {
-  whatFrontageIs: `Frontage is a marketplace that connects owners of physical advertising space ("sellers"), advertisers who lease that space ("buyers"), and independent contractors who print, install, and remove advertising. Frontage facilitates introductions, contracts, and payments — it is not a party to the lease between buyer and seller, nor to the service agreement between a buyer and a contractor.`,
-  accounts: `You must provide accurate account information and keep your login credentials secure. You are responsible for all activity under your account. Accounts may be suspended or closed for breach of these terms.`,
-  gst: `All prices displayed on Frontage — listing rates, lease totals, and contractor estimates — are <strong>exclusive of GST</strong>. GST is calculated and added at checkout, and shown as a separate line on the tax invoice issued for every booking.`,
-  prohibited: `The following are breaches of these terms by any user: misrepresenting a listing, account, or credentials; displaying unlawful, misleading, or offensive advertising content; damaging, obscuring, or removing installed advertising before term end without agreement; circumventing Frontage to avoid platform fees on a connection made through the platform; and any fraudulent or unlawful use of the platform.`,
-  breach: `Frontage may suspend or terminate accounts, remove listings, cancel job orders, and withhold pending payouts connected to a breach while it is investigated. <strong>A party who breaches these terms or a lease is responsible for the losses their breach causes to the other party.</strong> Frontage may recover from the breaching party any costs, fees, or losses Frontage itself incurs because of the breach.`,
-  liability: `To the maximum extent permitted by law, Frontage is not liable for loss arising from the conduct of buyers, sellers, or contractors — including misrepresentation, breach of lease, defective installation, or property damage. Each user indemnifies Frontage against claims, losses, and costs arising from that user's own breach of these terms, their listings or advertising content, or their dealings with other users. Nothing in these terms excludes rights that cannot be excluded under applicable consumer law.`,
-  changes: `Frontage may update these terms; material changes will be notified via the platform. Continued use after a change is acceptance of the updated terms.`,
-  governingLaw: `These terms are governed by the laws of New South Wales, Australia.`,
-};
-
 export async function buyerTermsPage(req, res) {
   const user = await currentUser(req);
   const body = `
@@ -2981,7 +2966,7 @@ export async function buyerTermsPage(req, res) {
       ${termsSection(
         "b3",
         "3. What you're paying for",
-        `Booking a space charges you the full lease term up front, in one payment — there is no monthly billing, and the rate does not change with term length. The amount covers rent for the space only.`
+        `Booking a space charges you the full lease term up front, in one payment — there is no monthly billing, and the rate does not change with term length. The amount covers rent for the space only. Booking several spaces together through your media plan charges one combined total, but creates a separate lease for each space.`
       )}
       ${termsSection("b4", "4. Prices and GST", TERMS_CLAUSES.gst)}
       ${termsSection(
@@ -2989,21 +2974,20 @@ export async function buyerTermsPage(req, res) {
         "5. Installation and removal",
         `Printing your artwork, installing it, and removing it at the end of the lease are carried out by an independent contractor, not by Frontage or the space owner. The contractor quotes you directly and you pay them directly — this cost is separate from, and not included in, the amount Frontage charges you. <strong>It is a single upfront cost covering both installation and removal;</strong> you are not billed again to take the advertising down. Estimates shown before booking are indicative only, based on the size of the space — the assigned contractor issues a firm quote for your approval before any work begins.`
       )}
-      ${termsSection(
-        "b6",
-        "6. When your lease starts and ends",
-        `Your lease term begins on the day the contractor confirms installation is complete — not the day you book or pay — and runs for the full 6 or 12 months from that date. It then auto-renews monthly unless cancelled with 30 days' notice. Ending the lease early incurs a break fee equal to one month's rent.`
-      )}
+      ${termsSection("b6", "6. Your campaign dates", TERMS_CLAUSES.campaignDates)}
       ${termsSection(
         "b7",
         "7. Your advertising content",
         `You are responsible for the advertising you display: it must be lawful, accurate, not misleading, and must not be offensive. You warrant you hold the rights to any artwork, trade marks, or imagery you supply. Frontage may require removal of content that breaches this clause, at your cost.`
       )}
-      ${termsSection("b8", "8. Prohibited conduct", TERMS_CLAUSES.prohibited)}
-      ${termsSection("b9", "9. Consequences of breach", TERMS_CLAUSES.breach)}
-      ${termsSection("b10", "10. Liability &amp; indemnity", TERMS_CLAUSES.liability)}
-      ${termsSection("b11", "11. Changes", TERMS_CLAUSES.changes)}
-      <h3 style="font-size:14px;margin-bottom:6px">12. Governing law</h3>
+      ${termsSection("b8", "8. Content approval", TERMS_CLAUSES.contentApproval)}
+      ${termsSection("b9", "9. Permits", TERMS_CLAUSES.permits)}
+      ${termsSection("b10", "10. Ending your lease early", CANCELLATION_CLAUSE_BUYER)}
+      ${termsSection("b11", "11. Prohibited conduct", TERMS_CLAUSES.prohibited)}
+      ${termsSection("b12", "12. Consequences of breach", TERMS_CLAUSES.breach)}
+      ${termsSection("b13", "13. Liability &amp; indemnity", TERMS_CLAUSES.liability)}
+      ${termsSection("b14", "14. Changes", TERMS_CLAUSES.changes)}
+      <h3 style="font-size:14px;margin-bottom:6px">15. Governing law</h3>
       <p class="small muted">${TERMS_CLAUSES.governingLaw}</p>
     </div>
   `;
@@ -3022,7 +3006,7 @@ export async function sellerTermsPage(req, res) {
       ${termsSection(
         "s3",
         "3. Listing a space",
-        `By listing a space you warrant that you own it or hold clear authority to lease it for advertising, that the details you provide (size, location, exposure, photographs) are accurate and current, and that displaying advertising there breaches no law, lease, strata by-law, or council requirement. Misrepresented listings may be removed and any held payouts withheld.`
+        `By listing a space you warrant that you own it or hold clear authority to lease it for advertising, that the details you provide (size, location, exposure, photographs, and any surface/access/audience specifications) are accurate and current, and that displaying advertising there breaches no law, lease, strata by-law, or council requirement. Misrepresented listings may be removed and any held payouts withheld.`
       )}
       ${termsSection("s4", "4. Prices and GST", `${TERMS_CLAUSES.gst} Set your monthly rate exclusive of GST. If you are registered for GST, you are responsible for accounting for it on your payouts.`)}
       ${termsSection(
@@ -3040,11 +3024,17 @@ export async function sellerTermsPage(req, res) {
         "7. Access for installation",
         `You must provide the assigned contractor reasonable access to the space within the agreed window, and must not obscure, damage, alter, or remove installed advertising for the duration of the lease. Denying access or interfering with installed advertising is a breach and may make you liable for the buyer's resulting losses.`
       )}
-      ${termsSection("s8", "8. Prohibited conduct", TERMS_CLAUSES.prohibited)}
-      ${termsSection("s9", "9. Consequences of breach", TERMS_CLAUSES.breach)}
-      ${termsSection("s10", "10. Liability &amp; indemnity", TERMS_CLAUSES.liability)}
-      ${termsSection("s11", "11. Changes", TERMS_CLAUSES.changes)}
-      <h3 style="font-size:14px;margin-bottom:6px">12. Governing law</h3>
+      ${termsSection(
+        "s8",
+        "8. Reviewing buyer content",
+        `Before a job can be scheduled, you'll be asked to approve or decline the buyer's uploaded artwork. You may decline content for a legitimate reason — it's unlawful, unsafe, conflicts with an existing tenancy or lease restriction on your property, or breaches Frontage's <a href="/terms/non-discrimination" style="color:var(--orange)">Non-Discrimination Policy</a> yourself by declining on a prohibited basis. You may not decline content arbitrarily after a lease is signed and paid for without a legitimate reason, and repeated unreasonable refusals may be treated as a breach of these terms.`
+      )}
+      ${termsSection("s9", "9. Permits", TERMS_CLAUSES.permits)}
+      ${termsSection("s10", "10. Prohibited conduct", TERMS_CLAUSES.prohibited)}
+      ${termsSection("s11", "11. Consequences of breach", TERMS_CLAUSES.breach)}
+      ${termsSection("s12", "12. Liability &amp; indemnity", TERMS_CLAUSES.liability)}
+      ${termsSection("s13", "13. Changes", TERMS_CLAUSES.changes)}
+      <h3 style="font-size:14px;margin-bottom:6px">14. Governing law</h3>
       <p class="small muted">${TERMS_CLAUSES.governingLaw}</p>
     </div>
   `;
@@ -3062,44 +3052,73 @@ export async function termsPage(req, res) {
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <a href="/terms/buyer" class="btn btn-outline btn-sm">Buyer Terms</a>
           <a href="/terms/seller" class="btn btn-outline btn-sm">Seller Terms</a>
+          <a href="/terms/non-discrimination" class="btn btn-outline btn-sm">Non-Discrimination Policy</a>
         </div>
       </div>
 
-      <h3 style="font-size:14px;margin-bottom:6px">1. What Frontage is</h3>
-      <p class="small muted" style="margin-bottom:14px">Frontage is a marketplace that connects owners of physical advertising space ("sellers"), advertisers who lease that space ("buyers"), and independent contractors who print, install, and remove advertising. Frontage facilitates introductions, contracts, and payments — it is not a party to the lease between buyer and seller, nor to the service agreement between a buyer and a contractor.</p>
-
-      <h3 style="font-size:14px;margin-bottom:6px">2. Accounts</h3>
-      <p class="small muted" style="margin-bottom:14px">You must provide accurate account information and keep your login credentials secure. You are responsible for all activity under your account. Accounts may be suspended or closed for breach of these terms.</p>
-
-      <h3 style="font-size:14px;margin-bottom:6px">3. Listings</h3>
-      <p class="small muted" style="margin-bottom:14px">By listing a space, the seller warrants that they own the space or hold clear authority to lease it for advertising, that the listing details (size, location, exposure) are accurate, and that displaying advertising there does not breach any law, lease, strata rule, or council requirement. Misrepresented listings may be removed and any held payouts withheld.</p>
-
-      <h3 style="font-size:14px;margin-bottom:6px">4. Leases &amp; payments</h3>
-      <p class="small muted" style="margin-bottom:14px">Leases run for a fixed term of 6 or 12 months, starting when installation is confirmed complete, and auto-renew monthly thereafter unless cancelled with 30 days' notice. The buyer pays the full term up front. Frontage holds the seller's payout until installation is confirmed, then releases it minus the 15% platform fee. Early termination by the buyer incurs a break fee of one month's rent.</p>
-
-      <h3 style="font-size:14px;margin-bottom:6px">4a. Prices and GST</h3>
-      <p class="small muted" style="margin-bottom:14px">${TERMS_CLAUSES.gst}</p>
-
-      <h3 style="font-size:14px;margin-bottom:6px">5. Contractors</h3>
-      <p class="small muted" style="margin-bottom:14px">Contractors are vetted before accessing job orders but act as independent businesses, not employees or agents of Frontage. Print, install, and removal work is quoted, agreed, and paid between the buyer and the contractor directly.</p>
-
-      <h3 style="font-size:14px;margin-bottom:6px">6. Prohibited conduct</h3>
-      <p class="small muted" style="margin-bottom:14px">The following are breaches of these terms by any user: misrepresenting a listing, account, or credentials; displaying unlawful, misleading, or offensive advertising content; damaging, obscuring, or removing installed advertising before term end without agreement; circumventing Frontage to avoid platform fees on a connection made through the platform; and any fraudulent or unlawful use of the platform.</p>
-
-      <h3 style="font-size:14px;margin-bottom:6px">7. Consequences of breach</h3>
-      <p class="small muted" style="margin-bottom:14px">Frontage may suspend or terminate accounts, remove listings, cancel job orders, and withhold pending payouts connected to a breach while it is investigated. <strong>A party who breaches these terms or a lease is responsible for the losses their breach causes to the other party.</strong> Frontage may recover from the breaching party any costs, fees, or losses Frontage itself incurs because of the breach.</p>
-
-      <h3 style="font-size:14px;margin-bottom:6px">8. Liability &amp; indemnity</h3>
-      <p class="small muted" style="margin-bottom:14px">To the maximum extent permitted by law, Frontage is not liable for loss arising from the conduct of buyers, sellers, or contractors — including misrepresentation, breach of lease, defective installation, or property damage. Each user indemnifies Frontage against claims, losses, and costs arising from that user's own breach of these terms, their listings or advertising content, or their dealings with other users. Nothing in these terms excludes rights that cannot be excluded under applicable consumer law.</p>
-
-      <h3 style="font-size:14px;margin-bottom:6px">9. Changes</h3>
-      <p class="small muted" style="margin-bottom:14px">Frontage may update these terms; material changes will be notified via the platform. Continued use after a change is acceptance of the updated terms.</p>
-
-      <h3 style="font-size:14px;margin-bottom:6px">10. Governing law</h3>
-      <p class="small muted">These terms are governed by the laws of New South Wales, Australia.</p>
+      ${termsSection("g1", "1. What Frontage is", TERMS_CLAUSES.whatFrontageIs)}
+      ${termsSection("g2", "2. Accounts", TERMS_CLAUSES.accounts)}
+      ${termsSection(
+        "g3",
+        "3. Listings",
+        `By listing a space, the seller warrants that they own the space or hold clear authority to lease it for advertising, that the listing details (size, location, exposure, specifications) are accurate, and that displaying advertising there does not breach any law, lease, strata rule, or council requirement. Misrepresented listings may be removed and any held payouts withheld.`
+      )}
+      ${termsSection(
+        "g4",
+        "4. Leases &amp; campaign dates",
+        `A lease runs for a fixed term of 6 or 12 months from the buyer's chosen campaign start date (see clause 6a below), and auto-renews monthly thereafter unless cancelled with 30 days' notice. The buyer pays the full term up front. Frontage holds the seller's payout until installation is confirmed, then releases it minus the 15% platform fee.`
+      )}
+      ${termsSection("g4a", "4a. Prices and GST", TERMS_CLAUSES.gst)}
+      ${termsSection("g4b", "4b. Campaign dates", TERMS_CLAUSES.campaignDates)}
+      ${termsSection("g4c", "4c. Ending a lease early", CANCELLATION_CLAUSE_BUYER)}
+      ${termsSection(
+        "g5",
+        "5. Contractors",
+        `Contractors are vetted before accessing job orders but act as independent businesses, not employees or agents of Frontage. Print, install, and removal work is quoted, agreed, and paid between the buyer and the contractor directly.`
+      )}
+      ${termsSection("g6", "6. Content approval", TERMS_CLAUSES.contentApproval)}
+      ${termsSection("g7", "7. Permits", TERMS_CLAUSES.permits)}
+      ${termsSection("g8", "8. Prohibited conduct", TERMS_CLAUSES.prohibited)}
+      ${termsSection("g9", "9. Consequences of breach", TERMS_CLAUSES.breach)}
+      ${termsSection("g10", "10. Liability &amp; indemnity", TERMS_CLAUSES.liability)}
+      ${termsSection("g11", "11. Changes", TERMS_CLAUSES.changes)}
+      <h3 style="font-size:14px;margin-bottom:6px">12. Governing law</h3>
+      <p class="small muted">${TERMS_CLAUSES.governingLaw}</p>
     </div>
   `;
   send(res, 200, await layout({ title: "Terms & Conditions", activeNav: "terms", user, body }));
+}
+
+// Anti-discrimination is directly load-bearing now that owners can decline
+// buyer-uploaded content (Phase 4's content-approval workflow) — this
+// constrains *why* a refusal is legitimate, the same role clause s8 above
+// points back to.
+export async function nonDiscriminationPage(req, res) {
+  const user = await currentUser(req);
+  const body = `
+    <div class="panel" style="max-width:720px;margin:0 auto">
+      <h1 style="font-size:22px;margin-bottom:4px">Non-Discrimination Policy</h1>
+      <p class="small muted" style="margin-bottom:18px">This policy applies to every decision made on Frontage about who can use the platform, book a space, or have their content displayed.</p>
+
+      ${termsSection(
+        "nd1",
+        "1. What this covers",
+        `Frontage does not tolerate discrimination on the basis of race, colour, ethnicity or national origin, religion, sex, gender identity, sexual orientation, disability, or age, by any user against any other user. This applies to sellers deciding who may book their space, to how a seller reviews and approves or declines a buyer's advertising content (see the Content Approval clause in the Terms & Conditions), and to any other interaction between users on the platform.`
+      )}
+      ${termsSection(
+        "nd2",
+        "2. Declining content or a booking",
+        `A seller may decline a buyer's advertising content, or decline to make a space available to a particular buyer, only for a legitimate reason unrelated to a protected attribute listed above — for example, that the content is unlawful, unsafe to install, conflicts with an existing tenancy or contractual restriction on the property, or is a category of content (such as alcohol, gambling, or political advertising) the seller has reasonably chosen not to host at that property. A decision that is pretextual — where a protected attribute is the real reason, dressed up as one of these — is a breach of this policy regardless of the reason given.`
+      )}
+      ${termsSection(
+        "nd3",
+        "3. Reporting a concern",
+        `If you believe you've experienced discrimination on Frontage, contact <a href="mailto:${escapeHtml(process.env.CONTACT_EMAIL || "hello@frontage.world")}" style="color:var(--orange)">${escapeHtml(process.env.CONTACT_EMAIL || "hello@frontage.world")}</a> with details. Frontage will investigate and may suspend or terminate the account of a user found to have breached this policy, in addition to any other consequence available under the <a href="/terms" style="color:var(--orange)">Terms &amp; Conditions</a>.`
+      )}
+      ${termsSection("nd4", "4. Changes", TERMS_CLAUSES.changes)}
+    </div>
+  `;
+  send(res, 200, await layout({ title: "Non-Discrimination Policy", activeNav: "terms", user, body }));
 }
 
 export async function investorsPage(req, res) {
