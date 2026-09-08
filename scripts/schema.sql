@@ -22,6 +22,7 @@ CREATE SEQUENCE IF NOT EXISTS job_orders_seq;
 CREATE SEQUENCE IF NOT EXISTS contractor_applications_seq;
 CREATE SEQUENCE IF NOT EXISTS messages_seq;
 CREATE SEQUENCE IF NOT EXISTS contact_messages_seq;
+CREATE SEQUENCE IF NOT EXISTS cancellations_seq;
 
 -- ---------- users (buyers/sellers — separate identity space from contractors) ----------
 CREATE TABLE IF NOT EXISTS users (
@@ -217,6 +218,24 @@ CREATE INDEX IF NOT EXISTS idx_job_orders_booking_id ON job_orders(booking_id);
 CREATE INDEX IF NOT EXISTS idx_job_orders_contractor_id ON job_orders(contractor_id);
 CREATE INDEX IF NOT EXISTS idx_job_orders_seller_id ON job_orders(seller_id);
 CREATE INDEX IF NOT EXISTS idx_job_orders_status ON job_orders(status);
+
+-- ---------- cancellations (tiered fee + make-good) ----------
+-- See lib/cancellation.js for how tier/fee_amount are derived. One row per
+-- cancellation request; make_good_type/details/resolved_at are filled in
+-- later if a seller/admin agrees to a make-good instead of the fee.
+CREATE TABLE IF NOT EXISTS cancellations (
+  id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL,
+  booking_id TEXT NOT NULL REFERENCES bookings(id),
+  tier TEXT NOT NULL,
+  fee_amount NUMERIC NOT NULL DEFAULT 0,
+  make_good_type TEXT NOT NULL DEFAULT 'none',
+  make_good_details TEXT,
+  reason TEXT,
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_cancellations_booking_id ON cancellations(booking_id);
 
 -- ---------- contractor applications ----------
 CREATE TABLE IF NOT EXISTS contractor_applications (

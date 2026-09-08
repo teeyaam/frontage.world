@@ -20,6 +20,7 @@ import { runUpload, uploadContractorDocs, uploadListingPhotos, uploadArtwork, ar
 import { isValidCategory, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS } from "../lib/categories.js";
 import { parseListingSpecFields } from "../lib/listingSpecs.js";
 import { isValidStartDate, addMonths, earliestStartDate, campaignPhases } from "../lib/flightCalendar.js";
+import { determineCancellationTier, computeCancellationFee } from "../lib/cancellation.js";
 import { filterListings } from "../lib/listingFilters.js";
 import { estimateEyes, withGst, STAGES } from "../lib/format.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
@@ -651,10 +652,24 @@ export async function renewBookingHandler(req, res, id) {
   redirect(res, "/account/leases");
 }
 
+// Tiered cancellation & make-good (lib/cancellation.js, Phase 5) — this
+// still only sets the lease to end at term expiry (setBookingAutoRenew), the
+// same as before Phase 5. What's new is that it now also determines which
+// tier the cancellation falls into and records the fee that tier implies,
+// so it's visible to both parties (myLeasesPage) instead of only ever
+// existing as unenforced text in the Terms. It does NOT charge the fee —
+// actually collecting it (a new Stripe charge against the buyer's card on
+// file) is real payments work deliberately left for a follow-up pass;
+// recording the obligation is the substantive change here.
 export async function endLeaseHandler(req, res, id) {
   const user = await currentUser(req);
   const booking = await db.getBookingById(id);
   if (!user || !booking || booking.buyerId !== user.id) return badRequest(res, "Not your lease.");
+  const jobOrder = await db.getJobOrderByBookingId(id);
+  const tier = determineCancellationTier({ jobOrder, booking });
+  const feeAmount = computeCancellationFee({ tier, booking });
+  const b = await readBody(req);
+  await db.createCancellation({ bookingId: id, tier, feeAmount, reason: b.reason });
   await db.setBookingAutoRenew(id, false);
   redirect(res, "/account/leases");
 }

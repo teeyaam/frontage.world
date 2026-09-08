@@ -39,6 +39,7 @@ import {
   PERMIT_STATUS_LABEL,
 } from "../lib/listingSpecs.js";
 import { earliestStartDate, computeLeadTimeDays } from "../lib/flightCalendar.js";
+import { determineCancellationTier, computeCancellationFee, CANCELLATION_TIER_LABEL } from "../lib/cancellation.js";
 
 function send(res, status, html) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
@@ -2464,14 +2465,36 @@ export async function myLeasesPage(req, res) {
           ? `Payout ${money(payment.payoutAmount)} (after 15% fee) — ${payment.payoutStatus === "released" ? "released" : "held until install confirmed"}`
           : "—";
 
+        // Tiered cancellation & make-good (Phase 5) — preview the fee this
+        // cancellation would incur *before* the buyer submits it, using the
+        // same tier/fee logic endLeaseHandler applies server-side.
+        const cancellations = await db.getCancellationsForBooking(b.id);
+        const latestCancellation = cancellations[0];
+        const previewTier = determineCancellationTier({ jobOrder, booking: b });
+        const previewFee = computeCancellationFee({ tier: previewTier, booking: b });
+
         const actions =
           isBuyer && withinRenewalWindow
-            ? `<div style="display:flex;gap:8px;margin-top:10px">
+            ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
               <form method="POST" action="/api/bookings/${b.id}/renew"><input type="hidden" name="extraMonths" value="12" /><button class="btn btn-primary btn-sm" type="submit">Renew 12 months</button></form>
-              <form method="POST" action="/api/bookings/${b.id}/end-lease"><button class="btn btn-outline btn-sm" type="submit">End at term end</button></form>
-            </div>`
+              <form method="POST" action="/api/bookings/${b.id}/end-lease" style="display:flex;gap:6px;align-items:center">
+                <input name="reason" placeholder="Reason (optional)" style="padding:8px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:12px" />
+                <button class="btn btn-outline btn-sm" type="submit">End at term end</button>
+              </form>
+            </div>
+            <div class="small muted" style="margin-top:6px">${
+              previewFee > 0
+                ? `Ending now falls under "${CANCELLATION_TIER_LABEL[previewTier]}" — a ${money(previewFee)} cancellation fee would apply.`
+                : `Ending now falls under "${CANCELLATION_TIER_LABEL[previewTier]}" — no cancellation fee applies since nothing's been produced yet.`
+            }</div>`
             : isBuyer && b.autoRenew === false
-            ? `<div class="small muted" style="margin-top:8px">Set to end at term end — won't auto-renew.</div>`
+            ? `<div class="small muted" style="margin-top:8px">Set to end at term end — won't auto-renew.${
+                latestCancellation
+                  ? ` Recorded ${CANCELLATION_TIER_LABEL[latestCancellation.tier].toLowerCase()} — ${
+                      Number(latestCancellation.feeAmount) > 0 ? `${money(latestCancellation.feeAmount)} fee` : "no fee"
+                    }.`
+                  : ""
+              }</div>`
             : "";
 
         // Content-approval workflow (Phase 4) — only relevant to the buyer,
