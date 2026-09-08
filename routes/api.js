@@ -17,7 +17,7 @@ import {
   PASSWORD_HINT,
 } from "../lib/auth.js";
 import { runUpload, uploadContractorDocs, uploadListingPhotos, uploadArtwork, artworkPublicUrl, CONTRACTOR_DOCS_DIR, getContractorDocUrl, isS3Configured, photoPublicUrl } from "../lib/upload.js";
-import { isValidCategory, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS } from "../lib/categories.js";
+import { isValidCategory, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS, LISTING_MAX_DIMENSION_MM } from "../lib/categories.js";
 import { parseListingSpecFields } from "../lib/listingSpecs.js";
 import { isValidStartDate, addMonths, earliestStartDate, campaignPhases } from "../lib/flightCalendar.js";
 import { determineCancellationTier, computeCancellationFee } from "../lib/cancellation.js";
@@ -200,6 +200,9 @@ export async function createListingHandler(req, res) {
   if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price || sizeW <= 0 || sizeH <= 0 || price <= 0) {
     return badRequest(res, "Missing required listing fields, or width/height/price must be greater than zero.");
   }
+  if (sizeW > LISTING_MAX_DIMENSION_MM || sizeH > LISTING_MAX_DIMENSION_MM) {
+    return badRequest(res, `Width and height must each be ${LISTING_MAX_DIMENSION_MM}mm or less — check you entered millimetres, not metres.`);
+  }
   // Mirrors the maxlength attributes on the form (routes/pages.js#sellNewPage)
   // so a client that skips the browser's own enforcement can't sneak an
   // oversized title/description into the datastore.
@@ -279,6 +282,9 @@ export async function createBdrListingHandler(req, res) {
   const price = parseFloat(b.price);
   if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price || sizeW <= 0 || sizeH <= 0 || price <= 0) {
     return badRequest(res, "Missing required listing fields, or width/height/price must be greater than zero.");
+  }
+  if (sizeW > LISTING_MAX_DIMENSION_MM || sizeH > LISTING_MAX_DIMENSION_MM) {
+    return badRequest(res, `Width and height must each be ${LISTING_MAX_DIMENSION_MM}mm or less — check you entered millimetres, not metres.`);
   }
   const category = isValidCategory(b.category) ? b.category : "gym";
   const photos = (req.files || []).map((f) => photoPublicUrl(f));
@@ -381,6 +387,9 @@ export async function updateListingHandler(req, res, id) {
   const price = parseFloat(b.price);
   if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price || sizeW <= 0 || sizeH <= 0 || price <= 0) {
     return badRequest(res, "Missing required listing fields, or width/height/price must be greater than zero.");
+  }
+  if (sizeW > LISTING_MAX_DIMENSION_MM || sizeH > LISTING_MAX_DIMENSION_MM) {
+    return badRequest(res, `Width and height must each be ${LISTING_MAX_DIMENSION_MM}mm or less — check you entered millimetres, not metres.`);
   }
   const category = isValidCategory(b.category) ? b.category : listing.category;
   const estimatedEyesPerDay = parseInt(b.estimatedEyesPerDay, 10) || estimateEyes({ category, sizeW, sizeH });

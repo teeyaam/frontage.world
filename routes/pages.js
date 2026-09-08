@@ -16,7 +16,7 @@ import {
   gstOn,
   withGst,
 } from "../lib/format.js";
-import { CATEGORIES, CATEGORY_LABEL, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS } from "../lib/categories.js";
+import { CATEGORIES, CATEGORY_LABEL, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS, LISTING_MAX_DIMENSION_MM } from "../lib/categories.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { isStripeConfigured } from "../lib/payments.js";
 import { isEmailConfigured } from "../lib/email.js";
@@ -1097,8 +1097,10 @@ export async function sellNewPage(req, res, query) {
           </div>
           <div class="small muted" style="margin:-6px 0 14px">We'll place your pin on the map automatically from the suburb and address above.</div>
           <div class="form-row">
-            <div class="field"><label>Width (mm)</label><input type="number" id="sizeW" name="sizeW" required min="1" placeholder="2000" /></div>
-            <div class="field"><label>Height (mm)</label><input type="number" id="sizeH" name="sizeH" required min="1" placeholder="3000" /></div>
+            <div class="field"><label>Width (mm)</label><input type="number" id="sizeW" name="sizeW" required min="1" max="${LISTING_MAX_DIMENSION_MM}" placeholder="2000" />
+              <div class="hint">Up to ${LISTING_MAX_DIMENSION_MM / 1000}m. Double-check you're entering millimetres, not metres.</div>
+            </div>
+            <div class="field"><label>Height (mm)</label><input type="number" id="sizeH" name="sizeH" required min="1" max="${LISTING_MAX_DIMENSION_MM}" placeholder="3000" /></div>
           </div>
           <button type="button" id="ar-preview-btn" class="btn btn-outline btn-block">📷 Preview on your wall</button>
         </div>
@@ -1417,8 +1419,8 @@ export async function editListingPage(req, res, id, query) {
           <div class="field"><label>Map longitude (optional)</label><input type="number" step="any" name="lng" value="${listing.lng != null ? listing.lng : ""}" /></div>
         </div>
         <div class="form-row">
-          <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required min="1" value="${listing.sizeW}" /></div>
-          <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required min="1" value="${listing.sizeH}" /></div>
+          <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required min="1" max="${LISTING_MAX_DIMENSION_MM}" value="${listing.sizeW}" /></div>
+          <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required min="1" max="${LISTING_MAX_DIMENSION_MM}" value="${listing.sizeH}" /></div>
         </div>
         <div class="form-row">
           <div class="field"><label>Monthly rate (AUD, excl. GST)</label><input type="number" name="price" required min="1" step="0.01" value="${listing.price}" /></div>
@@ -1658,7 +1660,7 @@ export async function cartPage(req, res) {
             ? `
         var stripe = Stripe(${JSON.stringify(process.env.STRIPE_PUBLISHABLE_KEY || "")});
         var elements = stripe.elements();
-        var card = elements.create('card');
+        var card = elements.create('card', { hidePostalCode: true });
         card.mount('#card-element');
         card.on('change', function (event) {
           document.getElementById('card-errors').textContent = event.error ? event.error.message : '';
@@ -1838,10 +1840,19 @@ export async function bookPage(req, res, listingId, query) {
             <input type="date" name="campaignStartDate" id="campaign-start-input" required min="${earliestStart}" value="${earliestStart}" />
             <div class="hint">Earliest possible: ${escapeHtml(earliestStart)} — this site needs ${leadDays} day${leadDays === 1 ? "" : "s"}' lead time for artwork approval, printing, and install before it can go live.</div>
           </div>
-          <div class="panel-tint" style="margin-top:12px;display:flex;gap:0;font-size:12px" id="flight-phases">
-            <div style="flex:1;text-align:center"><div class="muted" style="text-transform:uppercase;font-size:10px;letter-spacing:.02em">Production</div><div class="mono" id="phase-production" style="margin-top:2px"></div></div>
-            <div style="flex:1;text-align:center;border-left:1px solid var(--border);border-right:1px solid var(--border)"><div class="muted" style="text-transform:uppercase;font-size:10px;letter-spacing:.02em">Live / flight</div><div class="mono" id="phase-live" style="margin-top:2px"></div></div>
-            <div style="flex:1;text-align:center"><div class="muted" style="text-transform:uppercase;font-size:10px;letter-spacing:.02em">Removal</div><div class="mono" id="phase-removal" style="margin-top:2px"></div></div>
+          <div style="display:flex;gap:20px;margin-top:16px;flex-wrap:wrap" id="flight-phases">
+            <div style="flex:1;min-width:140px">
+              <div class="small muted" style="font-weight:600">Production</div>
+              <div style="font-size:13.5px;font-weight:600;margin-top:3px" id="phase-production"></div>
+            </div>
+            <div style="flex:1;min-width:140px">
+              <div class="small muted" style="font-weight:600">Live / flight</div>
+              <div style="font-size:13.5px;font-weight:600;margin-top:3px" id="phase-live"></div>
+            </div>
+            <div style="flex:1;min-width:140px">
+              <div class="small muted" style="font-weight:600">Removal</div>
+              <div style="font-size:13.5px;font-weight:600;margin-top:3px" id="phase-removal"></div>
+            </div>
           </div>
         </div>
 
@@ -2014,7 +2025,7 @@ export async function bookPage(req, res, listingId, query) {
         // server-side before ever creating the booking.
         var stripe = Stripe(${JSON.stringify(process.env.STRIPE_PUBLISHABLE_KEY || "")});
         var elements = stripe.elements();
-        var card = elements.create('card');
+        var card = elements.create('card', { hidePostalCode: true });
         card.mount('#card-element');
         card.on('change', function (event) {
           document.getElementById('card-errors').textContent = event.error ? event.error.message : '';
