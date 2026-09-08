@@ -166,6 +166,18 @@ a { color: inherit; text-decoration: none; }
 .form-row { display: flex; gap: 12px; }
 .form-row .field { flex: 1; min-width: 0; }
 
+/* Listing-creation wizard (Phase 2) — three-segment progress bar per
+   02-DESIGN-SYSTEM.md §5, kept in-flow above the step content rather than a
+   truly fixed footer (which would need its own stacking work against the
+   existing sticky site header). */
+.wizard-progress { display: flex; gap: 6px; margin-bottom: 8px; }
+.wizard-progress-seg { flex: 1; height: 4px; border-radius: var(--radius-pill); background: var(--surface-sunken, var(--concrete)); overflow: hidden; }
+.wizard-progress-seg-fill { height: 100%; width: 0; background: var(--ink); transition: width .2s; }
+.wizard-progress-seg.active .wizard-progress-seg-fill { width: 55%; }
+.wizard-progress-seg.done .wizard-progress-seg-fill { width: 100%; }
+.wizard-step-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .02em; color: var(--steel); margin-bottom: 24px; }
+.wizard-nav { display: flex; align-items: center; margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+
 /* Grouped input — several fields sharing one bordered container, separated
    by hairlines with no radius on inner edges (02-DESIGN-SYSTEM.md §5's
    "signature pattern" for e.g. names, addresses, account numbers). Additive:

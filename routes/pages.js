@@ -26,6 +26,18 @@ import { PASSWORD_PATTERN, PASSWORD_HINT } from "../lib/auth.js";
 import { COUNTRIES } from "../lib/countries.js";
 import { filterListings } from "../lib/listingFilters.js";
 import { approximateCoords, distanceKm } from "../lib/geo.js";
+import {
+  AUDIENCE_TYPES,
+  AUDIENCE_TYPE_LABEL,
+  SURFACE_TYPES,
+  SURFACE_TYPE_LABEL,
+  ILLUMINATION_OPTIONS,
+  ILLUMINATION_LABEL,
+  ACCESS_TYPES,
+  ACCESS_TYPE_LABEL,
+  PERMIT_STATUSES,
+  PERMIT_STATUS_LABEL,
+} from "../lib/listingSpecs.js";
 
 function send(res, status, html) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
@@ -949,85 +961,166 @@ export async function sellNewPage(req, res, query) {
     ${myListings.length ? `<div class="panel" style="margin-bottom:24px"><h3 style="font-size:14px;margin-bottom:10px">Your listings</h3><div class="job-list">${listRows}</div></div>` : ""}
 
     <div class="form-card form-card-wide">
-      <h2 style="font-size:16px;margin-bottom:14px">Space details</h2>
+      <!-- Three-segment progress bar (New Style Assets/02-DESIGN-SYSTEM.md
+           §5 "Progress") — six field-group steps grouped into three named
+           phases, echoing the reference wizard's "tell us about your place /
+           make it stand out / finish up and publish" shape. -->
+      <div class="wizard-progress" id="wizard-progress">
+        <div class="wizard-progress-seg" data-segment="1"><div class="wizard-progress-seg-fill"></div></div>
+        <div class="wizard-progress-seg" data-segment="2"><div class="wizard-progress-seg-fill"></div></div>
+        <div class="wizard-progress-seg" data-segment="3"><div class="wizard-progress-seg-fill"></div></div>
+      </div>
+      <div class="wizard-step-label" id="wizard-step-label"></div>
+
       <form method="POST" action="/api/listings" enctype="multipart/form-data" id="new-listing-form">
-        <div class="form-row">
-          <div class="field"><label>Business or venue name</label><input name="venue" required placeholder="${escapeHtml(user.businessName || "Castle Hill BJJ Academy")}" value="${escapeHtml(user.businessName || "")}" /></div>
+        <!-- Step 1 — basics -->
+        <div class="wizard-step" data-step="1" data-segment="1">
+          <h2 style="font-size:16px;margin-bottom:14px">Tell us about your space</h2>
+          <div class="form-row">
+            <div class="field"><label>Business or venue name</label><input name="venue" required placeholder="${escapeHtml(user.businessName || "Castle Hill BJJ Academy")}" value="${escapeHtml(user.businessName || "")}" /></div>
+            <div class="field">
+              <label>Listing title
+                <button type="button" class="info-btn" data-info="title-info" aria-label="Tips for a good title">i</button>
+              </label>
+              <input name="title" id="title-input" required maxlength="${LISTING_TITLE_MAX_LENGTH}" placeholder="Wall above the mats" />
+              <div class="small muted" id="title-count" style="margin-top:4px">0/${LISTING_TITLE_MAX_LENGTH}</div>
+              <div class="info-pop" id="title-info" hidden>
+                <strong>Writing a good title</strong>
+                <p class="small" style="margin:6px 0 0;line-height:1.6">Say exactly where the space is — buyers scan titles fast. Good examples: "Wall above the mats", "Fence facing the highway", "Window beside the till". Skip vague titles like "Great spot!" — your venue name is already shown separately.</p>
+              </div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>Category</label>
+              <select name="category" id="category-select">
+                ${CATEGORIES.map((c) => `<option value="${c}">${CATEGORY_LABEL[c]}</option>`).join("")}
+              </select>
+            </div>
+            <div class="field"><label>Space type (optional)</label><input name="subtype" placeholder="e.g. front fence panel, driveway sign board" /></div>
+          </div>
+        </div>
+
+        <!-- Step 2 — address & dimensions -->
+        <div class="wizard-step" data-step="2" data-segment="1" hidden>
+          <h2 style="font-size:16px;margin-bottom:14px">Where is it, and how big?</h2>
+          <div class="form-row">
+            <div class="field"><label>Suburb / City</label><input name="suburb" required placeholder="Castle Hill" /></div>
+            <div class="field"><label>Premises address</label><input name="address" required value="${escapeHtml(user.address || "")}" placeholder="14 Wattle St, Castle Hill NSW" /></div>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>Postcode (optional)</label><input name="postcode" placeholder="2154" /></div>
+            <div class="field"><label>Country</label><input name="country" value="Australia" placeholder="Australia" /></div>
+          </div>
+          <div class="small muted" style="margin:-6px 0 14px">We'll place your pin on the map automatically from the suburb and address above.</div>
+          <div class="form-row">
+            <div class="field"><label>Width (mm)</label><input type="number" id="sizeW" name="sizeW" required min="1" placeholder="2000" /></div>
+            <div class="field"><label>Height (mm)</label><input type="number" id="sizeH" name="sizeH" required min="1" placeholder="3000" /></div>
+          </div>
+          <button type="button" id="ar-preview-btn" class="btn btn-outline btn-block">📷 Preview on your wall</button>
+        </div>
+
+        <!-- Step 3 — site specifications (NEW: audience/surface/illumination/
+             access/permit — Phase 1's fields. All optional: an advertiser
+             benefits from knowing these, but a seller who doesn't have the
+             answer yet shouldn't be blocked from listing. -->
+        <div class="wizard-step" data-step="3" data-segment="2" hidden>
+          <h2 style="font-size:16px;margin-bottom:4px">Specifications</h2>
+          <p class="small muted" style="margin-bottom:14px">All optional — the more you fill in, the more an advertiser can judge the space without asking.</p>
+          <div class="form-row">
+            <div class="field"><label>Audience</label>
+              <select name="audienceType"><option value="">Not sure</option>${AUDIENCE_TYPES.map((a) => `<option value="${a}">${AUDIENCE_TYPE_LABEL[a]}</option>`).join("")}</select>
+            </div>
+            <div class="field"><label>Daily traffic count (optional)</label><input type="number" name="dailyTrafficCount" min="0" placeholder="e.g. 12000" />
+              <div class="hint">Your own estimate — shown to advertisers as owner-supplied, not independently verified.</div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>Surface</label>
+              <select name="surfaceType"><option value="">Not sure</option>${SURFACE_TYPES.map((s) => `<option value="${s}">${SURFACE_TYPE_LABEL[s]}</option>`).join("")}</select>
+            </div>
+            <div class="field"><label>Illumination</label>
+              <select name="illumination"><option value="">Not sure</option>${ILLUMINATION_OPTIONS.map((i) => `<option value="${i}">${ILLUMINATION_LABEL[i]}</option>`).join("")}</select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>Access for installers</label>
+              <select name="accessType"><option value="">Not sure</option>${ACCESS_TYPES.map((a) => `<option value="${a}">${ACCESS_TYPE_LABEL[a]}</option>`).join("")}</select>
+            </div>
+            <div class="field"><label>Access notes (optional)</label><input name="accessNotes" maxlength="500" placeholder="e.g. key with reception, gate code required" /></div>
+          </div>
+          <div class="field-group field-group-row">
+            <div class="field"><label>Permit status</label>
+              <select name="permitStatus"><option value="">Not sure</option>${PERMIT_STATUSES.map((p) => `<option value="${p}">${PERMIT_STATUS_LABEL[p]}</option>`).join("")}</select>
+            </div>
+            <div class="field"><label>Permit reference (optional)</label><input name="permitReference" maxlength="200" placeholder="Council permit #" /></div>
+            <div class="field"><label>Expires (optional)</label><input type="date" name="permitExpiry" /></div>
+          </div>
+          <div class="small muted" style="margin-top:-6px">This is your declaration — Frontage doesn't verify permit status on your behalf. See the <a href="/terms/seller" target="_blank" style="color:var(--orange)">Seller Terms</a> for what happens if signage is later found non-compliant.</div>
+        </div>
+
+        <!-- Step 4 — photos & description -->
+        <div class="wizard-step" data-step="4" data-segment="2" hidden>
+          <h2 style="font-size:16px;margin-bottom:14px">Photos and description</h2>
           <div class="field">
-            <label>Listing title
-              <button type="button" class="info-btn" data-info="title-info" aria-label="Tips for a good title">i</button>
-            </label>
-            <input name="title" id="title-input" required maxlength="${LISTING_TITLE_MAX_LENGTH}" placeholder="Wall above the mats" />
-            <div class="small muted" id="title-count" style="margin-top:4px">0/${LISTING_TITLE_MAX_LENGTH}</div>
-            <div class="info-pop" id="title-info" hidden>
-              <strong>Writing a good title</strong>
-              <p class="small" style="margin:6px 0 0;line-height:1.6">Say exactly where the space is — buyers scan titles fast. Good examples: "Wall above the mats", "Fence facing the highway", "Window beside the till". Skip vague titles like "Great spot!" — your venue name is already shown separately.</p>
+            <label>Photos <span class="muted" style="text-transform:none">(at least ${LISTING_MIN_PHOTOS}, up to 8)</span></label>
+            <input type="file" id="photos-input" name="photos" accept="image/*" multiple required />
+            <div class="small muted" style="margin-top:4px">Clear, well-lit photos help buyers trust the listing — include a wide shot of the space and a close-up of the exact spot.</div>
+            <div class="small" id="photos-error" style="margin-top:4px;color:var(--red);display:none">Please choose at least ${LISTING_MIN_PHOTOS} photos.</div>
+          </div>
+          <div class="field">
+            <label>Description</label>
+            <textarea name="desc" id="desc-input" rows="3" maxlength="${LISTING_DESC_MAX_LENGTH}" placeholder="What makes this space worth advertising on?"></textarea>
+            <div class="small muted" id="desc-count" style="margin-top:4px">0/${LISTING_DESC_MAX_LENGTH}</div>
+          </div>
+        </div>
+
+        <!-- Step 5 — pricing -->
+        <div class="wizard-step" data-step="5" data-segment="3" hidden>
+          <h2 style="font-size:16px;margin-bottom:14px">Set your rate</h2>
+          <div class="form-row">
+            <div class="field">
+              <label>Monthly rate (AUD, excl. GST)
+                <button type="button" class="info-btn" data-info="price-info" aria-label="How to work out a rate">i</button>
+              </label>
+              <input type="number" name="price" required min="1" step="0.01" placeholder="100" />
+              <div class="info-pop" id="price-info" hidden>
+                <strong>Working out a rate</strong>
+                <p class="small" style="margin:6px 0 0;line-height:1.6">Check what similar spaces in your suburb are charging on <a href="/" target="_blank" style="color:var(--orange)">Browse</a> first. As a rough guide, low-traffic spots typically go for $50–150/mo and high-traffic prime locations $300+. This is what buyers pay before GST — you keep 85% of it, paid out monthly.</p>
+              </div>
+            </div>
+            <div class="field"><label>Estimated daily eyes</label><input type="number" name="estimatedEyesPerDay" id="eyes-input" min="0" placeholder="e.g. 250" />
+              <div class="small muted" style="margin-top:4px" id="eyes-hint">Auto-estimated from category and size — adjust it if you know better.</div>
             </div>
           </div>
         </div>
-        <div class="form-row">
-          <div class="field"><label>Category</label>
-            <select name="category" id="category-select">
-              ${CATEGORIES.map((c) => `<option value="${c}">${CATEGORY_LABEL[c]}</option>`).join("")}
-            </select>
+
+        <!-- Step 6 — review, payout, publish -->
+        <div class="wizard-step" data-step="6" data-segment="3" hidden>
+          <h2 style="font-size:16px;margin-bottom:14px">Review and publish</h2>
+          ${
+            needsPayout
+              ? `<h3 style="font-size:13px;margin-bottom:10px">Where should we send your earnings?</h3>
+          <p class="small muted" style="margin-bottom:10px">Only asked once — payouts are sent monthly, minus Frontage's 15% fee.</p>
+          <div class="form-row">
+            <div class="field"><label>BSB</label><input name="bankBsb" required placeholder="062-000" /></div>
+            <div class="field"><label>Account number</label><input name="bankAccount" required placeholder="12345678" /></div>
           </div>
-          <div class="field"><label>Space type (optional)</label><input name="subtype" placeholder="e.g. front fence panel, driveway sign board" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Suburb / City</label><input name="suburb" required placeholder="Castle Hill" /></div>
-          <div class="field"><label>Premises address</label><input name="address" required value="${escapeHtml(user.address || "")}" placeholder="14 Wattle St, Castle Hill NSW" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Postcode (optional)</label><input name="postcode" placeholder="2154" /></div>
-          <div class="field"><label>Country</label><input name="country" value="Australia" placeholder="Australia" /></div>
-        </div>
-        <div class="small muted" style="margin:-6px 0 14px">We'll place your pin on the map automatically from the suburb and address above.</div>
-        <div class="form-row">
-          <div class="field"><label>Width (mm)</label><input type="number" id="sizeW" name="sizeW" required min="1" placeholder="2000" /></div>
-          <div class="field"><label>Height (mm)</label><input type="number" id="sizeH" name="sizeH" required min="1" placeholder="3000" /></div>
-        </div>
-        <button type="button" id="ar-preview-btn" class="btn btn-outline btn-block" style="margin-bottom:14px">📷 Preview on your wall</button>
-        <div class="form-row">
-          <div class="field">
-            <label>Monthly rate (AUD, excl. GST)
-              <button type="button" class="info-btn" data-info="price-info" aria-label="How to work out a rate">i</button>
-            </label>
-            <input type="number" name="price" required min="1" step="0.01" placeholder="100" />
-            <div class="info-pop" id="price-info" hidden>
-              <strong>Working out a rate</strong>
-              <p class="small" style="margin:6px 0 0;line-height:1.6">Check what similar spaces in your suburb are charging on <a href="/" target="_blank" style="color:var(--orange)">Browse</a> first. As a rough guide, low-traffic spots typically go for $50–150/mo and high-traffic prime locations $300+. This is what buyers pay before GST — you keep 85% of it, paid out monthly.</p>
-            </div>
-          </div>
-          <div class="field"><label>Estimated daily eyes</label><input type="number" name="estimatedEyesPerDay" id="eyes-input" min="0" placeholder="e.g. 250" />
-            <div class="small muted" style="margin-top:4px" id="eyes-hint">Auto-estimated from category and size — adjust it if you know better.</div>
-          </div>
-        </div>
-        <div class="field">
-          <label>Description</label>
-          <textarea name="desc" id="desc-input" rows="3" maxlength="${LISTING_DESC_MAX_LENGTH}" placeholder="What makes this space worth advertising on?"></textarea>
-          <div class="small muted" id="desc-count" style="margin-top:4px">0/${LISTING_DESC_MAX_LENGTH}</div>
-        </div>
-        <div class="field">
-          <label>Photos <span class="muted" style="text-transform:none">(at least ${LISTING_MIN_PHOTOS}, up to 8)</span></label>
-          <input type="file" id="photos-input" name="photos" accept="image/*" multiple required />
-          <div class="small muted" style="margin-top:4px">Clear, well-lit photos help buyers trust the listing — include a wide shot of the space and a close-up of the exact spot.</div>
-          <div class="small" id="photos-error" style="margin-top:4px;color:var(--red);display:none">Please choose at least ${LISTING_MIN_PHOTOS} photos.</div>
+          <div class="field"><label>Account name</label><input name="bankAccountName" required placeholder="${escapeHtml(user.businessName || "Account name")}" /></div>`
+              : `<div class="small muted" style="margin-bottom:10px">Payouts go to the bank account already on file (••••${escapeHtml(user.bankAccount ? user.bankAccount.slice(-4) : "")}).</div>`
+          }
+          <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Publish listing</button>
         </div>
 
-        ${
-          needsPayout
-            ? `<div class="divider"></div>
-        <h3 style="font-size:13px;margin-bottom:10px">Where should we send your earnings?</h3>
-        <p class="small muted" style="margin-bottom:10px">Only asked once — payouts are sent monthly, minus Frontage's 15% fee.</p>
-        <div class="form-row">
-          <div class="field"><label>BSB</label><input name="bankBsb" required placeholder="062-000" /></div>
-          <div class="field"><label>Account number</label><input name="bankAccount" required placeholder="12345678" /></div>
+        <!-- Fixed-shape footer: Back is a plain link-style button, Next is
+             the step's forward action — only step 6 shows the real submit
+             button above instead. Doc 02 §6 notes the wizard footer stays
+             fixed while content scrolls; kept in-flow here rather than
+             actually position:fixed, which would need its own stacking
+             work against the existing sticky site header. -->
+        <div class="wizard-nav">
+          <button type="button" class="btn btn-outline" id="wizard-back" hidden>← Back</button>
+          <button type="button" class="btn btn-primary" id="wizard-next" style="margin-left:auto">Next</button>
         </div>
-        <div class="field"><label>Account name</label><input name="bankAccountName" required placeholder="${escapeHtml(user.businessName || "Account name")}" /></div>`
-            : `<div class="small muted" style="margin-bottom:10px">Payouts go to the bank account already on file (••••${escapeHtml(user.bankAccount ? user.bankAccount.slice(-4) : "")}).</div>`
-        }
-
-        <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Publish listing</button>
       </form>
     </div>
     <script src="/wall-visualizer.js"></script>
@@ -1081,24 +1174,78 @@ export async function sellNewPage(req, res, query) {
         if (sizeWInput) sizeWInput.addEventListener('input', refreshEyesEstimate);
         if (sizeHInput) sizeHInput.addEventListener('input', refreshEyesEstimate);
 
-        // Client-side heads-up for the minimum-photos rule — the server
-        // enforces it too (routes/api.js#createListingHandler), this just
-        // saves a round trip when it's obviously not met.
-        var form = document.getElementById('new-listing-form');
+        // ---- Wizard step navigation ----
+        var steps = [].slice.call(document.querySelectorAll('.wizard-step'));
+        var totalSteps = steps.length;
+        var current = 1;
+        var segLabels = { 1: 'Space details', 2: 'Specifications & photos', 3: 'Pricing & publish' };
+        var backBtn = document.getElementById('wizard-back');
+        var nextBtn = document.getElementById('wizard-next');
         var photosInput = document.getElementById('photos-input');
         var photosError = document.getElementById('photos-error');
-        if (form && photosInput && photosError) {
-          form.addEventListener('submit', function (e) {
-            if (photosInput.files.length < ${LISTING_MIN_PHOTOS}) {
-              e.preventDefault();
-              photosError.style.display = 'block';
-              photosInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            } else {
-              photosError.style.display = 'none';
-            }
+
+        function stepEl(n) { return steps[n - 1]; }
+
+        function updateProgress() {
+          var activeSegment = parseInt(stepEl(current).getAttribute('data-segment'), 10);
+          [].forEach.call(document.querySelectorAll('.wizard-progress-seg'), function (seg) {
+            var segNum = parseInt(seg.getAttribute('data-segment'), 10);
+            seg.classList.remove('done', 'active');
+            if (segNum < activeSegment) seg.classList.add('done');
+            else if (segNum === activeSegment) seg.classList.add('active');
           });
+          var label = document.getElementById('wizard-step-label');
+          if (label) label.textContent = segLabels[activeSegment] + ' · step ' + current + ' of ' + totalSteps;
+        }
+
+        function showStep(n) {
+          current = n;
+          steps.forEach(function (s, i) { s.hidden = (i + 1) !== n; });
+          backBtn.hidden = n === 1;
+          nextBtn.hidden = n === totalSteps;
+          updateProgress();
+          stepEl(n).scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        // Validates only the fields on the currently visible step — native
+        // reportValidity() on a still-hidden step silently no-ops in some
+        // browsers, so this only ever runs against the step in view.
+        function validateStep(n) {
+          var el = stepEl(n);
+          var invalid = el.querySelector(':invalid');
+          if (invalid) { invalid.reportValidity(); return false; }
+          if (el.contains(photosInput) && photosInput.files.length < ${LISTING_MIN_PHOTOS}) {
+            photosError.style.display = 'block';
+            photosInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return false;
+          }
+          return true;
+        }
+
+        nextBtn.addEventListener('click', function () {
+          if (!validateStep(current)) return;
+          if (current < totalSteps) showStep(current + 1);
+        });
+        backBtn.addEventListener('click', function () {
+          if (current > 1) showStep(current - 1);
+        });
+        if (photosInput && photosError) {
           photosInput.addEventListener('change', function () { photosError.style.display = 'none'; });
         }
+        // Final safety net — a hidden, unvalidated required field is exempt
+        // from native constraint validation on submit (per the HTML5 spec),
+        // so re-check the photos minimum specifically, since it's the one
+        // rule the per-step Next button can't fully guarantee if a step is
+        // ever reached out of order.
+        document.getElementById('new-listing-form').addEventListener('submit', function (e) {
+          if (photosInput.files.length < ${LISTING_MIN_PHOTOS}) {
+            e.preventDefault();
+            showStep(4);
+            photosError.style.display = 'block';
+          }
+        });
+
+        showStep(1);
       })();
     </script>
   `;
