@@ -227,17 +227,19 @@ export async function browsePage(req, res, query) {
     .map(
       (l) => `
       <a class="card" href="/listing/${l.id}">
-        <div class="card-diagram">${l.photos && l.photos.length ? `<img src="${escapeHtml(l.photos[0])}" alt="" style="width:100%;height:100%;object-fit:cover" />` : svgSpaceDiagram(l.sizeW, l.sizeH)}</div>
-        <div class="card-body">
+        <div class="card-diagram">
+          ${l.photos && l.photos.length ? `<img src="${escapeHtml(l.photos[0])}" alt="" />` : svgSpaceDiagram(l.sizeW, l.sizeH)}
           ${
             l.estimatedEyesPerDay
-              ? `<div style="margin-bottom:8px"><div class="badge badge-steel">${l.estimatedEyesPerDay >= 1000 ? (l.estimatedEyesPerDay / 1000).toFixed(1) + "k" : l.estimatedEyesPerDay} eyes/day</div></div>`
+              ? `<div class="eyes-pill">${l.estimatedEyesPerDay >= 1000 ? (l.estimatedEyesPerDay / 1000).toFixed(1) + "k" : l.estimatedEyesPerDay}/day</div>`
               : ""
           }
-          <h3 style="font-size:16px">${escapeHtml(l.title)}</h3>
-          <div class="muted small">${escapeHtml(l.venue)} · ${escapeHtml(locationLine(l))}${l.subtype ? ` · ${escapeHtml(l.subtype)}` : ""}</div>
-          <div class="row-between" style="margin-top:12px;padding-top:12px;border-top:1px solid #EAE7DF">
-            <div class="mono" style="font-weight:700">${money(l.price)}<span class="muted small"> /mo + GST</span></div>
+        </div>
+        <div class="card-body">
+          <h3 style="font-size:15.5px;font-weight:600;letter-spacing:-0.005em">${escapeHtml(l.title)}</h3>
+          <div class="muted small" style="margin-bottom:8px">${escapeHtml(l.venue)} · ${escapeHtml(locationLine(l))}${l.subtype ? ` · ${escapeHtml(l.subtype)}` : ""}</div>
+          <div class="row-between">
+            <div class="mono" style="font-weight:700;font-size:14.5px">${money(l.price)}<span class="muted small" style="font-family:'Inter',sans-serif;font-weight:500"> /mo + GST</span></div>
             <span class="small" style="color:var(--orange);font-weight:600">View space →</span>
           </div>
         </div>
@@ -248,7 +250,7 @@ export async function browsePage(req, res, query) {
   const categoryChips = ["all", ...CATEGORIES]
     .map((c) => {
       const active = (cat || "all") === c;
-      return `<a href="${withParams({ category: c === "all" ? "" : c })}" class="btn btn-sm ${active ? "btn-dark" : "btn-outline"}">${c === "all" ? "All spaces" : CATEGORY_LABEL[c]}</a>`;
+      return `<a href="${withParams({ category: c === "all" ? "" : c })}" class="chip-pill${active ? " is-active" : ""}">${c === "all" ? "All spaces" : CATEGORY_LABEL[c]}</a>`;
     })
     .join(" ");
 
@@ -266,30 +268,23 @@ export async function browsePage(req, res, query) {
   const body = `
     <div class="hero-row">
       <div>
-        <h1 class="hero-headline">FREE SPACE, <span style="color:var(--orange)">FREE MONEY.</span></h1>
-        <p class="hero-sub">List your wall, window, or fence space and start earning from advertisers — or find the right spot to put your ad up.</p>
+        <h1 class="hero-headline">Free space,<br /><span style="color:var(--orange)">free money.</span></h1>
+        <p class="hero-sub">List your wall, window, or fence — or find the spot that gets your ad seen.</p>
       </div>
-      ${user ? `<a href="/sell/new" class="btn btn-accent btn-lg">List a space</a>` : `<a href="/onboarding" class="btn btn-accent btn-lg">Get started</a>`}
+      ${user ? `<a href="/sell/new" class="btn btn-accent btn-lg">List a space →</a>` : `<a href="/onboarding" class="btn btn-accent btn-lg">Get started →</a>`}
     </div>
 
-    <div class="row-between" style="margin-bottom:16px;flex-wrap:wrap;gap:10px">
-      <h2 style="font-size:20px">Browse spaces</h2>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <form method="GET" action="/" style="display:flex;gap:8px">
-          ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
-          ${FILTER_PARAM_KEYS.filter((k) => k !== "q").map((k) => (query.get(k) ? `<input type="hidden" name="${k}" value="${escapeHtml(query.get(k))}" />` : "")).join("")}
-          <input type="text" name="q" placeholder="Search suburb, venue, or space" value="${escapeHtml(query.get("q") || "")}"
-            style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:var(--white);font-size:13px;min-width:220px" />
-          <button class="btn btn-outline btn-sm" type="submit">Search</button>
-        </form>
-        <button type="button" id="map-toggle-btn" class="btn btn-outline btn-sm">${mapView ? "📋 List view" : "🗺️ Map view"}</button>
-      </div>
-    </div>
-    <div id="browse-map" style="display:${mapView ? "block" : "none"};height:420px;border-radius:10px;overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
-    <div class="row-between" style="margin-bottom:18px;flex-wrap:wrap;gap:10px">
-      <div id="category-chips" style="display:flex;flex-wrap:wrap;gap:8px">${categoryChips}</div>
-      <details class="nav-dropdown" id="filters-details">
-        <summary class="btn btn-outline btn-sm" style="cursor:pointer;list-style:none">⚙️ Filters${activeFilterCount ? ` (${activeFilterCount})` : ""}</summary>
+    <div class="row-between" style="margin-bottom:22px;flex-wrap:wrap;gap:14px;padding-bottom:22px;border-bottom:1px solid var(--border)">
+      <form method="GET" action="/" class="field-pill" style="flex:1;min-width:240px;max-width:520px">
+        ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
+        ${FILTER_PARAM_KEYS.filter((k) => k !== "q").map((k) => (query.get(k) ? `<input type="hidden" name="${k}" value="${escapeHtml(query.get(k))}" />` : "")).join("")}
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--steel)"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="text" name="q" placeholder="Search suburb, venue, or space" value="${escapeHtml(query.get("q") || "")}" />
+      </form>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button type="button" id="map-toggle-btn" class="btn-pill btn" style="padding:11px 20px">${mapView ? "📋 List view" : "🗺️ Map view"}</button>
+        <details class="nav-dropdown" id="filters-details">
+          <summary class="btn-pill btn" style="padding:11px 20px;cursor:pointer;list-style:none">⚙️ Filters${activeFilterCount ? ` (${activeFilterCount})` : ""}</summary>
         <form method="GET" action="/" class="nav-dropdown-menu filters-menu" style="padding:16px;min-width:260px;right:0;left:auto">
           ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
           ${query.get("q") ? `<input type="hidden" name="q" value="${escapeHtml(query.get("q"))}" />` : ""}
@@ -312,8 +307,14 @@ export async function browsePage(req, res, query) {
             <a href="${withParams({ country: "", city: "", minPrice: "", maxPrice: "", minArea: "", minEyes: "", sort: "" })}" class="btn btn-outline btn-sm" data-filter-link>Clear</a>
           </div>
         </form>
-      </details>
+        </details>
+      </div>
     </div>
+    <div id="browse-map" style="display:${mapView ? "block" : "none"};height:420px;border-radius:var(--radius-lg);overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
+    <div class="row-between" style="margin-bottom:28px;flex-wrap:wrap;gap:10px">
+      <div id="category-chips" style="display:flex;flex-wrap:wrap;gap:8px">${categoryChips}</div>
+    </div>
+    <h2 style="font-size:22px;font-weight:700;letter-spacing:-0.01em;margin:0 0 24px">${listings.length} space${listings.length === 1 ? "" : "s"}${cat && cat !== "all" ? ` · ${escapeHtml(CATEGORY_LABEL[cat] || cat)}` : ""}</h2>
     <div id="browse-results"${mapView ? ` style="display:none"` : ""}>${listings.length === 0 ? noResultsHtml : `<div class="grid">${cards}</div>`}</div>
     <div id="browse-below-fold" style="margin-top:24px${mapView ? ";display:none" : ""}">${adUnitMarkup("ADSENSE_SLOT_BROWSE")}</div>
     <script>
@@ -869,29 +870,40 @@ export async function onboardingPage(req, res, query, errorMsg) {
   const next = query.get("next") || "/";
   if (user) return redirect(res, next);
 
+  // Which tab opens first: an error from a failed signup keeps you on
+  // Sign up; otherwise Sign up is still the default (matches the previous
+  // layout's left-to-right emphasis) but either tab is one click away.
+  const startTab = query.get("tab") === "login" ? "login" : "signup";
+
   const body = `
-    <div class="two-col" style="max-width:900px;margin:0 auto;gap:32px">
-      <div class="form-card">
-        <h2 style="margin-bottom:4px">Create your account</h2>
-        <p class="small muted" style="margin-bottom:16px">One account for browsing, booking, or listing space — no role to pick up front. We only ask for business or payment details later, right when you actually list or book.</p>
-        ${errorMsg ? `<div class="badge badge-orange" style="margin-bottom:12px;display:block">${escapeHtml(errorMsg)}</div>` : ""}
+    <div class="auth-card">
+      <h1 style="font-size:24px;margin-bottom:22px;text-align:center">Welcome to Frontage</h1>
+      <div class="auth-tabs">
+        <button type="button" class="auth-tab" id="tab-signup-btn">Sign up</button>
+        <button type="button" class="auth-tab" id="tab-login-btn">Log in</button>
+      </div>
+
+      ${errorMsg ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(errorMsg)}</div>` : ""}
+
+      <div class="auth-panel" id="panel-signup">
+        <p class="small muted" style="margin-bottom:18px">One account for browsing, booking, or listing space — no role to pick up front. We only ask for business or payment details later, right when you actually list or book.</p>
         <form method="POST" action="/api/auth/signup">
           <input type="hidden" name="next" value="${escapeHtml(next)}" />
           <div class="field"><label>Full name</label><input name="fullName" required placeholder="Jordan Reyes" value="${escapeHtml(query.get("fullName") || "")}" /></div>
           <div class="field"><label>Email</label><input type="email" name="email" required placeholder="jordan@email.com" value="${escapeHtml(query.get("email") || "")}" /></div>
           ${mobileFieldMarkup({ idPrefix: "signup-mobile", value: query.get("mobile") || "" })}
           ${passwordFieldsMarkup({ idPrefix: "signup-pw" })}
-          <button class="btn btn-accent btn-block" type="submit">Create free account</button>
+          <button class="btn btn-accent btn-block" type="submit" style="margin-top:6px">Create free account</button>
         </form>
       </div>
-      <div class="form-card">
-        <h2 style="margin-bottom:4px">Already have an account?</h2>
-        <p class="small muted" style="margin-bottom:16px">Log in to pick up where you left off.</p>
+
+      <div class="auth-panel" id="panel-login">
+        <p class="small muted" style="margin-bottom:18px">Log in to pick up where you left off.</p>
         <form method="POST" action="/api/auth/login">
           <input type="hidden" name="next" value="${escapeHtml(next)}" />
           <div class="field"><label>Email</label><input type="email" name="email" required /></div>
           <div class="field"><label>Password</label><input type="password" name="password" required /></div>
-          <button class="btn btn-outline btn-block" type="submit">Log in</button>
+          <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Log in</button>
         </form>
         <div class="divider"></div>
         <p class="small muted">Demo accounts (password <span class="mono">password123</span>):</p>
@@ -899,9 +911,25 @@ export async function onboardingPage(req, res, query, errorMsg) {
           <li>marco@castlehillbjj.com.au — seller</li>
           <li>jordan@openhouserealty.com.au — buyer</li>
         </ul>
-        <p class="small muted" style="margin-top:8px">Contractor? That's a separate login at <a href="/contractor/login" style="color:var(--orange)">/contractor/login</a>.</p>
       </div>
+
+      <p class="small muted" style="margin-top:20px;text-align:center">Contractor? That's a separate login at <a href="/contractor/login" style="color:var(--orange)">/contractor/login</a>.</p>
     </div>
+    <script>
+      (function () {
+        var tabs = { signup: document.getElementById('tab-signup-btn'), login: document.getElementById('tab-login-btn') };
+        var panels = { signup: document.getElementById('panel-signup'), login: document.getElementById('panel-login') };
+        function show(name) {
+          Object.keys(tabs).forEach(function (k) {
+            tabs[k].classList.toggle('is-active', k === name);
+            panels[k].hidden = k !== name;
+          });
+        }
+        tabs.signup.addEventListener('click', function () { show('signup'); });
+        tabs.login.addEventListener('click', function () { show('login'); });
+        show(${JSON.stringify(startTab)});
+      })();
+    </script>
   `;
   send(res, 200, await layout({ title: "Sign up / Log in", user: null, body }));
 }
@@ -930,6 +958,44 @@ export async function welcomePage(req, res, query) {
     </div>
   `;
   send(res, 200, await layout({ title: "Check your email", user, body }));
+}
+
+// First-time "become a seller" intro — shown once, before the listing
+// wizard, only to a user with zero listings (the nav's "Switch to listing a
+// space" link routes here instead of straight to /sell/new). Mirrors
+// Airbnb's host-type/intro chooser screens (listing-create_01-04, 09) as a
+// deliberate mode-switch moment, even though Frontage keeps one unified
+// account underneath rather than a separate host mode.
+export async function sellWelcomePage(req, res) {
+  const user = await requireUser(req, res, "/sell/welcome");
+  if (!user) return;
+  const existing = await db.getListingsByOwner(user.id);
+  if (existing.length > 0) return redirect(res, "/sell/new");
+
+  const body = `
+    <div style="max-width:560px;margin:40px auto;text-align:center">
+      <h1 style="font-size:32px;font-weight:700;letter-spacing:-0.02em;margin-bottom:14px;text-wrap:balance">It's easy to start earning on Frontage</h1>
+      <p class="muted" style="font-size:15px;margin-bottom:40px">Three steps, and your wall, window, or fence is live on the marketplace.</p>
+    </div>
+    <div style="max-width:560px;margin:0 auto 40px;display:flex;flex-direction:column;gap:24px">
+      <div style="display:flex;gap:16px;align-items:flex-start">
+        <div class="mono" style="width:32px;height:32px;border-radius:50%;background:var(--surface-sunken,var(--concrete));display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">1</div>
+        <div><strong style="font-size:15px">Tell us about your space</strong><div class="small muted" style="margin-top:2px">Where it is, how big, and what kind of surface it is.</div></div>
+      </div>
+      <div style="display:flex;gap:16px;align-items:flex-start">
+        <div class="mono" style="width:32px;height:32px;border-radius:50%;background:var(--surface-sunken,var(--concrete));display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">2</div>
+        <div><strong style="font-size:15px">Add photos and set your rate</strong><div class="small muted" style="margin-top:2px">We'll suggest a rate and an audience estimate based on similar spaces.</div></div>
+      </div>
+      <div style="display:flex;gap:16px;align-items:flex-start">
+        <div class="mono" style="width:32px;height:32px;border-radius:50%;background:var(--surface-sunken,var(--concrete));display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">3</div>
+        <div><strong style="font-size:15px">Publish and start earning</strong><div class="small muted" style="margin-top:2px">Advertisers pay the full term up front; you're paid out monthly, minus a 15% fee.</div></div>
+      </div>
+    </div>
+    <div style="max-width:340px;margin:0 auto">
+      <a href="/sell/new" class="btn btn-accent btn-block btn-lg">Get started →</a>
+    </div>
+  `;
+  send(res, 200, await layout({ title: "List your space", activeNav: "sell", user, body }));
 }
 
 // ---------------- List a space ----------------
@@ -2534,8 +2600,7 @@ export async function accountPage(req, res, query) {
   const connect = query.get("connect");
   const stripeConfigured = isStripeConfigured();
 
-  const body = `
-    <h1 style="font-size:22px;margin-bottom:16px">Account</h1>
+  const notices = `
     ${updated ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(updated)} updated.</div>` : ""}
     ${err ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(err)}</div>` : ""}
     ${connect === "done" ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Stripe onboarding updated — check your payout status below.</div>` : ""}
@@ -2547,70 +2612,86 @@ export async function accountPage(req, res, query) {
             <form method="POST" action="/api/account/resend-verification" style="display:inline;margin-left:8px"><button class="btn-link" style="color:var(--orange);text-decoration:underline">Resend email</button></form>
           </div>`
         : ""
-    }
+    }`;
 
-    <div class="form-card" style="margin-bottom:20px">
-      <h2 style="font-size:16px;margin-bottom:14px">Contact info</h2>
-      <form method="POST" action="/api/account/profile">
-        <div class="field"><label>Full name</label><input name="fullName" required value="${escapeHtml(user.fullName)}" /></div>
-        <div class="field"><label>Email</label><input type="email" name="email" required value="${escapeHtml(user.email)}" /></div>
-        <div class="field"><label>Mobile</label><input name="mobile" required value="${escapeHtml(user.mobile)}" /></div>
-        <div class="field"><label>Address</label><input name="address" value="${escapeHtml(user.address || "")}" /></div>
-        <div class="form-row">
-          <div class="field"><label>Business name (optional)</label><input name="businessName" value="${escapeHtml(user.businessName || "")}" placeholder="OpenHouse Realty" /></div>
-          <div class="field"><label>ABN (optional)</label><input name="abn" value="${escapeHtml(user.abn || "")}" placeholder="12 345 678 901" inputmode="numeric" /></div>
-        </div>
-        <div class="small muted" style="margin:-4px 0 14px">Shown on the tax invoices for spaces you book and the payouts you receive.</div>
-        <div class="field"><label>Google Business Profile URL (optional)</label><input name="googleBusinessUrl" value="${escapeHtml(user.googleBusinessUrl || "")}" placeholder="https://g.page/your-business" /></div>
-        <button class="btn btn-primary btn-block" type="submit">Save contact info</button>
-      </form>
-    </div>
+  // Airbnb-style settings shell (02-DESIGN-SYSTEM.md §3) — sidebar sections
+  // instead of one long stacked page. Client-side toggle, same pattern as
+  // the listing wizard's steps and the auth card's tabs.
+  const body = `
+    <h1 style="font-size:24px;font-weight:700;letter-spacing:-0.01em;margin-bottom:28px">Account</h1>
+    ${notices}
+    <div class="settings-shell">
+      <nav class="settings-nav">
+        <a href="#" data-section="profile" class="is-active">Personal info</a>
+        <a href="#" data-section="security">Login &amp; security</a>
+        <a href="#" data-section="payouts">Payouts</a>
+      </nav>
+      <div class="settings-content">
+        <section class="settings-section" data-section="profile">
+          <h2>Personal info</h2>
+          <p class="section-hint">Your name and contact details, used on invoices and payouts.</p>
+          <form method="POST" action="/api/account/profile">
+            <div class="field"><label>Full name</label><input name="fullName" required value="${escapeHtml(user.fullName)}" /></div>
+            <div class="field"><label>Email</label><input type="email" name="email" required value="${escapeHtml(user.email)}" /></div>
+            <div class="field"><label>Mobile</label><input name="mobile" required value="${escapeHtml(user.mobile)}" /></div>
+            <div class="field"><label>Address</label><input name="address" value="${escapeHtml(user.address || "")}" /></div>
+            <div class="form-row">
+              <div class="field"><label>Business name (optional)</label><input name="businessName" value="${escapeHtml(user.businessName || "")}" placeholder="OpenHouse Realty" /></div>
+              <div class="field"><label>ABN (optional)</label><input name="abn" value="${escapeHtml(user.abn || "")}" placeholder="12 345 678 901" inputmode="numeric" /></div>
+            </div>
+            <div class="small muted" style="margin:-4px 0 14px">Shown on the tax invoices for spaces you book and the payouts you receive.</div>
+            <div class="field"><label>Google Business Profile URL (optional)</label><input name="googleBusinessUrl" value="${escapeHtml(user.googleBusinessUrl || "")}" placeholder="https://g.page/your-business" /></div>
+            <button class="btn btn-primary" type="submit">Save</button>
+          </form>
+        </section>
 
-    <div class="form-card" style="margin-bottom:20px">
-      <h2 style="font-size:16px;margin-bottom:14px">Password</h2>
-      <form method="POST" action="/api/account/password">
-        <div class="field"><label>Current password</label><input type="password" name="currentPassword" required /></div>
-        <div class="field"><label>New password</label><input type="password" name="newPassword" id="acct-pw-new" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" minlength="10" /></div>
-        <div class="small muted" style="margin-top:-8px;margin-bottom:14px">${escapeHtml(PASSWORD_HINT)}</div>
-        <div class="field"><label>Confirm new password</label><input type="password" name="confirmPassword" id="acct-pw-confirm" required /></div>
-        <div class="small" id="acct-pw-hint" style="margin-top:-8px;margin-bottom:14px"></div>
-        <button class="btn btn-outline btn-block" type="submit">Update password</button>
-      </form>
-      <script>
-        (function () {
-          var pw = document.getElementById("acct-pw-new");
-          var cf = document.getElementById("acct-pw-confirm");
-          var hint = document.getElementById("acct-pw-hint");
-          function check() {
-            if (!cf.value) { hint.textContent = ""; return; }
-            if (pw.value === cf.value) { hint.textContent = "✓ Passwords match"; hint.style.color = "var(--green)"; }
-            else { hint.textContent = "Passwords do not match"; hint.style.color = "var(--red)"; }
-          }
-          pw.addEventListener("input", check);
-          cf.addEventListener("input", check);
-        })();
-      </script>
-    </div>
+        <section class="settings-section" data-section="security" hidden>
+          <h2>Login &amp; security</h2>
+          <p class="section-hint">Update the password you use to log in.</p>
+          <form method="POST" action="/api/account/password">
+            <div class="field"><label>Current password</label><input type="password" name="currentPassword" required /></div>
+            <div class="field"><label>New password</label><input type="password" name="newPassword" id="acct-pw-new" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" minlength="10" /></div>
+            <div class="small muted" style="margin-top:-8px;margin-bottom:14px">${escapeHtml(PASSWORD_HINT)}</div>
+            <div class="field"><label>Confirm new password</label><input type="password" name="confirmPassword" id="acct-pw-confirm" required /></div>
+            <div class="small" id="acct-pw-hint" style="margin-top:-8px;margin-bottom:14px"></div>
+            <button class="btn btn-primary" type="submit">Update password</button>
+          </form>
+        </section>
 
-    <div class="form-card">
-      <h2 style="font-size:16px;margin-bottom:14px">Payouts</h2>
-      ${
-        stripeConfigured
-          ? user.stripeConnectAccountId
-            ? `<div class="small" style="color:var(--green);margin-bottom:10px">✓ Payout account connected via Stripe.</div>
+        <section class="settings-section" data-section="payouts" hidden>
+          <h2>Payouts</h2>
+          <p class="section-hint">Where your lease payouts are sent, minus Frontage's 15% fee.</p>
+          ${
+            stripeConfigured
+              ? user.stripeConnectAccountId
+                ? `<div class="small" style="color:var(--green);margin-bottom:10px">✓ Payout account connected via Stripe.</div>
                <p class="small muted" style="margin-bottom:10px">Update your bank details or finish any outstanding Stripe requirements.</p>
-               <form method="POST" action="/api/account/connect-payouts"><button class="btn btn-outline btn-block" type="submit">Manage payout account</button></form>`
-            : `<p class="small muted" style="margin-bottom:10px">Connect a Stripe payout account so we can send your lease payouts (minus Frontage's 15% fee). Stripe collects your bank details directly during onboarding.</p>
-               <form method="POST" action="/api/account/connect-payouts"><button class="btn btn-primary btn-block" type="submit">Connect payout account</button></form>`
-          : `<p class="small muted" style="margin-bottom:10px">Where seller payouts are sent (minus Frontage's 15% fee).</p>
-             <form method="POST" action="/api/account/banking">
+               <form method="POST" action="/api/account/connect-payouts"><button class="btn btn-outline" type="submit">Manage payout account</button></form>`
+                : `<p class="small muted" style="margin-bottom:10px">Connect a Stripe payout account so we can send your lease payouts. Stripe collects your bank details directly during onboarding.</p>
+               <form method="POST" action="/api/account/connect-payouts"><button class="btn btn-primary" type="submit">Connect payout account</button></form>`
+              : `<form method="POST" action="/api/account/banking">
                <div class="field"><label>BSB</label><input name="bankBsb" value="${escapeHtml(user.bankBsb || "")}" placeholder="062-000" /></div>
                <div class="field"><label>Account number</label><input name="bankAccount" value="${escapeHtml(user.bankAccount || "")}" placeholder="12345678" /></div>
                <div class="field"><label>Account name</label><input name="bankAccountName" value="${escapeHtml(user.bankAccountName || "")}" /></div>
-               <button class="btn btn-outline btn-block" type="submit">Save banking details</button>
+               <button class="btn btn-outline" type="submit">Save banking details</button>
              </form>`
-      }
+          }
+        </section>
+      </div>
     </div>
+    <script>
+      (function () {
+        var links = [].slice.call(document.querySelectorAll('.settings-nav a'));
+        var sections = [].slice.call(document.querySelectorAll('.settings-section'));
+        function show(name) {
+          links.forEach(function (l) { l.classList.toggle('is-active', l.getAttribute('data-section') === name); });
+          sections.forEach(function (s) { s.hidden = s.getAttribute('data-section') !== name; });
+        }
+        links.forEach(function (l) {
+          l.addEventListener('click', function (e) { e.preventDefault(); show(l.getAttribute('data-section')); });
+        });
+      })();
+    </script>
   `;
   send(res, 200, await layout({ title: "Account", activeNav: "account", user, body }));
 }

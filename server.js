@@ -125,6 +125,7 @@ const server = http.createServer(async (req, res) => {
     if (method === "GET" && pathname === "/terms/buyer") return await pages.buyerTermsPage(req, res);
     if (method === "GET" && pathname === "/terms/seller") return await pages.sellerTermsPage(req, res);
     if (method === "GET" && pathname === "/terms/non-discrimination") return await pages.nonDiscriminationPage(req, res);
+    if (method === "GET" && pathname === "/sell/welcome") return await pages.sellWelcomePage(req, res);
     if (method === "GET" && pathname === "/sell/new") return await pages.sellNewPage(req, res, query);
     if (method === "GET" && pathname === "/seller/jobs") return await pages.sellerJobsPage(req, res);
     if (method === "GET" && pathname === "/contractor/ping") return await pages.contractorPingPage(req, res);

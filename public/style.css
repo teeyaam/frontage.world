@@ -20,10 +20,13 @@
   --space-7: 48px;
   --space-8: 64px;
 
-  /* Radius scale, per 02-DESIGN-SYSTEM.md §4. */
+  /* Radius scale, per 02-DESIGN-SYSTEM.md §4. --radius-xl added after the
+     approved browse mockup called for a bigger, more photo-forward card
+     radius than the doc's own 12px "cards" figure. */
   --radius-sm: 8px;   /* buttons, inputs */
-  --radius-md: 12px;  /* cards, choice cards, images */
+  --radius-md: 12px;  /* choice cards, badges */
   --radius-lg: 16px;  /* modals, drawers */
+  --radius-xl: 20px;  /* listing cards, card imagery */
   --radius-pill: 999px;
 
   /* Elevation — used sparingly (modals/dropdowns only); page cards stay
@@ -34,9 +37,14 @@
 
 * { box-sizing: border-box; }
 html, body { max-width: 100%; overflow-x: hidden; }
+/* White page ground, not --concrete — approved directly from the browse
+   mockup: white is the single biggest lever for reading as the intended
+   Airbnb-derived style rather than "Frontage with a font swap". --concrete
+   stays in use as a *sunken* surface (alert bands, dropzones, chat bubbles),
+   just no longer the whole page's background. */
 body {
   margin: 0;
-  background: var(--concrete);
+  background: var(--white);
   color: var(--ink);
   font-family: 'Inter', sans-serif;
   font-size: 15px;
@@ -137,13 +145,28 @@ a { color: inherit; text-decoration: none; }
 @media (max-width: 560px) { .term-options { flex-direction: column; } }
 
 /* cards / grid */
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; }
-/* Cards read as borders, not shadows, per 02-DESIGN-SYSTEM.md §4 — the hover
-   lift keeps a subtle shadow as an interaction cue, not a resting elevation. */
-.card { background: var(--white); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; transition: box-shadow .15s, transform .15s; }
-.card:hover { box-shadow: 0 8px 20px rgba(27,42,61,0.08); transform: translateY(-2px); }
-.card-diagram { height: 140px; background: var(--concrete); display: flex; align-items: center; justify-content: center; }
-.card-body { padding: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 32px 28px; }
+/* Photo-forward card, per the approved browse mockup: no resting border —
+   separation comes from spacing and the hover shadow, with a bigger radius
+   on the image itself so the card reads as "photo with a caption" rather
+   than "bordered box". card-body drops its own padding to match (the
+   mockup's title/meta/price sit directly under the image, not inset). */
+.card { background: var(--white); border-radius: 0; overflow: visible; transition: transform .15s; }
+.card:hover { transform: translateY(-2px); }
+.card:hover .card-diagram { box-shadow: 0 10px 26px rgba(22,24,28,0.12); }
+.card-diagram { position: relative; height: 160px; background: var(--concrete); border-radius: var(--radius-xl); display: flex; align-items: center; justify-content: center; overflow: hidden; transition: box-shadow .15s; }
+.card-diagram img { width: 100%; height: 100%; object-fit: cover; }
+.card-body { padding: 14px 2px 0; }
+/* Stat pill overlaid on the card image (eyes/day) — white chip, top-left
+   inset, per 02-DESIGN-SYSTEM.md §5 "Cards and pills on imagery". */
+.eyes-pill {
+  position: absolute; top: 12px; left: 12px;
+  background: var(--white); border-radius: var(--radius-pill);
+  padding: 5px 11px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.01em;
+  box-shadow: 0 2px 8px rgba(27,42,61,0.14);
+  display: flex; align-items: center; gap: 5px;
+}
+.eyes-pill::before { content: "◎"; color: var(--orange); }
 .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: var(--radius-pill); }
 .badge-blue { background: #EAF0F8; color: var(--blue); }
 .badge-orange { background: #FFF4EE; color: var(--orange); }
@@ -206,11 +229,62 @@ a { color: inherit; text-decoration: none; }
    ("Filters", "Save & exit") rather than a form's main action. Additive:
    introduced for later screens, no existing markup uses it yet. */
 .btn-pill { border-radius: var(--radius-pill); background: var(--white); border: 1px solid var(--border); color: var(--ink); }
+.btn-pill.is-active { background: var(--ink); border-color: var(--ink); color: var(--white); }
+
+/* Pill search field + filter chips, per the approved browse mockup —
+   applied to the browse page's search box and category chips in place of
+   the previous rectangular input/.btn-outline treatment. */
+.field-pill {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  padding: 12px 18px; background: var(--white);
+}
+.field-pill input {
+  border: none; outline: none; font-family: inherit; font-size: 14px;
+  width: 100%; color: var(--ink); background: transparent;
+}
+.field-pill input::placeholder { color: var(--steel); }
+.chip-pill {
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  padding: 9px 16px; font-size: 13.5px; font-weight: 600;
+  background: var(--white); cursor: pointer; font-family: inherit; color: var(--ink);
+  display: inline-flex; align-items: center;
+}
+.chip-pill.is-active { background: var(--ink); border-color: var(--ink); color: var(--white); }
+
+/* Auth card — a single centred card with a tab switcher between Log in and
+   Sign up, in place of two side-by-side cards, closer to Airbnb's
+   login/signup modal (auth_01 in the reference pack) than the previous
+   two-column layout. */
+.auth-card { max-width: 440px; margin: 56px auto; background: var(--white); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 36px; }
+.auth-tabs { display: flex; gap: 4px; background: var(--surface-sunken, var(--concrete)); border-radius: var(--radius-pill); padding: 4px; margin-bottom: 28px; }
+.auth-tab { flex: 1; text-align: center; padding: 10px; border-radius: var(--radius-pill); font-size: 14px; font-weight: 600; color: var(--steel); cursor: pointer; border: none; background: none; font-family: inherit; }
+.auth-tab.is-active { background: var(--white); color: var(--ink); box-shadow: 0 1px 3px rgba(27,42,61,0.12); }
+.auth-panel[hidden] { display: none; }
+
+/* Account settings shell — sidebar + content, per 02-DESIGN-SYSTEM.md §3's
+   "Settings sidebar ~230px; content ~460px, left-aligned" and the account_*
+   reference screens (Personal info / Login & security / Payouts as
+   separate sections rather than one long stacked page). Sections are
+   toggled client-side, same pattern as the auth tabs and the listing
+   wizard's steps. */
+.settings-shell { display: flex; gap: 48px; align-items: flex-start; }
+.settings-nav { width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 90px; }
+.settings-nav a { padding: 10px 14px; border-radius: var(--radius-sm); font-size: 14px; font-weight: 500; color: var(--steel); }
+.settings-nav a.is-active { background: var(--surface-sunken, var(--concrete)); color: var(--ink); font-weight: 600; }
+.settings-content { flex: 1; min-width: 0; max-width: 520px; }
+.settings-section[hidden] { display: none; }
+.settings-section h2 { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 4px; }
+.settings-section .section-hint { color: var(--steel); font-size: 13.5px; margin-bottom: 22px; }
+@media (max-width: 760px) {
+  .settings-shell { flex-direction: column; gap: 4px; }
+  .settings-nav { width: 100%; flex-direction: row; overflow-x: auto; position: static; padding-bottom: 8px; }
+}
 
 /* browse hero */
-.hero-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 36px; flex-wrap: wrap; }
-.hero-headline { font-size: 40px; line-height: 1.05; letter-spacing: -0.01em; margin: 0 0 10px; }
-.hero-sub { color: var(--steel); font-size: 15px; max-width: 480px; margin: 0; }
+.hero-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 32px; margin-bottom: 44px; flex-wrap: wrap; padding-top: 12px; }
+.hero-headline { font-size: 56px; line-height: 0.98; letter-spacing: -0.03em; font-weight: 700; margin: 0 0 16px; text-wrap: balance; }
+.hero-sub { color: var(--steel); font-size: 16px; max-width: 440px; margin: 0; line-height: 1.5; }
 @media (max-width: 680px) {
   .hero-headline { font-size: 28px; }
   .hero-row { margin-bottom: 24px; }
