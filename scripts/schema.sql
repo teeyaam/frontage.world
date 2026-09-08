@@ -116,7 +116,22 @@ CREATE TABLE IF NOT EXISTS listings (
   lng NUMERIC,
   removed_reason TEXT,
   removed_at TIMESTAMPTZ,
-  removed_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL
+  removed_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+
+  -- Site specifications (New Style Assets/03-AD-SPACE-TRANSLATION.md §3) —
+  -- the audience/visibility/surface/access/permit data an advertiser needs
+  -- that a holiday-rental listing has no equivalent of. See lib/listingSpecs.js.
+  audience_type TEXT,
+  daily_traffic_count INTEGER, -- owner-declared, not verified — see traffic_verified
+  traffic_verified BOOLEAN NOT NULL DEFAULT false,
+  surface_type TEXT,
+  illumination TEXT,
+  access_type TEXT,
+  access_notes TEXT,
+  permit_status TEXT NOT NULL DEFAULT 'unknown',
+  permit_reference TEXT,
+  permit_expiry DATE,
+  lead_time_days INTEGER -- production+install turnaround specific to this site; feeds the Phase 3 flight calendar
 );
 CREATE INDEX IF NOT EXISTS idx_listings_owner_id ON listings(owner_id);
 CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);

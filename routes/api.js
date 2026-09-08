@@ -18,6 +18,7 @@ import {
 } from "../lib/auth.js";
 import { runUpload, uploadContractorDocs, uploadListingPhotos, CONTRACTOR_DOCS_DIR, getContractorDocUrl, isS3Configured, photoPublicUrl } from "../lib/upload.js";
 import { isValidCategory, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS } from "../lib/categories.js";
+import { parseListingSpecFields } from "../lib/listingSpecs.js";
 import { filterListings } from "../lib/listingFilters.js";
 import { estimateEyes, withGst } from "../lib/format.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
@@ -253,6 +254,10 @@ export async function createListingHandler(req, res) {
     estimatedEyesPerDay,
     lat: coords.lat,
     lng: coords.lng,
+    // Site-spec fields (audience, surface, illumination, access, permit,
+    // lead time) — optional until the Phase 2 wizard collects them; absent
+    // today so every one of these comes back empty via parseListingSpecFields.
+    ...parseListingSpecFields(b),
   });
 
   redirect(res, "/sell/new?created=1");
@@ -405,6 +410,7 @@ export async function updateListingHandler(req, res, id) {
     estimatedEyesPerDay,
     lat: coords.lat,
     lng: coords.lng,
+    ...parseListingSpecFields(b),
   });
   redirect(res, `/sell/edit/${id}?updated=1`);
 }
