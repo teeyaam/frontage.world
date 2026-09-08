@@ -16,12 +16,12 @@ import {
   isStrongPassword,
   PASSWORD_HINT,
 } from "../lib/auth.js";
-import { runUpload, uploadContractorDocs, uploadListingPhotos, CONTRACTOR_DOCS_DIR, getContractorDocUrl, isS3Configured, photoPublicUrl } from "../lib/upload.js";
+import { runUpload, uploadContractorDocs, uploadListingPhotos, uploadArtwork, artworkPublicUrl, CONTRACTOR_DOCS_DIR, getContractorDocUrl, isS3Configured, photoPublicUrl } from "../lib/upload.js";
 import { isValidCategory, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS } from "../lib/categories.js";
 import { parseListingSpecFields } from "../lib/listingSpecs.js";
 import { isValidStartDate, addMonths, earliestStartDate, campaignPhases } from "../lib/flightCalendar.js";
 import { filterListings } from "../lib/listingFilters.js";
-import { estimateEyes, withGst } from "../lib/format.js";
+import { estimateEyes, withGst, STAGES } from "../lib/format.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { approximateCoords } from "../lib/geo.js";
 import { isStripeConfigured, createPaymentIntent, retrievePaymentIntent, constructWebhookEvent, createConnectAccount, createConnectOnboardingLink } from "../lib/payments.js";
@@ -509,6 +509,7 @@ export async function createBookingHandler(req, res) {
   // always be replayed without it — agreeing to the terms is the one thing
   // that must never be assumed.
   if (!b.agreeTerms) return badRequest(res, "You must agree to the Buyer Terms & Conditions before booking.");
+  if (!b.agreeContentPolicy) return badRequest(res, "You must confirm your content complies with Frontage's content policy before booking.");
   // 3-phase flight calendar (lib/flightCalendar.js) — re-checks server-side
   // the same earliest-start constraint the checkout page's date input
   // expresses via min=, since a replayed/hand-crafted POST could pick any
@@ -708,10 +709,66 @@ export async function jobOrderSimulateBuyerAccept(req, res, id) {
   redirect(res, "/contractor/board");
 }
 
+// ---------------- Content-approval workflow (Phase 4) ----------------
+// Buyer uploads campaign artwork once the quote is accepted; the owner
+// approves or rejects it before a contractor can schedule print/install.
+export async function jobOrderUploadArtwork(req, res, id) {
+  const user = await currentUser(req);
+  if (!user) return redirect(res, "/onboarding?next=/account/leases");
+  const job = await db.getJobOrderById(id);
+  if (!job || job.buyerId !== user.id) return badRequest(res, "Not your booking.");
+  if (STAGES.indexOf(job.status) < STAGES.indexOf("quote_accepted")) {
+    return badRequest(res, "Artwork can be uploaded once you've accepted the contractor's quote, not before.");
+  }
+  const ok = await runUpload(req, res, uploadArtwork, {
+    onError: (message) => redirect(res, `/account/leases?err=${encodeURIComponent(message)}`),
+  });
+  if (!ok) return;
+  if (!req.file) return badRequest(res, "Please choose an artwork file (image or PDF) to upload.");
+  await db.updateJobOrder(id, {
+    artworkUrl: artworkPublicUrl(req.file),
+    artworkStatus: "pending_review",
+    artworkRejectedReason: null,
+  });
+  const seller = job.sellerId ? await db.getUserById(job.sellerId) : null;
+  const listing = await db.getListingById(job.listingId);
+  if (seller && listing) await trySend(jobUpdateEmail(seller, listing, job, "the advertiser has uploaded campaign artwork for your review"));
+  redirect(res, "/account/leases");
+}
+
+export async function jobOrderApproveArtwork(req, res, id) {
+  const user = await currentUser(req);
+  const job = await db.getJobOrderById(id);
+  if (!user || !job || job.sellerId !== user.id) return badRequest(res, "Not your job order.");
+  if (job.artworkStatus !== "pending_review") return badRequest(res, "There's no artwork awaiting your review on this job.");
+  await db.updateJobOrder(id, { artworkStatus: "approved" });
+  redirect(res, "/seller/jobs");
+}
+
+export async function jobOrderRejectArtwork(req, res, id) {
+  const user = await currentUser(req);
+  const job = await db.getJobOrderById(id);
+  if (!user || !job || job.sellerId !== user.id) return badRequest(res, "Not your job order.");
+  if (job.artworkStatus !== "pending_review") return badRequest(res, "There's no artwork awaiting your review on this job.");
+  const b = await readBody(req);
+  if (!b.reason) return badRequest(res, "Please give the advertiser a reason so they know what to fix.");
+  await db.updateJobOrder(id, { artworkStatus: "rejected", artworkRejectedReason: b.reason });
+  const buyer = job.buyerId ? await db.getUserById(job.buyerId) : null;
+  const listing = await db.getListingById(job.listingId);
+  if (buyer && listing) await trySend(jobUpdateEmail(buyer, listing, job, `the space owner declined your artwork: "${b.reason}" — please upload a revised version`));
+  redirect(res, "/seller/jobs");
+}
+
 export async function jobOrderSchedule(req, res, id) {
   const contractor = await currentContractor(req);
   const job = await db.getJobOrderById(id);
   if (!contractor || !job || job.contractorId !== contractor.id) return badRequest(res, "Not your job order.");
+  // Content-approval gate (New Style Assets/03-AD-SPACE-TRANSLATION.md §5 §4)
+  // — can't schedule a print/install run before the owner has actually
+  // approved what's going up.
+  if (job.artworkStatus !== "approved") {
+    return badRequest(res, "This job's artwork hasn't been approved by the space owner yet — it can't be scheduled until it is.");
+  }
   const b = await readBody(req);
   // The install_date column is a real timestamp — validate before it ever
   // reaches Postgres so a malformed date is a friendly message, not a crash.

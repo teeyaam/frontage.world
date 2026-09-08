@@ -102,7 +102,8 @@ const server = http.createServer(async (req, res) => {
         pathname === "/map.js" ||
         pathname === "/google-map.js" ||
         pathname === "/listing-map.js" ||
-        pathname.startsWith("/uploads/listings/"))
+        pathname.startsWith("/uploads/listings/") ||
+        pathname.startsWith("/uploads/artwork/"))
     ) {
       if (serveStatic(req, res, pathname)) return;
     }
@@ -200,6 +201,9 @@ const server = http.createServer(async (req, res) => {
     if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/confirm-site$/))) return await api.jobOrderConfirmSite(req, res, m[1]);
     if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/quote$/))) return await api.jobOrderQuote(req, res, m[1]);
     if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/simulate-buyer-accept$/))) return await api.jobOrderSimulateBuyerAccept(req, res, m[1]);
+    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/artwork$/))) return await api.jobOrderUploadArtwork(req, res, m[1]);
+    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/artwork\/approve$/))) return await api.jobOrderApproveArtwork(req, res, m[1]);
+    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/artwork\/reject$/))) return await api.jobOrderRejectArtwork(req, res, m[1]);
     if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/schedule$/))) return await api.jobOrderSchedule(req, res, m[1]);
     if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/complete$/))) return await api.jobOrderComplete(req, res, m[1]);
 

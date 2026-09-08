@@ -1657,6 +1657,10 @@ export async function bookPage(req, res, listingId, query) {
             <input type="checkbox" name="agreeTerms" required />
             <span>I have read and agree to the <a href="/terms/buyer" target="_blank" style="color:var(--orange)">Buyer Terms &amp; Conditions</a> and the lease agreement, and I authorise Frontage to charge the amount shown above.</span>
           </label>
+          <label class="small consent-row">
+            <input type="checkbox" name="agreeContentPolicy" required />
+            <span>The content I display will be lawful and won't contain anything illegal, discriminatory, or otherwise restricted — the space owner reviews and can decline artwork before it's printed.</span>
+          </label>
 
           <button class="btn btn-accent btn-block btn-lg" type="submit" id="pay-btn">Pay ${money(withGst(listing.price * 12))} &amp; confirm booking</button>
           <p class="small muted" style="text-align:center;margin:10px 0 0">You'll get a tax invoice by email straight away.</p>
@@ -1878,6 +1882,29 @@ export async function sellerJobsPage(req, res) {
           ? `<div class="small" style="color:var(--green)">✓ Payout released: <span class="mono">${money(payment.payoutAmount)}</span>/mo${payment.payoutBlockedReason ? ` — ${escapeHtml(payment.payoutBlockedReason)}` : ""}</div>`
           : `<div class="small muted">Payout held by Frontage until install is confirmed: <span class="mono" style="color:var(--ink)">${money(payment.payoutAmount)}</span>/mo (after 15% fee)</div>`;
 
+        // Content-approval workflow (Phase 4) — the owner's review gate.
+        // jobOrderSchedule (routes/api.js) refuses to schedule an install
+        // until artworkStatus is 'approved', so this is the seller's only
+        // action item once a quote's been accepted.
+        const artworkReview =
+          j.artworkStatus === "pending_review"
+            ? `<div class="panel-tint" style="margin-top:10px">
+              <div class="small" style="margin-bottom:8px"><strong>Campaign artwork ready for your review</strong></div>
+              ${j.artworkUrl ? `<a href="${escapeHtml(j.artworkUrl)}" target="_blank" class="small" style="color:var(--orange);display:block;margin-bottom:8px">View uploaded file →</a>` : ""}
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <form method="POST" action="/api/joborders/${j.id}/artwork/approve"><button class="btn btn-primary btn-sm" type="submit">Approve</button></form>
+                <form method="POST" action="/api/joborders/${j.id}/artwork/reject" style="display:flex;gap:6px;align-items:center">
+                  <input name="reason" placeholder="Reason for the advertiser" required style="padding:8px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:12px" />
+                  <button class="btn btn-outline btn-sm" type="submit">Decline</button>
+                </form>
+              </div>
+            </div>`
+            : j.artworkStatus === "approved"
+            ? `<div class="small" style="color:var(--green);margin-top:10px">✓ Campaign artwork approved</div>`
+            : STAGES.indexOf(j.status) >= STAGES.indexOf("quote_accepted")
+            ? `<div class="small muted" style="margin-top:10px">Waiting on the advertiser to upload campaign artwork${j.artworkStatus === "rejected" ? " (you asked for changes)" : ""}.</div>`
+            : "";
+
         return `<div class="panel" style="margin-bottom:16px">
         <div class="row-between" style="margin-bottom:10px">
           <div><strong>${escapeHtml(listing ? listing.title : j.listingId)}</strong><div class="small muted">Job ${j.id} · Booked by ${escapeHtml(buyer ? buyer.businessName || buyer.fullName : "—")}</div></div>
@@ -1886,6 +1913,7 @@ export async function sellerJobsPage(req, res) {
         <div class="steps" style="margin-bottom:10px">${steps}</div>
         ${payoutLine}
         ${accessForm}
+        ${artworkReview}
         ${j.contractorId ? await jobChatBlock(j, user.id, "contractor") : ""}
       </div>`;
       })
@@ -2010,10 +2038,18 @@ export async function contractorBoardPage(req, res) {
           actionBlock = `<div class="small muted" style="margin-bottom:8px">Quote of ${money(total)} sent — waiting on buyer to accept.</div>
           <form method="POST" action="/api/joborders/${j.id}/simulate-buyer-accept"><button class="btn btn-outline btn-sm" type="submit">Simulate buyer acceptance (demo)</button></form>`;
         } else if (j.status === "quote_accepted") {
-          actionBlock = `<form method="POST" action="/api/joborders/${j.id}/schedule" style="display:flex;gap:8px;align-items:flex-end">
+          // Content-approval gate (Phase 4) — jobOrderSchedule refuses this
+          // until artworkStatus is 'approved', so don't even show the form
+          // until then; show what's actually blocking it instead.
+          actionBlock =
+            j.artworkStatus === "approved"
+              ? `<form method="POST" action="/api/joborders/${j.id}/schedule" style="display:flex;gap:8px;align-items:flex-end">
           <div class="field" style="margin-bottom:0"><label>Install date</label><input type="date" name="installDate" required /></div>
           <button class="btn btn-primary btn-sm" type="submit">Confirm date</button>
-        </form>`;
+        </form>`
+              : j.artworkStatus === "pending_review"
+              ? `<div class="small muted">Buyer has uploaded artwork — waiting on the space owner to approve it before this can be scheduled.</div>`
+              : `<div class="small muted">Can't schedule yet — waiting on the buyer to upload campaign artwork for the owner to approve.</div>`;
         } else if (j.status === "scheduled") {
           actionBlock = `<div class="small muted" style="margin-bottom:8px">Scheduled for ${formatDate(j.installDate)}.</div>
           <form method="POST" action="/api/joborders/${j.id}/complete"><button class="btn btn-dark btn-sm" type="submit">Mark install complete</button></form>`;
@@ -2438,6 +2474,34 @@ export async function myLeasesPage(req, res) {
             ? `<div class="small muted" style="margin-top:8px">Set to end at term end — won't auto-renew.</div>`
             : "";
 
+        // Content-approval workflow (Phase 4) — only relevant to the buyer,
+        // and only once a quote's been accepted (see jobOrderUploadArtwork's
+        // own STAGES check in routes/api.js, mirrored here for the UI).
+        const artworkBlock =
+          isBuyer && jobOrder && STAGES.indexOf(jobOrder.status) >= STAGES.indexOf("quote_accepted")
+            ? `<div class="divider"></div>
+          <div class="small" style="margin-bottom:6px"><strong>Campaign artwork</strong></div>
+          ${
+            jobOrder.artworkStatus === "approved"
+              ? `<div class="badge badge-green" style="margin-bottom:6px">Approved</div>`
+              : jobOrder.artworkStatus === "pending_review"
+              ? `<div class="badge badge-blue" style="margin-bottom:6px">Awaiting owner review</div>`
+              : jobOrder.artworkStatus === "rejected"
+              ? `<div class="badge badge-orange" style="margin-bottom:6px;display:block;padding:8px">Owner asked for changes: ${escapeHtml(jobOrder.artworkRejectedReason || "")}</div>`
+              : `<div class="small muted" style="margin-bottom:6px">Not uploaded yet — the space owner can't approve your campaign until you do.</div>`
+          }
+          ${
+            jobOrder.artworkStatus !== "pending_review" && jobOrder.artworkStatus !== "approved"
+              ? `<form method="POST" action="/api/joborders/${jobOrder.id}/artwork" enctype="multipart/form-data" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="file" name="artwork" accept="image/*,application/pdf" required />
+              <button class="btn btn-outline btn-sm" type="submit">${jobOrder.artworkStatus === "rejected" ? "Upload revised artwork" : "Upload artwork"}</button>
+            </form>`
+              : jobOrder.artworkUrl
+              ? `<a href="${escapeHtml(jobOrder.artworkUrl)}" target="_blank" class="small" style="color:var(--orange)">View uploaded file →</a>`
+              : ""
+          }`
+            : "";
+
         return `<div class="panel" style="margin-bottom:16px">
         <div class="row-between" style="margin-bottom:8px">
           <div><strong>${escapeHtml(listing ? listing.title : b.listingId)}</strong><div class="small muted">${isBuyer ? "You're the buyer" : "You're the seller"} · ${b.term}mo term · ${money(b.monthlyRate)}/mo</div></div>
@@ -2447,6 +2511,7 @@ export async function myLeasesPage(req, res) {
         <div class="small muted" style="margin-bottom:6px">Signed by ${contract ? escapeHtml(contract.signedName) : "—"} on ${contract ? formatDate(contract.signedAt) : "—"} · <a href="/contract/${b.id}" style="color:var(--orange)">View signed contract →</a></div>
         <div class="small muted">${paymentBlock}</div>
         ${actions}
+        ${artworkBlock}
       </div>`;
       })
     )

@@ -203,7 +203,15 @@ CREATE TABLE IF NOT EXISTS job_orders (
   install_window TEXT,
   install_date TIMESTAMPTZ,
   seller_access_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Content-approval workflow (New Style Assets/03-AD-SPACE-TRANSLATION.md
+  -- §5 §4) — gates jobOrderSchedule (routes/api.js) until the owner has
+  -- approved the buyer's uploaded artwork. Not a pipeline stage of its own
+  -- (status stays 'quote_accepted' throughout), so it doesn't touch the
+  -- existing STAGES tracker UI.
+  artwork_url TEXT,
+  artwork_status TEXT NOT NULL DEFAULT 'not_submitted', -- not_submitted -> pending_review -> approved | rejected
+  artwork_rejected_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_job_orders_booking_id ON job_orders(booking_id);
 CREATE INDEX IF NOT EXISTS idx_job_orders_contractor_id ON job_orders(contractor_id);
