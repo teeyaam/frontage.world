@@ -5,3 +5,7 @@ data/uploads/
 public/uploads/
 *.log
 .claude/
+
+# Local design-reference pack (screenshots/PDFs) — not part of the app,
+# kept out of git history to avoid permanent binary bloat.
+New Style Assets/

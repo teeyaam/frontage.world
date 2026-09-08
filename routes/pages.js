@@ -254,7 +254,7 @@ export async function browsePage(req, res, query) {
         <h1 class="hero-headline">FREE SPACE, <span style="color:var(--orange)">FREE MONEY.</span></h1>
         <p class="hero-sub">List your wall, window, or fence space and start earning from advertisers — or find the right spot to put your ad up.</p>
       </div>
-      ${user ? `<a href="/sell/new" class="btn btn-primary btn-lg">List a space</a>` : `<a href="/onboarding" class="btn btn-primary btn-lg">Get started</a>`}
+      ${user ? `<a href="/sell/new" class="btn btn-accent btn-lg">List a space</a>` : `<a href="/onboarding" class="btn btn-accent btn-lg">Get started</a>`}
     </div>
 
     <div class="row-between" style="margin-bottom:16px;flex-wrap:wrap;gap:10px">
@@ -861,7 +861,7 @@ export async function onboardingPage(req, res, query, errorMsg) {
           <div class="field"><label>Email</label><input type="email" name="email" required placeholder="jordan@email.com" value="${escapeHtml(query.get("email") || "")}" /></div>
           ${mobileFieldMarkup({ idPrefix: "signup-mobile", value: query.get("mobile") || "" })}
           ${passwordFieldsMarkup({ idPrefix: "signup-pw" })}
-          <button class="btn btn-primary btn-block" type="submit">Create free account</button>
+          <button class="btn btn-accent btn-block" type="submit">Create free account</button>
         </form>
       </div>
       <div class="form-card">
@@ -1495,7 +1495,7 @@ export async function bookPage(req, res, listingId, query) {
             <span>I have read and agree to the <a href="/terms/buyer" target="_blank" style="color:var(--orange)">Buyer Terms &amp; Conditions</a> and the lease agreement, and I authorise Frontage to charge the amount shown above.</span>
           </label>
 
-          <button class="btn btn-primary btn-block btn-lg" type="submit" id="pay-btn">Pay ${money(withGst(listing.price * 12))} &amp; confirm booking</button>
+          <button class="btn btn-accent btn-block btn-lg" type="submit" id="pay-btn">Pay ${money(withGst(listing.price * 12))} &amp; confirm booking</button>
           <p class="small muted" style="text-align:center;margin:10px 0 0">You'll get a tax invoice by email straight away.</p>
         </div>
       </form>
