@@ -665,6 +665,11 @@ export async function listingDetailPage(req, res, id) {
                <a href="/sell/insights/${listing.id}" class="btn btn-primary btn-block">View insights</a>
                <a href="/seller/inquiries" class="btn btn-outline btn-block" style="margin-top:10px">Buyer inquiries</a>`
             : `<a href="/book/${listing.id}" class="btn btn-primary btn-block">Book this space</a>
+               <form method="POST" action="/api/cart" style="margin-top:10px">
+                 <input type="hidden" name="listingId" value="${listing.id}" />
+                 <input type="hidden" name="term" value="12" />
+                 <button class="btn btn-outline btn-block" type="submit">+ Add to media plan</button>
+               </form>
                <a href="/listing/${listing.id}/chat" class="btn btn-outline btn-block" style="margin-top:10px">Ask the seller a question</a>
                ${user ? "" : `<div class="small muted" style="text-align:center;margin-top:8px">You'll need an account to message — it's how the seller's reply reaches you.</div>`}`
         }
@@ -1473,6 +1478,184 @@ export async function claimListingPage(req, res, token) {
     </div>
   `;
   send(res, 200, await layout({ title: "Claim your listing", user, body }));
+}
+
+// ---------------- Multi-site cart / media plan (Phase 6) ----------------
+// Separate from bookPage's single-listing flow below — an advertiser
+// buying several sites at once builds this up via "+ Add to media plan" on
+// each listing page, then checks out here in one action
+// (New Style Assets/03-AD-SPACE-TRANSLATION.md §5 §8).
+export async function cartPage(req, res) {
+  const user = await requireUser(req, res, "/plan");
+  if (!user) return;
+  const items = await db.getCartForBuyer(user.id);
+
+  if (items.length === 0) {
+    return send(
+      res,
+      200,
+      await layout({
+        title: "Your media plan",
+        activeNav: "browse",
+        user,
+        body: `<h1 style="font-size:22px;margin-bottom:8px">Your media plan</h1><p class="muted">No sites added yet — browse and use "+ Add to media plan" on a listing to start one.</p><a href="/" class="btn btn-primary" style="margin-top:12px;display:inline-block">Browse spaces →</a>`,
+      })
+    );
+  }
+
+  const rows = await Promise.all(
+    items.map(async (item) => {
+      const listing = await db.getListingById(item.listingId);
+      if (!listing) return "";
+      const subtotal = withGst(listing.price * item.term);
+      return `<div class="panel" style="margin-bottom:12px">
+        <div class="row-between">
+          <div>
+            <strong>${escapeHtml(listing.title)}</strong>
+            <div class="small muted">${escapeHtml(listing.venue)} · ${item.term} months from ${escapeHtml(item.campaignStartDate || "TBC")}</div>
+          </div>
+          <div style="text-align:right">
+            <div class="mono" style="font-weight:700">${money(subtotal)}</div>
+            <form method="POST" action="/api/cart/${item.id}/remove"><button class="btn btn-link" type="submit" style="color:var(--red)">Remove</button></form>
+          </div>
+        </div>
+      </div>`;
+    })
+  );
+  let combinedTotal = 0;
+  for (const item of items) {
+    const listing = await db.getListingById(item.listingId);
+    if (listing) combinedTotal += withGst(listing.price * item.term);
+  }
+  combinedTotal = Math.round(combinedTotal * 100) / 100;
+
+  const stripeConfigured = isStripeConfigured() && Boolean(process.env.STRIPE_PUBLISHABLE_KEY);
+  const needsCard = !user.cardLast4;
+
+  const body = `
+    <h1 style="font-size:22px;margin-bottom:16px">Your media plan</h1>
+    ${rows.join("")}
+    <div class="cost-total panel" style="margin:16px 0">
+      <span>Combined total (${items.length} site${items.length === 1 ? "" : "s"}, inc. GST)</span>
+      <span class="mono" id="cart-grand-total">${money(combinedTotal)}</span>
+    </div>
+
+    <form method="POST" action="/api/cart/checkout" id="cart-checkout-form" class="panel checkout-step">
+      <h2 class="checkout-step-title">Your details &amp; payment</h2>
+      <div class="form-row">
+        <div class="field"><label>Business name <span class="muted">(for your invoice)</span></label><input name="businessName" value="${escapeHtml(user.businessName || "")}" /></div>
+        <div class="field"><label>ABN <span class="muted">(optional)</span></label><input name="abn" value="${escapeHtml(user.abn || "")}" inputmode="numeric" /></div>
+      </div>
+      ${
+        stripeConfigured
+          ? `<div class="field"><label>Card details</label>
+        <div id="card-element" style="padding:11px 13px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--concrete)"></div>
+        <div id="card-errors" class="small" style="color:var(--red);margin-top:6px"></div>
+      </div>`
+          : needsCard
+          ? `<div class="field"><label>Card number</label><input name="cardNumber" required placeholder="4242 4242 4242 4242" maxlength="19" /></div>
+      <div style="display:flex;gap:10px">
+        <div class="field" style="flex:1"><label>Expiry</label><input name="expiry" required placeholder="MM/YY" /></div>
+        <div class="field" style="flex:1"><label>CVC</label><input name="cvc" required placeholder="123" /></div>
+      </div>`
+          : `<div class="small muted" style="margin-bottom:14px">Charging your card on file ending ${escapeHtml(user.cardLast4)}.</div>`
+      }
+      <div class="field"><label>Type your full name to sign each lease</label>
+        <input name="signature" required placeholder="${escapeHtml(user.fullName)}" />
+      </div>
+      <label class="small consent-row">
+        <input type="checkbox" name="agreeTerms" required />
+        <span>I have read and agree to the <a href="/terms/buyer" target="_blank" style="color:var(--orange)">Buyer Terms &amp; Conditions</a> and each lease agreement, and I authorise Frontage to charge the combined amount above.</span>
+      </label>
+      <label class="small consent-row">
+        <input type="checkbox" name="agreeContentPolicy" required />
+        <span>The content I display will be lawful and won't contain anything illegal, discriminatory, or otherwise restricted — each space owner reviews and can decline artwork before it's printed.</span>
+      </label>
+      <button class="btn btn-accent btn-block btn-lg" type="submit" id="cart-pay-btn">Pay ${money(combinedTotal)} &amp; confirm ${items.length} booking${items.length === 1 ? "" : "s"}</button>
+    </form>
+    ${stripeConfigured ? `<script src="https://js.stripe.com/v3/"></script>` : ""}
+    <script>
+      (function () {
+        ${
+          stripeConfigured
+            ? `
+        var stripe = Stripe(${JSON.stringify(process.env.STRIPE_PUBLISHABLE_KEY || "")});
+        var elements = stripe.elements();
+        var card = elements.create('card');
+        card.mount('#card-element');
+        card.on('change', function (event) {
+          document.getElementById('card-errors').textContent = event.error ? event.error.message : '';
+        });
+        var form = document.getElementById('cart-checkout-form');
+        var btn = document.getElementById('cart-pay-btn');
+        form.addEventListener('submit', function (e) {
+          e.preventDefault();
+          btn.disabled = true;
+          btn.textContent = 'Processing payment...';
+          fetch('/api/cart/create-intent', { method: 'POST' })
+            .then(function (r) { return r.json().then(function (data) { if (!r.ok) throw new Error(data.error || 'Could not start payment.'); return data; }); })
+            .then(function (data) {
+              return stripe.confirmCardPayment(data.clientSecret, {
+                payment_method: { card: card, billing_details: { name: document.querySelector('input[name=signature]').value || ${JSON.stringify(user.fullName)} } },
+              });
+            })
+            .then(function (result) {
+              if (result.error) throw new Error(result.error.message);
+              var hidden = document.createElement('input');
+              hidden.type = 'hidden';
+              hidden.name = 'paymentIntentId';
+              hidden.value = result.paymentIntent.id;
+              form.appendChild(hidden);
+              form.submit();
+            })
+            .catch(function (err) {
+              document.getElementById('card-errors').textContent = err.message;
+              btn.disabled = false;
+              btn.textContent = 'Pay ${money(combinedTotal)} & confirm ${items.length} booking${items.length === 1 ? "" : "s"}';
+            });
+        });
+        `
+            : ""
+        }
+      })();
+    </script>
+  `;
+  send(res, 200, await layout({ title: "Your media plan", activeNav: "browse", user, body }));
+}
+
+export async function orderConfirmationPage(req, res, orderId) {
+  const user = await requireUser(req, res, `/order/${orderId}`);
+  if (!user) return;
+  const order = await db.getOrderById(orderId);
+  if (!order || order.buyerId !== user.id) return send(res, 404, await layout({ title: "Not found", user, body: "<p>Order not found.</p>" }));
+  const bookings = await db.getBookingsForOrder(orderId);
+  const rows = await Promise.all(
+    bookings.map(async (b) => {
+      const listing = await db.getListingById(b.listingId);
+      return `<div class="row-between small" style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <span>${escapeHtml(listing ? listing.title : b.listingId)} · ${b.term}mo from ${escapeHtml(b.campaignStartDate || "")}</span>
+        <span class="mono">${money(withGst(b.monthlyRate * b.term))}</span>
+      </div>`;
+    })
+  );
+  const body = `
+    <div style="max-width:620px;margin:0 auto">
+      <div class="panel" style="text-align:center;margin-bottom:16px">
+        <div style="font-size:40px;line-height:1;margin-bottom:8px">✅</div>
+        <h1 style="font-size:22px;margin-bottom:4px">Your media plan is booked</h1>
+        <p class="muted" style="margin-bottom:0">${bookings.length} site${bookings.length === 1 ? "" : "s"} · Order ${escapeHtml(order.id)}</p>
+      </div>
+      <div class="panel" style="margin-bottom:16px">
+        ${rows.join("")}
+        <div class="row-between" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-weight:700">
+          <span>Total paid</span><span class="mono">${money(order.totalAmount)}</span>
+        </div>
+      </div>
+      <a href="/account/leases" class="btn btn-primary btn-block">Track these leases</a>
+      <a href="/" class="btn btn-outline btn-block" style="margin-top:10px">Back to browse</a>
+    </div>
+  `;
+  send(res, 200, await layout({ title: "Order confirmed", activeNav: "browse", user, body }));
 }
 
 // ---------------- Book / contract / payment ----------------

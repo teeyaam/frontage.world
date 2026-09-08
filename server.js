@@ -156,6 +156,8 @@ const server = http.createServer(async (req, res) => {
     if (method === "GET" && (m = pathname.match(/^\/job\/([^/]+)\/chat$/))) return await pages.jobChatPage(req, res, m[1]);
     if (method === "GET" && (m = pathname.match(/^\/sell\/insights\/([^/]+)$/))) return await pages.listingInsightsPage(req, res, m[1]);
     if (method === "GET" && (m = pathname.match(/^\/book\/([^/]+)$/))) return await pages.bookPage(req, res, m[1], query);
+    if (method === "GET" && pathname === "/plan") return await pages.cartPage(req, res);
+    if (method === "GET" && (m = pathname.match(/^\/order\/([^/]+)$/))) return await pages.orderConfirmationPage(req, res, m[1]);
     if (method === "GET" && (m = pathname.match(/^\/contract\/([^/]+)$/))) return await pages.contractViewPage(req, res, m[1]);
     if (method === "GET" && (m = pathname.match(/^\/admin\/deals\/([^/]+)$/))) return await pages.adminDealDetailPage(req, res, m[1]);
     if (method === "GET" && (m = pathname.match(/^\/claim\/([^/]+)$/))) return await pages.claimListingPage(req, res, m[1]);
@@ -174,6 +176,10 @@ const server = http.createServer(async (req, res) => {
     if (method === "POST" && pathname === "/api/listings") return await api.createListingHandler(req, res);
     if (method === "POST" && pathname === "/api/bookings/create-intent") return await api.createBookingIntentHandler(req, res);
     if (method === "POST" && pathname === "/api/bookings") return await api.createBookingHandler(req, res);
+    if (method === "POST" && pathname === "/api/cart") return await api.addToCartHandler(req, res);
+    if (method === "POST" && (m = pathname.match(/^\/api\/cart\/([^/]+)\/remove$/))) return await api.removeFromCartHandler(req, res, m[1]);
+    if (method === "POST" && pathname === "/api/cart/create-intent") return await api.createCartIntentHandler(req, res);
+    if (method === "POST" && pathname === "/api/cart/checkout") return await api.checkoutCartHandler(req, res);
     if (method === "POST" && pathname === "/api/bdr/listings") return await api.createBdrListingHandler(req, res);
     if (method === "POST" && (m = pathname.match(/^\/api\/claim\/([^/]+)$/))) return await api.claimListingHandler(req, res, m[1]);
     if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/update$/))) return await api.updateListingHandler(req, res, m[1]);

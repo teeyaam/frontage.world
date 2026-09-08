@@ -23,6 +23,8 @@ CREATE SEQUENCE IF NOT EXISTS contractor_applications_seq;
 CREATE SEQUENCE IF NOT EXISTS messages_seq;
 CREATE SEQUENCE IF NOT EXISTS contact_messages_seq;
 CREATE SEQUENCE IF NOT EXISTS cancellations_seq;
+CREATE SEQUENCE IF NOT EXISTS orders_seq;
+CREATE SEQUENCE IF NOT EXISTS cart_items_seq;
 
 -- ---------- users (buyers/sellers — separate identity space from contractors) ----------
 CREATE TABLE IF NOT EXISTS users (
@@ -138,6 +140,34 @@ CREATE INDEX IF NOT EXISTS idx_listings_owner_id ON listings(owner_id);
 CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);
 CREATE INDEX IF NOT EXISTS idx_listings_claim_token ON listings(claim_token);
 
+-- ---------- multi-site cart / orders (Phase 6) ----------
+-- An advertiser buying several sites at once (New Style Assets/
+-- 03-AD-SPACE-TRANSLATION.md §5 §8) builds up cart_items, then checks out
+-- once — that creates one orders row and N bookings rows sharing it
+-- (bookings.order_id below), all under one payment. A single-listing
+-- booking via the original /book/:id flow still works exactly as before,
+-- with order_id left NULL.
+CREATE TABLE IF NOT EXISTS orders (
+  id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL,
+  buyer_id TEXT NOT NULL REFERENCES users(id),
+  total_amount NUMERIC NOT NULL,
+  stripe_payment_intent_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_orders_buyer_id ON orders(buyer_id);
+
+CREATE TABLE IF NOT EXISTS cart_items (
+  id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL,
+  buyer_id TEXT NOT NULL REFERENCES users(id),
+  listing_id TEXT NOT NULL REFERENCES listings(id),
+  term INTEGER NOT NULL,
+  campaign_start_date DATE,
+  added_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cart_items_buyer_id ON cart_items(buyer_id);
+
 -- ---------- bookings / contracts / payments / job orders ----------
 CREATE TABLE IF NOT EXISTS bookings (
   id TEXT PRIMARY KEY,
@@ -156,7 +186,11 @@ CREATE TABLE IF NOT EXISTS bookings (
   -- planned dates for the live phase, distinct from lease_start_date above
   -- (which is the operational "it's actually up" confirmation).
   campaign_start_date DATE,
-  campaign_end_date DATE
+  campaign_end_date DATE,
+  -- Set only when this booking was created as part of a multi-site
+  -- checkout (Phase 6) — NULL for a booking made via the original
+  -- single-listing /book/:id flow.
+  order_id TEXT REFERENCES orders(id)
 );
 CREATE INDEX IF NOT EXISTS idx_bookings_buyer_id ON bookings(buyer_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_seller_id ON bookings(seller_id);

@@ -568,6 +568,118 @@ export async function createBookingHandler(req, res) {
   redirect(res, `/book/${listing.id}?confirmed=${booking.id}`);
 }
 
+// ---------------- Multi-site cart (Phase 6) ----------------
+// A buyer adding several sites at once before checking out together
+// (New Style Assets/03-AD-SPACE-TRANSLATION.md §5 §8) — separate from the
+// single-listing /book/:id flow above, which is untouched.
+export async function addToCartHandler(req, res) {
+  const user = await currentUser(req);
+  if (!user) return redirect(res, "/onboarding?next=/plan");
+  const b = await readBody(req);
+  const listing = await db.getListingById(b.listingId);
+  if (!listing || listing.status !== "live") return badRequest(res, "Listing not found.");
+  const term = parseInt(b.term, 10);
+  if (![6, 12].includes(term)) return badRequest(res, "Lease terms are 6 or 12 months.");
+  const campaignStartDate = isValidStartDate(listing, b.campaignStartDate) ? b.campaignStartDate : earliestStartDate(listing).toISOString().slice(0, 10);
+  await db.addToCart({ buyerId: user.id, listingId: listing.id, term, campaignStartDate });
+  redirect(res, "/plan");
+}
+
+export async function removeFromCartHandler(req, res, id) {
+  const user = await currentUser(req);
+  if (!user) return redirect(res, "/onboarding?next=/plan");
+  await db.removeCartItem(id, user.id);
+  redirect(res, "/plan");
+}
+
+// Mirrors createBookingIntentHandler, but for the combined total of every
+// cart item, so the cart checkout page's Stripe Elements field charges one
+// amount covering the whole plan.
+export async function createCartIntentHandler(req, res) {
+  const user = await currentUser(req);
+  if (!user) return forbiddenJson(res);
+  const items = await db.getCartForBuyer(user.id);
+  if (!items.length) return badRequest(res, "Your media plan is empty.");
+  let total = 0;
+  for (const item of items) {
+    const listing = await db.getListingById(item.listingId);
+    if (listing) total += withGst(listing.price * item.term);
+  }
+  total = Math.round(total * 100) / 100;
+  const intent = await createPaymentIntent({
+    amount: total,
+    description: `Frontage media plan — ${items.length} site(s)`,
+    metadata: { buyerId: user.id, itemCount: String(items.length) },
+  });
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ clientSecret: intent.clientSecret, paymentIntentId: intent.id, total }));
+}
+
+export async function checkoutCartHandler(req, res) {
+  const user = await currentUser(req);
+  if (!user) return redirect(res, "/onboarding?next=/plan");
+  if (emailUnverified(user)) return badRequest(res, "Please verify your email before booking.");
+  const b = await readBody(req);
+  if (!b.signature) return badRequest(res, "A signature is required.");
+  if (!b.agreeTerms) return badRequest(res, "You must agree to the Buyer Terms & Conditions before booking.");
+  if (!b.agreeContentPolicy) return badRequest(res, "You must confirm your content complies with Frontage's content policy before booking.");
+
+  const cartItems = await db.getCartForBuyer(user.id);
+  if (!cartItems.length) return badRequest(res, "Your media plan is empty.");
+
+  // Re-fetch every listing fresh rather than trusting the cart snapshot —
+  // one may have been booked by someone else, edited, or removed since it
+  // was added. Re-validates the campaign start date the same way the
+  // single-listing flow does.
+  const items = [];
+  let total = 0;
+  for (const item of cartItems) {
+    const listing = await db.getListingById(item.listingId);
+    if (!listing || listing.status !== "live") {
+      return badRequest(res, `"${item.listingId}" is no longer available — please remove it from your plan and try again.`);
+    }
+    if (!isValidStartDate(listing, item.campaignStartDate)) {
+      return badRequest(res, `The campaign start date for "${listing.title}" is no longer valid — please update it on your plan.`);
+    }
+    const campaignEndDate = addMonths(new Date(item.campaignStartDate), item.term).toISOString().slice(0, 10);
+    items.push({ listing, term: item.term, campaignStartDate: item.campaignStartDate, campaignEndDate });
+    total += withGst(listing.price * item.term);
+  }
+  total = Math.round(total * 100) / 100;
+
+  let paymentIntentId = null;
+  if (isStripeConfigured()) {
+    if (!b.paymentIntentId) return badRequest(res, "Payment was not completed.");
+    const intent = await retrievePaymentIntent(b.paymentIntentId);
+    if (intent.status !== "succeeded" || Math.abs(intent.amount - total) > 0.01) {
+      return badRequest(res, "Payment could not be verified — please try again.");
+    }
+    paymentIntentId = b.paymentIntentId;
+  } else if (!user.cardLast4) {
+    const digits = (b.cardNumber || "").replace(/\D/g, "");
+    if (digits.length < 4) return badRequest(res, "A payment method is required the first time you book.");
+    await db.updateUser(user.id, { cardLast4: digits.slice(-4) });
+  }
+
+  const invoicePatch = {};
+  if (b.businessName && b.businessName !== user.businessName) invoicePatch.businessName = b.businessName;
+  if (b.abn && b.abn !== user.abn) invoicePatch.abn = b.abn;
+  if (Object.keys(invoicePatch).length) await db.updateUser(user.id, invoicePatch);
+
+  const { orderId, bookings } = await db.createOrderWithBookings({ buyerId: user.id, items, signature: b.signature, paymentIntentId, totalAmount: total });
+
+  const invoiceBuyer = (await db.getUserById(user.id)) || user;
+  for (const { booking } of bookings) {
+    const listing = await db.getListingById(booking.listingId);
+    const seller = booking.sellerId ? await db.getUserById(booking.sellerId) : null;
+    if (seller && listing) await trySend(bookingSellerEmail(seller, listing, booking));
+    const payment = await db.getPaymentByBookingId(booking.id);
+    if (listing) await trySend(bookingBuyerEmail(invoiceBuyer, listing, booking, payment));
+  }
+
+  redirect(res, `/order/${orderId}`);
+}
+
 // ---------------- Chat ----------------
 async function messagesJson(res, messages, currentPersonId) {
   const withNames = await Promise.all(
