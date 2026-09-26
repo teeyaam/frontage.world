@@ -1,22 +1,23 @@
 {
   "name": "frontage-app",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Frontage marketplace — plain Node.js http server, Postgres persistence, S3/R2 uploads, Stripe payments.",
+  "description": "Frontage — classifieds marketplace for advertising space. Plain Node.js http server, Postgres, S3/R2 photo uploads, listings + messaging.",
   "scripts": {
-    "start": "node server.js"
+    "start": "node scripts/run-schema.mjs && node server.js",
+    "dev": "node server.js",
+    "schema": "node scripts/run-schema.mjs",
+    "smoke": "node scripts/smoke.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1102.0",
-    "@aws-sdk/s3-request-presigner": "^3.1102.0",
     "dotenv": "^17.4.2",
     "multer": "^2.2.0",
     "multer-s3": "^3.0.1",
-    "pg": "^8.22.0",
-    "stripe": "^22.4.0"
+    "pg": "^8.22.0"
   }
 }

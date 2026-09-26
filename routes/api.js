@@ -1,51 +1,14 @@
-import fs from "node:fs";
-import path from "node:path";
+import crypto from "node:crypto";
 import { readBody } from "../lib/body.js";
 import * as db from "../lib/db.js";
-import {
-  hashPassword,
-  verifyPassword,
-  currentUser,
-  currentContractor,
-  sessionCookieHeader,
-  clearCookieHeader,
-  contractorSessionCookieHeader,
-  clearContractorCookieHeader,
-  parseCookies,
-  CONTRACTOR_SESSION_COOKIE,
-  isStrongPassword,
-  PASSWORD_HINT,
-} from "../lib/auth.js";
-import { runUpload, uploadContractorDocs, uploadListingPhotos, uploadArtwork, artworkPublicUrl, CONTRACTOR_DOCS_DIR, getContractorDocUrl, isS3Configured, photoPublicUrl } from "../lib/upload.js";
-import { isValidCategory, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS, LISTING_MAX_DIMENSION_MM } from "../lib/categories.js";
-import { parseListingSpecFields } from "../lib/listingSpecs.js";
-import { isValidStartDate, addMonths, earliestStartDate, campaignPhases } from "../lib/flightCalendar.js";
-import { determineCancellationTier, computeCancellationFee } from "../lib/cancellation.js";
-import { filterListings } from "../lib/listingFilters.js";
-import { estimateEyes, withGst, STAGES } from "../lib/format.js";
+import { hashPassword, verifyPassword, currentUser, sessionCookieHeader, clearCookieHeader, parseCookies, SESSION_COOKIE, isStrongPassword, PASSWORD_HINT, safeNext } from "../lib/auth.js";
+import { runUpload, uploadListingPhotos, photoPublicUrl } from "../lib/upload.js";
+import { LISTING_MIN_PHOTOS, LISTING_MAX_PHOTOS } from "../lib/categories.js";
+import { parseListingInput } from "../lib/listingInput.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
-import { approximateCoords } from "../lib/geo.js";
-import { isStripeConfigured, createPaymentIntent, retrievePaymentIntent, constructWebhookEvent, createConnectAccount, createConnectOnboardingLink } from "../lib/payments.js";
-import {
-  isEmailConfigured,
-  sendEmail,
-  verificationEmail,
-  bookingSellerEmail,
-  bookingBuyerEmail,
-  jobUpdateEmail,
-  contactForwardEmail,
-} from "../lib/email.js";
-import crypto from "node:crypto";
-
-// Emails are best-effort — a provider outage must never fail the user
-// action that triggered the email (booking, signup, etc.).
-async function trySend(email) {
-  try {
-    await sendEmail(email);
-  } catch (err) {
-    console.error("Email send failed:", err.message);
-  }
-}
+import { formLimit } from "../lib/rateLimit.js";
+import { isEmailConfigured, trySend, verificationEmail, passwordResetEmail, contactForwardEmail, listingRemovedEmail, reportAlertEmail } from "../lib/email.js";
+import { REPORT_REASONS } from "./pages.js";
 
 function redirect(res, location, cookie) {
   const headers = { Location: location };
@@ -53,58 +16,73 @@ function redirect(res, location, cookie) {
   res.writeHead(302, headers);
   res.end();
 }
+function json(res, status, obj) {
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(obj));
+}
+function wantsJson(req) {
+  return String(req.headers.accept || "").includes("application/json");
+}
+function withParam(path, key, value) {
+  return `${path}${path.includes("?") ? "&" : "?"}${key}=${encodeURIComponent(value)}`;
+}
+const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
+const clean = (v, max) => String(v == null ? "" : v).trim().slice(0, max);
 
-function badRequest(res, message) {
-  res.writeHead(400, { "Content-Type": "text/plain" });
-  res.end(message);
+// Listing and messaging are gated on a verified email once the email
+// service exists — before that, nothing could deliver the link.
+function emailUnverified(user) {
+  return isEmailConfigured() && !user.emailVerifiedAt;
+}
+
+async function startVerification(user) {
+  const token = crypto.randomBytes(24).toString("hex");
+  await db.updateUser(user.id, { emailVerifyToken: token });
+  await trySend(verificationEmail({ ...user }, token));
 }
 
 // ---------------- Auth ----------------
 export async function signup(req, res) {
-  const body = await readBody(req);
-  const { fullName, email, mobile, password, confirmPassword, next } = body;
+  const b = await readBody(req);
+  const next = safeNext(b.next);
+  const fullName = clean(b.fullName, 80);
+  const email = clean(b.email, 200).toLowerCase();
+  const mobile = clean(b.mobile, 30) || null;
 
-  // Every rejection carries the non-secret fields back so the form repopulates
-  // — retyping name/email/mobile because the password was weak is needless
-  // friction. Passwords are deliberately never echoed back into the URL.
+  // Rejections carry the non-secret fields back so the form refills.
   const reject = (msg) => {
-    const params = new URLSearchParams({ next: next || "/", err: msg });
+    const params = new URLSearchParams({ next, err: msg });
     if (fullName) params.set("fullName", fullName);
     if (email) params.set("email", email);
     if (mobile) params.set("mobile", mobile);
-    return redirect(res, `/onboarding?${params.toString()}`);
+    return redirect(res, `/onboarding?${params}`);
   };
 
-  if (!fullName || !email || !mobile || !password) return reject("Please fill every field.");
-  if (!isStrongPassword(password)) return reject("Password too weak — " + PASSWORD_HINT);
-  if (password !== confirmPassword) return reject("Password and confirmation don't match.");
+  if (!formLimit(req, "signup").allowed) return reject("Too many sign-ups from your connection — please try again later.");
+  if (!fullName || !email || !b.password) return reject("Please fill in your name, email and a password.");
+  if (!EMAIL_RE.test(email)) return reject("That email address doesn't look right.");
+  if (!isStrongPassword(b.password)) return reject(`Password too weak — ${PASSWORD_HINT}`);
+  if (b.password !== b.confirmPassword) return reject("Password and confirmation don't match.");
+  if (!b.agreeTerms) return reject("Please agree to the Terms and Privacy Policy.");
   if (await db.getUserByEmail(email)) return reject("An account with that email already exists — try logging in instead.");
-  const { hash, salt } = hashPassword(password);
+
+  const { hash, salt } = hashPassword(b.password);
   const user = await db.createUser({ fullName, email, mobile, passwordHash: hash, passwordSalt: salt });
-  // Email verification: new accounts get a token and a verify link. When the
-  // email service isn't configured yet, accounts are auto-verified so the
-  // flow never dead-ends (nothing could deliver the link).
   let sentVerification = false;
   if (isEmailConfigured()) {
-    const token = crypto.randomBytes(24).toString("hex");
-    await db.updateUser(user.id, { emailVerifyToken: token });
-    await trySend(verificationEmail(user, token));
+    await startVerification(user);
     sentVerification = true;
   } else {
     await db.updateUser(user.id, { emailVerifiedAt: new Date().toISOString() });
   }
   const session = await db.createSession(user.id);
-  // Land on an explicit "check your inbox" confirmation rather than silently
-  // dropping the new user back on the browse page wondering what happened.
-  // With no email service configured there's nothing to check, so skip it.
-  const dest = sentVerification ? `/welcome?next=${encodeURIComponent(next || "/")}` : next || "/";
-  redirect(res, dest, sessionCookieHeader(session.token));
+  redirect(res, sentVerification ? `/welcome?next=${encodeURIComponent(next)}` : next, sessionCookieHeader(session.token));
 }
 
-// GET /verify?token=... — the link from the verification email.
+// GET /verify?token=...
 export async function verifyEmailHandler(req, res, query) {
   const user = await db.getUserByVerifyToken(query.get("token"));
-  if (!user) return badRequest(res, "This verification link is invalid or has already been used.");
+  if (!user) return redirect(res, withParam("/account", "err", "That verification link is invalid or has already been used."));
   await db.updateUser(user.id, { emailVerifiedAt: new Date().toISOString(), emailVerifyToken: null });
   redirect(res, "/account?verified=1");
 }
@@ -113,840 +91,151 @@ export async function resendVerificationHandler(req, res) {
   const user = await currentUser(req);
   if (!user) return redirect(res, "/onboarding?next=/account");
   if (user.emailVerifiedAt) return redirect(res, "/account");
-  const token = user.emailVerifyToken || crypto.randomBytes(24).toString("hex");
-  await db.updateUser(user.id, { emailVerifyToken: token });
-  await trySend(verificationEmail(user, token));
-  redirect(res, "/account?updated=Verification email resent — check your inbox. Email");
-}
-
-// Listing a space and paying for a lease are gated on a verified email once
-// the email service exists — before that there's no way to deliver the link,
-// so the gate stays open (see signup above).
-function emailUnverified(user) {
-  return isEmailConfigured() && !user.emailVerifiedAt;
+  if (!formLimit(req, "resendVerification").allowed) return redirect(res, withParam("/account", "err", "We've sent a few already — check your spam folder, or try again in an hour."));
+  await startVerification(user);
+  redirect(res, "/account?updated=Verification email sent. Your email");
 }
 
 export async function login(req, res) {
-  const body = await readBody(req);
-  const { email, password, next } = body;
-  const user = await db.getUserByEmail(email || "");
-  if (!user || !verifyPassword(password || "", user.passwordHash, user.passwordSalt)) {
-    return redirect(res, `/onboarding?next=${encodeURIComponent(next || "/")}&err=${encodeURIComponent("Incorrect email or password.")}`);
-  }
+  const b = await readBody(req);
+  const next = safeNext(b.next);
+  const email = clean(b.email, 200);
+  const fail = (msg) => redirect(res, `/onboarding?${new URLSearchParams({ tab: "login", next, err: msg, loginEmail: email })}`);
+  if (!formLimit(req, "login").allowed) return fail("Too many login attempts — wait 15 minutes and try again, or reset your password.");
+  const user = await db.getUserByEmail(email);
+  if (!user || !verifyPassword(String(b.password || ""), user.passwordHash, user.passwordSalt)) return fail("Incorrect email or password.");
+  if (user.suspendedAt) return fail("This account has been suspended. Contact us if you think this is a mistake.");
   const session = await db.createSession(user.id);
-  redirect(res, next || "/", sessionCookieHeader(session.token));
+  redirect(res, next, sessionCookieHeader(session.token));
 }
 
 export async function logout(req, res) {
-  const cookies = parseCookies(req);
-  const token = cookies["frontage_session"];
+  const token = parseCookies(req)[SESSION_COOKIE];
   if (token) await db.destroySession(token);
   redirect(res, "/", clearCookieHeader());
 }
 
-// ---------------- Contractor auth (fully separate identity space) ----------------
-export async function contractorSignup(req, res) {
-  const body = await readBody(req);
-  const { fullName, email, mobile, password, confirmPassword, next } = body;
-  if (!fullName || !email || !mobile || !password) {
-    return redirect(res, `/contractor/signup?next=${encodeURIComponent(next || "/contractor/apply")}&err=${encodeURIComponent("Please fill every field.")}`);
+// Always answers the same way, whether or not the email has an account,
+// so the form can't be used to discover who's registered.
+export async function forgotPassword(req, res) {
+  const b = await readBody(req);
+  if (!formLimit(req, "forgot").allowed) return redirect(res, withParam("/forgot-password", "err", "Too many requests — try again in an hour."));
+  const user = await db.getUserByEmail(clean(b.email, 200));
+  if (user && !user.suspendedAt) {
+    const token = await db.createPasswordReset(user.id);
+    await trySend(passwordResetEmail(user, token));
   }
-  if (!isStrongPassword(password)) {
-    return redirect(res, `/contractor/signup?next=${encodeURIComponent(next || "/contractor/apply")}&err=${encodeURIComponent("Password too weak — " + PASSWORD_HINT)}`);
-  }
-  if (password !== confirmPassword) {
-    return redirect(res, `/contractor/signup?next=${encodeURIComponent(next || "/contractor/apply")}&err=${encodeURIComponent("Password and confirmation don't match.")}`);
-  }
-  if (await db.getContractorByEmail(email)) {
-    return redirect(res, `/contractor/signup?next=${encodeURIComponent(next || "/contractor/apply")}&err=${encodeURIComponent("An account with that email already exists — try logging in instead.")}`);
-  }
-  const { hash, salt } = hashPassword(password);
-  const contractor = await db.createContractorAccount({ fullName, email, mobile, passwordHash: hash, passwordSalt: salt });
-  const session = await db.createContractorSession(contractor.id);
-  redirect(res, next || "/contractor/apply", contractorSessionCookieHeader(session.token));
+  redirect(res, "/forgot-password?sent=1");
 }
 
-export async function contractorLogin(req, res) {
-  const body = await readBody(req);
-  const { email, password, next } = body;
-  const contractor = await db.getContractorByEmail(email || "");
-  if (!contractor || !verifyPassword(password || "", contractor.passwordHash, contractor.passwordSalt)) {
-    return redirect(res, `/contractor/login?next=${encodeURIComponent(next || "/contractor/ping")}&err=${encodeURIComponent("Incorrect email or password.")}`);
-  }
-  const session = await db.createContractorSession(contractor.id);
-  redirect(res, next || "/contractor/ping", contractorSessionCookieHeader(session.token));
-}
-
-export async function contractorLogout(req, res) {
-  const cookies = parseCookies(req);
-  const token = cookies[CONTRACTOR_SESSION_COOKIE];
-  if (token) await db.destroyContractorSession(token);
-  redirect(res, "/contractor/login", clearContractorCookieHeader());
+export async function resetPassword(req, res) {
+  const b = await readBody(req);
+  const token = String(b.token || "");
+  const user = await db.getUserByResetToken(token);
+  if (!user) return redirect(res, "/reset-password?token=expired");
+  const back = (msg) => redirect(res, `/reset-password?${new URLSearchParams({ token, err: msg })}`);
+  if (!isStrongPassword(b.password)) return back(`Password too weak — ${PASSWORD_HINT}`);
+  if (b.password !== b.confirmPassword) return back("Password and confirmation don't match.");
+  const { hash, salt } = hashPassword(b.password);
+  // Reset links are single-use, and every existing session is logged out.
+  // Clicking the emailed link also proves the address, so verify it.
+  await db.updateUser(user.id, {
+    passwordHash: hash,
+    passwordSalt: salt,
+    passwordResetTokenHash: null,
+    passwordResetExpiresAt: null,
+    emailVerifiedAt: user.emailVerifiedAt || new Date().toISOString(),
+  });
+  await db.destroySessionsForUser(user.id);
+  const session = await db.createSession(user.id);
+  redirect(res, "/account?updated=Password", sessionCookieHeader(session.token));
 }
 
 // ---------------- Listings ----------------
+// Create and edit both arrive as multipart from public/listing-form.js.
+// `photoOrder` lists the final photo order as "e:<i>" (the listing's
+// existing photo i) and "n:<i>" (uploaded file i). Without it (no-JS),
+// photos are the existing ones followed by the new ones.
+function assemblePhotos(existingPhotos, files, photoOrderRaw) {
+  const newUrls = (files || []).map((f) => photoPublicUrl(f));
+  let order;
+  try {
+    order = photoOrderRaw ? JSON.parse(photoOrderRaw) : null;
+  } catch {
+    order = null;
+  }
+  if (!Array.isArray(order)) return [...existingPhotos, ...newUrls];
+  const photos = [];
+  for (const token of order.slice(0, LISTING_MAX_PHOTOS)) {
+    const m = /^([en]):(\d+)$/.exec(String(token));
+    if (!m) continue;
+    const url = m[1] === "e" ? existingPhotos[Number(m[2])] : newUrls[Number(m[2])];
+    if (url && !photos.includes(url)) photos.push(url);
+  }
+  return photos;
+}
+
+async function saveListing(req, res, { user, existing }) {
+  const formPath = existing ? `/sell/edit/${existing.id}` : "/sell/new";
+  const fail = (status, error, fieldErrors = {}) =>
+    wantsJson(req) ? json(res, status, { error, fieldErrors }) : redirect(res, withParam(formPath, "err", error || Object.values(fieldErrors)[0]));
+
+  const uploadError = await runUpload(req, res, uploadListingPhotos);
+  if (uploadError) return fail(400, uploadError, { photos: uploadError });
+
+  const { values, fieldErrors } = await parseListingInput(req.body, { existing });
+  const photos = assemblePhotos(existing ? existing.photos || [] : [], req.files, (req.body || {}).photoOrder);
+  if (photos.length < LISTING_MIN_PHOTOS) fieldErrors.photos = "Add at least one photo of the space.";
+  if (photos.length > LISTING_MAX_PHOTOS) fieldErrors.photos = `You can add up to ${LISTING_MAX_PHOTOS} photos.`;
+  if (Object.keys(fieldErrors).length) return fail(422, "Please fix the highlighted fields.", fieldErrors);
+
+  let listing;
+  if (existing) {
+    listing = await db.updateListing(existing.id, { ...values, photos });
+  } else {
+    listing = await db.createListing({ ownerId: user.id, ...values, photos });
+  }
+  const dest = existing ? `/sell?updated=1` : `/sell?created=1`;
+  if (wantsJson(req)) return json(res, 200, { ok: true, id: listing.id, redirect: dest });
+  redirect(res, dest);
+}
+
 export async function createListingHandler(req, res) {
   const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/sell/new");
-  if (emailUnverified(user)) return redirect(res, `/sell/new?err=${encodeURIComponent("Please verify your email before listing a space — check your inbox, or resend the link from your Account page.")}`);
-  const ok = await runUpload(req, res, uploadListingPhotos, {
-    onError: (message) => redirect(res, `/sell/new?err=${encodeURIComponent(message)}`),
-  });
-  if (!ok) return;
-  const b = req.body || {};
-  const sizeW = parseInt(b.sizeW, 10);
-  const sizeH = parseInt(b.sizeH, 10);
-  const price = parseFloat(b.price);
-  if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price || sizeW <= 0 || sizeH <= 0 || price <= 0) {
-    return badRequest(res, "Missing required listing fields, or width/height/price must be greater than zero.");
+  if (!user) return wantsJson(req) ? json(res, 401, { error: "Please log in again." }) : redirect(res, "/onboarding?next=/sell/new");
+  if (emailUnverified(user)) {
+    const error = "Please verify your email before listing — check your inbox, or resend the link from your Account page.";
+    return wantsJson(req) ? json(res, 403, { error }) : redirect(res, withParam("/sell/new", "err", error));
   }
-  if (sizeW > LISTING_MAX_DIMENSION_MM || sizeH > LISTING_MAX_DIMENSION_MM) {
-    return badRequest(res, `Width and height must each be ${LISTING_MAX_DIMENSION_MM}mm or less — check you entered millimetres, not metres.`);
-  }
-  // Mirrors the maxlength attributes on the form (routes/pages.js#sellNewPage)
-  // so a client that skips the browser's own enforcement can't sneak an
-  // oversized title/description into the datastore.
-  if (b.title.length > LISTING_TITLE_MAX_LENGTH) {
-    return badRequest(res, `Listing title must be ${LISTING_TITLE_MAX_LENGTH} characters or fewer.`);
-  }
-  if ((b.desc || "").length > LISTING_DESC_MAX_LENGTH) {
-    return badRequest(res, `Description must be ${LISTING_DESC_MAX_LENGTH} characters or fewer.`);
-  }
-  // Per the UI tester's feedback: a listing with too few photos gives buyers
-  // little to go on. Enforced here too, not just in the form's client-side
-  // check, so a direct POST can't skip it.
-  if (!req.files || req.files.length < LISTING_MIN_PHOTOS) {
-    return badRequest(res, `Please upload at least ${LISTING_MIN_PHOTOS} photos of the space.`);
-  }
-  const category = isValidCategory(b.category) ? b.category : "gym";
-
-  const patch = { businessName: user.businessName || b.venue, address: user.address || b.address };
-  if (!user.bankAccount) {
-    if (!b.bankBsb || !b.bankAccount || !b.bankAccountName) {
-      return badRequest(res, "Payout details are required the first time you list.");
-    }
-    patch.bankBsb = b.bankBsb;
-    patch.bankAccount = b.bankAccount;
-    patch.bankAccountName = b.bankAccountName;
-  }
-  await db.updateUser(user.id, patch);
-
-  // Uploaded files land wherever lib/upload.js is configured to put them
-  // (S3/R2 public bucket in production, local disk in zero-config dev) —
-  // photoPublicUrl resolves the right public URL either way.
-  const photos = (req.files || []).map((f) => photoPublicUrl(f));
-  const estimatedEyesPerDay = parseInt(b.estimatedEyesPerDay, 10) || estimateEyes({ category, sizeW, sizeH });
-  const manualLat = parseFloat(b.lat);
-  const manualLng = parseFloat(b.lng);
-  const coords =
-    Number.isFinite(manualLat) && Number.isFinite(manualLng) ? { lat: manualLat, lng: manualLng } : await approximateCoords(b.suburb, b.country);
-
-  await db.createListing({
-    ownerId: user.id,
-    title: b.title,
-    venue: b.venue,
-    category,
-    subtype: b.subtype || null,
-    suburb: b.suburb,
-    postcode: b.postcode || null,
-    country: b.country || null,
-    address: b.address,
-    sizeW,
-    sizeH,
-    price,
-    desc: b.desc || "",
-    photos,
-    estimatedEyesPerDay,
-    lat: coords.lat,
-    lng: coords.lng,
-    // Site-spec fields (audience, surface, illumination, access, permit,
-    // lead time) — optional until the Phase 2 wizard collects them; absent
-    // today so every one of these comes back empty via parseListingSpecFields.
-    ...parseListingSpecFields(b),
-  });
-
-  redirect(res, "/sell/new?created=1");
+  await saveListing(req, res, { user, existing: null });
 }
 
-// ---------------- BDR: pre-built listings + claim link ----------------
-export async function createBdrListingHandler(req, res) {
-  const user = await currentUser(req);
-  if (!user || !hasPermission(user, "canCreateBdrListings")) return badRequest(res, "Not authorized.");
-  const ok = await runUpload(req, res, uploadListingPhotos, {
-    onError: (message) => redirect(res, `/sell/bdr-new?err=${encodeURIComponent(message)}`),
-  });
-  if (!ok) return;
-  const b = req.body || {};
-  const sizeW = parseInt(b.sizeW, 10);
-  const sizeH = parseInt(b.sizeH, 10);
-  const price = parseFloat(b.price);
-  if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price || sizeW <= 0 || sizeH <= 0 || price <= 0) {
-    return badRequest(res, "Missing required listing fields, or width/height/price must be greater than zero.");
-  }
-  if (sizeW > LISTING_MAX_DIMENSION_MM || sizeH > LISTING_MAX_DIMENSION_MM) {
-    return badRequest(res, `Width and height must each be ${LISTING_MAX_DIMENSION_MM}mm or less — check you entered millimetres, not metres.`);
-  }
-  const category = isValidCategory(b.category) ? b.category : "gym";
-  const photos = (req.files || []).map((f) => photoPublicUrl(f));
-  const estimatedEyesPerDay = estimateEyes({ category, sizeW, sizeH });
-  const coords = await approximateCoords(b.suburb, b.country);
-
-  const listing = await db.createDraftListing({
-    title: b.title,
-    venue: b.venue,
-    category,
-    subtype: b.subtype || null,
-    suburb: b.suburb,
-    postcode: b.postcode || null,
-    country: b.country || null,
-    address: b.address,
-    sizeW,
-    sizeH,
-    price,
-    desc: b.desc || "",
-    photos,
-    estimatedEyesPerDay,
-    lat: coords.lat,
-    lng: coords.lng,
-    createdByBdrId: user.id,
-    bdrContactName: b.bdrContactName || null,
-    bdrContactEmail: b.bdrContactEmail || null,
-  });
-
-  const claimUrl = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}/claim/${listing.claimToken}`;
-  redirect(res, `/sell/bdr-new?created=1&claimUrl=${encodeURIComponent(claimUrl)}`);
-}
-
-// Lets the "List a space" form prefill the eyes/day estimate live as a
-// seller fills in category/size, using the exact same formula the server
-// falls back to on submit (lib/format.js#estimateEyes) — so the number
-// shown while typing always matches what actually gets saved if left as-is.
-export async function estimateEyesJson(req, res, query) {
-  const category = isValidCategory(query.get("category")) ? query.get("category") : "gym";
-  const sizeW = parseInt(query.get("sizeW"), 10) || 0;
-  const sizeH = parseInt(query.get("sizeH"), 10) || 0;
-  const eyes = estimateEyes({ category, sizeW, sizeH });
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ eyes }));
-}
-
-export async function listingsMapJson(req, res, query) {
-  // Filtered the same way as the browse page's list/grid (lib/listingFilters.js)
-  // so switching category/search/price while in map view narrows the pins
-  // shown, instead of the map always plotting every listing regardless of
-  // the active filter.
-  const filtered = filterListings(await db.getListings(), query);
-  const listings = await Promise.all(
-    filtered.map(async (l) => {
-      const owner = l.ownerId ? await db.getUserById(l.ownerId) : null;
-      return {
-        id: l.id,
-        title: l.title,
-        suburb: l.suburb,
-        category: l.category,
-        price: l.price,
-        lat: l.lat,
-        lng: l.lng,
-        googleBusinessUrl: owner && owner.googleBusinessUrl ? owner.googleBusinessUrl : null,
-      };
-    })
-  );
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ listings }));
-}
-
-export async function claimListingHandler(req, res, token) {
-  const user = await currentUser(req);
-  if (!user) return redirect(res, `/onboarding?next=${encodeURIComponent(`/claim/${token}`)}`);
-  const claimed = await db.claimListing(token, user.id);
-  if (!claimed) return badRequest(res, "This claim link is no longer valid.");
-  redirect(res, `/listing/${claimed.id}`);
-}
-
-// ---------------- Listing management (owner: edit details / photos / delete) ----------------
 async function requireOwnedListing(req, res, id) {
   const user = await currentUser(req);
   if (!user) {
-    redirect(res, `/onboarding?next=${encodeURIComponent(`/sell/edit/${id}`)}`);
-    return null;
+    wantsJson(req) ? json(res, 401, { error: "Please log in again." }) : redirect(res, `/onboarding?next=${encodeURIComponent(`/sell/edit/${id}`)}`);
+    return {};
   }
   const listing = await db.getListingById(id);
-  if (!listing || listing.ownerId !== user.id) {
-    badRequest(res, "Not your listing.");
-    return null;
+  if (!listing || listing.ownerId !== user.id || listing.status === "deleted") {
+    wantsJson(req) ? json(res, 404, { error: "Listing not found." }) : redirect(res, "/sell");
+    return {};
   }
-  return listing;
+  return { user, listing };
 }
 
 export async function updateListingHandler(req, res, id) {
-  const listing = await requireOwnedListing(req, res, id);
+  const { user, listing } = await requireOwnedListing(req, res, id);
   if (!listing) return;
-  const b = await readBody(req);
-  const sizeW = parseInt(b.sizeW, 10);
-  const sizeH = parseInt(b.sizeH, 10);
-  const price = parseFloat(b.price);
-  if (!b.title || !b.venue || !b.suburb || !b.address || !sizeW || !sizeH || !price || sizeW <= 0 || sizeH <= 0 || price <= 0) {
-    return badRequest(res, "Missing required listing fields, or width/height/price must be greater than zero.");
-  }
-  if (sizeW > LISTING_MAX_DIMENSION_MM || sizeH > LISTING_MAX_DIMENSION_MM) {
-    return badRequest(res, `Width and height must each be ${LISTING_MAX_DIMENSION_MM}mm or less — check you entered millimetres, not metres.`);
-  }
-  const category = isValidCategory(b.category) ? b.category : listing.category;
-  const estimatedEyesPerDay = parseInt(b.estimatedEyesPerDay, 10) || estimateEyes({ category, sizeW, sizeH });
-  const manualLat = parseFloat(b.lat);
-  const manualLng = parseFloat(b.lng);
-  const locationChanged = b.suburb !== listing.suburb || (b.country || null) !== (listing.country || null);
-  let coords;
-  if (Number.isFinite(manualLat) && Number.isFinite(manualLng)) {
-    coords = { lat: manualLat, lng: manualLng };
-  } else if (locationChanged) {
-    coords = await approximateCoords(b.suburb, b.country);
-  } else {
-    coords = { lat: listing.lat, lng: listing.lng };
-  }
-
-  await db.updateListing(id, {
-    title: b.title,
-    venue: b.venue,
-    category,
-    subtype: b.subtype || null,
-    suburb: b.suburb,
-    postcode: b.postcode || null,
-    country: b.country || null,
-    address: b.address,
-    sizeW,
-    sizeH,
-    price,
-    desc: b.desc || "",
-    estimatedEyesPerDay,
-    lat: coords.lat,
-    lng: coords.lng,
-    ...parseListingSpecFields(b),
-  });
-  redirect(res, `/sell/edit/${id}?updated=1`);
+  await saveListing(req, res, { user, existing: listing });
 }
 
-export async function addListingPhotosHandler(req, res, id) {
-  const listing = await requireOwnedListing(req, res, id);
-  if (!listing) return;
-  const ok = await runUpload(req, res, uploadListingPhotos, {
-    onError: (message) => redirect(res, `/sell/edit/${id}?err=${encodeURIComponent(message)}`),
-  });
-  if (!ok) return;
-  const existingPhotos = listing.photos || [];
-  const newPhotos = (req.files || []).map((f) => photoPublicUrl(f));
-  if (existingPhotos.length + newPhotos.length > 8) {
-    return badRequest(res, "A listing can have at most 8 photos — remove some before adding more.");
-  }
-  await db.updateListing(id, { photos: [...existingPhotos, ...newPhotos] });
-  redirect(res, `/sell/edit/${id}?updated=1`);
-}
-
-export async function removeListingPhotoHandler(req, res, id, index) {
-  const listing = await requireOwnedListing(req, res, id);
-  if (!listing) return;
-  const photos = (listing.photos || []).slice();
-  const i = parseInt(index, 10);
-  if (i >= 0 && i < photos.length) photos.splice(i, 1);
-  await db.updateListing(id, { photos });
-  redirect(res, `/sell/edit/${id}`);
-}
-
-export async function moveListingPhotoHandler(req, res, id, index, direction) {
-  const listing = await requireOwnedListing(req, res, id);
-  if (!listing) return;
-  const photos = (listing.photos || []).slice();
-  const i = parseInt(index, 10);
-  const j = direction === "up" ? i - 1 : i + 1;
-  if (i >= 0 && i < photos.length && j >= 0 && j < photos.length) {
-    [photos[i], photos[j]] = [photos[j], photos[i]];
-  }
-  await db.updateListing(id, { photos });
-  redirect(res, `/sell/edit/${id}`);
-}
-
-// Reuses the same removeListing() the admin moderation tools call — a
-// seller "deleting" their own listing and a customer-service rep removing
-// one for cause both just take it off browse (status: "removed"), keeping
-// booking/job-order history intact rather than a hard SQL delete (which
-// would violate the FK from bookings/job_orders to listings anyway once
-// a listing has ever been leased).
+// Status "deleted" (not "removed"), so moderators can't restore it.
 export async function deleteListingHandler(req, res, id) {
-  const listing = await requireOwnedListing(req, res, id);
+  const { listing } = await requireOwnedListing(req, res, id);
   if (!listing) return;
-  await db.removeListing(id, "Removed by the listing owner.", listing.ownerId);
-  redirect(res, "/sell/new?deleted=1");
-}
-
-// ---------------- Bookings ----------------
-// Backs the embedded Stripe Elements card field on bookPage — creates a
-// PaymentIntent for exactly this listing+term, without creating a booking
-// yet (that only happens once the payment is verified, in
-// createBookingHandler below).
-export async function createBookingIntentHandler(req, res) {
-  const user = await currentUser(req);
-  if (!user) return forbiddenJson(res);
-  if (emailUnverified(user)) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ error: "Please verify your email before booking — check your inbox, or resend the link from your Account page." }));
-  }
-  const b = await readBody(req);
-  const listing = await db.getListingById(b.listingId);
-  if (!listing || listing.status !== "live") return badRequest(res, "Listing not found.");
-  const term = parseInt(b.term, 10);
-  if (![6, 12].includes(term)) return badRequest(res, "Lease terms are 6 or 12 months.");
-  // Listing prices are GST-exclusive; the buyer is charged GST-inclusive.
-  const amount = withGst(listing.price * term);
-  const intent = await createPaymentIntent({
-    amount,
-    description: `Frontage lease — ${listing.title}`,
-    metadata: { listingId: listing.id, buyerId: user.id, term: String(term) },
-  });
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ clientSecret: intent.clientSecret, paymentIntentId: intent.id }));
-}
-
-export async function createBookingHandler(req, res) {
-  const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/");
-  if (emailUnverified(user)) return badRequest(res, "Please verify your email before booking.");
-  const b = await readBody(req);
-  const listing = await db.getListingById(b.listingId);
-  if (!listing || listing.status !== "live") return badRequest(res, "Listing not found.");
-  const term = parseInt(b.term, 10);
-  if (![6, 12].includes(term) || !b.signature) return badRequest(res, "Lease terms are 6 or 12 months, and a signature is required.");
-  // The consent checkbox is `required` in the browser too, but a form post can
-  // always be replayed without it — agreeing to the terms is the one thing
-  // that must never be assumed.
-  if (!b.agreeTerms) return badRequest(res, "You must agree to the Buyer Terms & Conditions before booking.");
-  if (!b.agreeContentPolicy) return badRequest(res, "You must confirm your content complies with Frontage's content policy before booking.");
-  // 3-phase flight calendar (lib/flightCalendar.js) — re-checks server-side
-  // the same earliest-start constraint the checkout page's date input
-  // expresses via min=, since a replayed/hand-crafted POST could pick any
-  // date otherwise.
-  if (!b.campaignStartDate || !isValidStartDate(listing, b.campaignStartDate)) {
-    return badRequest(res, "Please choose a valid campaign start date — it must allow time for artwork approval, printing, and install.");
-  }
-  const campaignEndDate = addMonths(new Date(b.campaignStartDate), term).toISOString().slice(0, 10);
-
-  // Invoice details captured at checkout, kept on the account so a repeat
-  // booking pre-fills them.
-  const invoicePatch = {};
-  if (b.businessName && b.businessName !== user.businessName) invoicePatch.businessName = b.businessName;
-  if (b.abn && b.abn !== user.abn) invoicePatch.abn = b.abn;
-  if (Object.keys(invoicePatch).length) await db.updateUser(user.id, invoicePatch);
-
-  let paymentIntentId = null;
-  if (isStripeConfigured()) {
-    // Never trust the client's word that payment succeeded — re-fetch the
-    // PaymentIntent from Stripe and check its status and amount ourselves
-    // before a booking (and the seller's payout entitlement) is created.
-    if (!b.paymentIntentId) return badRequest(res, "Payment was not completed.");
-    const intent = await retrievePaymentIntent(b.paymentIntentId);
-    const expectedTotal = withGst(listing.price * term);
-    if (intent.status !== "succeeded" || Math.abs(intent.amount - expectedTotal) > 0.01) {
-      return badRequest(res, "Payment could not be verified — please try again.");
-    }
-    paymentIntentId = b.paymentIntentId;
-  } else {
-    // Stub mode (no STRIPE_SECRET_KEY yet) — original plaintext-card flow.
-    if (!user.cardLast4) {
-      const digits = (b.cardNumber || "").replace(/\D/g, "");
-      if (digits.length < 4) return badRequest(res, "A payment method is required the first time you book.");
-      await db.updateUser(user.id, { cardLast4: digits.slice(-4) });
-    }
-  }
-
-  const { booking } = await db.createBookingBundle({
-    listing,
-    buyerId: user.id,
-    term,
-    signature: b.signature,
-    paymentIntentId,
-    campaignStartDate: b.campaignStartDate,
-    campaignEndDate,
-  });
-
-  const seller = listing.ownerId ? await db.getUserById(listing.ownerId) : null;
-  if (seller) await trySend(bookingSellerEmail(seller, listing, booking));
-  // Re-read the buyer so the invoice carries the business name/ABN just saved.
-  const invoiceBuyer = (await db.getUserById(user.id)) || user;
-  const payment = await db.getPaymentByBookingId(booking.id);
-  await trySend(bookingBuyerEmail(invoiceBuyer, listing, booking, payment));
-
-  redirect(res, `/book/${listing.id}?confirmed=${booking.id}`);
-}
-
-// ---------------- Multi-site cart (Phase 6) ----------------
-// A buyer adding several sites at once before checking out together
-// (New Style Assets/03-AD-SPACE-TRANSLATION.md §5 §8) — separate from the
-// single-listing /book/:id flow above, which is untouched.
-export async function addToCartHandler(req, res) {
-  const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/plan");
-  const b = await readBody(req);
-  const listing = await db.getListingById(b.listingId);
-  if (!listing || listing.status !== "live") return badRequest(res, "Listing not found.");
-  const term = parseInt(b.term, 10);
-  if (![6, 12].includes(term)) return badRequest(res, "Lease terms are 6 or 12 months.");
-  const campaignStartDate = isValidStartDate(listing, b.campaignStartDate) ? b.campaignStartDate : earliestStartDate(listing).toISOString().slice(0, 10);
-  await db.addToCart({ buyerId: user.id, listingId: listing.id, term, campaignStartDate });
-  redirect(res, "/plan");
-}
-
-export async function removeFromCartHandler(req, res, id) {
-  const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/plan");
-  await db.removeCartItem(id, user.id);
-  redirect(res, "/plan");
-}
-
-// Mirrors createBookingIntentHandler, but for the combined total of every
-// cart item, so the cart checkout page's Stripe Elements field charges one
-// amount covering the whole plan.
-export async function createCartIntentHandler(req, res) {
-  const user = await currentUser(req);
-  if (!user) return forbiddenJson(res);
-  const items = await db.getCartForBuyer(user.id);
-  if (!items.length) return badRequest(res, "Your media plan is empty.");
-  let total = 0;
-  for (const item of items) {
-    const listing = await db.getListingById(item.listingId);
-    if (listing) total += withGst(listing.price * item.term);
-  }
-  total = Math.round(total * 100) / 100;
-  const intent = await createPaymentIntent({
-    amount: total,
-    description: `Frontage media plan — ${items.length} site(s)`,
-    metadata: { buyerId: user.id, itemCount: String(items.length) },
-  });
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ clientSecret: intent.clientSecret, paymentIntentId: intent.id, total }));
-}
-
-export async function checkoutCartHandler(req, res) {
-  const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/plan");
-  if (emailUnverified(user)) return badRequest(res, "Please verify your email before booking.");
-  const b = await readBody(req);
-  if (!b.signature) return badRequest(res, "A signature is required.");
-  if (!b.agreeTerms) return badRequest(res, "You must agree to the Buyer Terms & Conditions before booking.");
-  if (!b.agreeContentPolicy) return badRequest(res, "You must confirm your content complies with Frontage's content policy before booking.");
-
-  const cartItems = await db.getCartForBuyer(user.id);
-  if (!cartItems.length) return badRequest(res, "Your media plan is empty.");
-
-  // Re-fetch every listing fresh rather than trusting the cart snapshot —
-  // one may have been booked by someone else, edited, or removed since it
-  // was added. Re-validates the campaign start date the same way the
-  // single-listing flow does.
-  const items = [];
-  let total = 0;
-  for (const item of cartItems) {
-    const listing = await db.getListingById(item.listingId);
-    if (!listing || listing.status !== "live") {
-      return badRequest(res, `"${item.listingId}" is no longer available — please remove it from your plan and try again.`);
-    }
-    if (!isValidStartDate(listing, item.campaignStartDate)) {
-      return badRequest(res, `The campaign start date for "${listing.title}" is no longer valid — please update it on your plan.`);
-    }
-    const campaignEndDate = addMonths(new Date(item.campaignStartDate), item.term).toISOString().slice(0, 10);
-    items.push({ listing, term: item.term, campaignStartDate: item.campaignStartDate, campaignEndDate });
-    total += withGst(listing.price * item.term);
-  }
-  total = Math.round(total * 100) / 100;
-
-  let paymentIntentId = null;
-  if (isStripeConfigured()) {
-    if (!b.paymentIntentId) return badRequest(res, "Payment was not completed.");
-    const intent = await retrievePaymentIntent(b.paymentIntentId);
-    if (intent.status !== "succeeded" || Math.abs(intent.amount - total) > 0.01) {
-      return badRequest(res, "Payment could not be verified — please try again.");
-    }
-    paymentIntentId = b.paymentIntentId;
-  } else if (!user.cardLast4) {
-    const digits = (b.cardNumber || "").replace(/\D/g, "");
-    if (digits.length < 4) return badRequest(res, "A payment method is required the first time you book.");
-    await db.updateUser(user.id, { cardLast4: digits.slice(-4) });
-  }
-
-  const invoicePatch = {};
-  if (b.businessName && b.businessName !== user.businessName) invoicePatch.businessName = b.businessName;
-  if (b.abn && b.abn !== user.abn) invoicePatch.abn = b.abn;
-  if (Object.keys(invoicePatch).length) await db.updateUser(user.id, invoicePatch);
-
-  const { orderId, bookings } = await db.createOrderWithBookings({ buyerId: user.id, items, signature: b.signature, paymentIntentId, totalAmount: total });
-
-  const invoiceBuyer = (await db.getUserById(user.id)) || user;
-  for (const { booking } of bookings) {
-    const listing = await db.getListingById(booking.listingId);
-    const seller = booking.sellerId ? await db.getUserById(booking.sellerId) : null;
-    if (seller && listing) await trySend(bookingSellerEmail(seller, listing, booking));
-    const payment = await db.getPaymentByBookingId(booking.id);
-    if (listing) await trySend(bookingBuyerEmail(invoiceBuyer, listing, booking, payment));
-  }
-
-  redirect(res, `/order/${orderId}`);
-}
-
-// ---------------- Chat ----------------
-async function messagesJson(res, messages, currentPersonId) {
-  const withNames = await Promise.all(
-    messages.map(async (m) => {
-      const sender = await db.getPersonById(m.senderId);
-      return { ...m, senderName: (sender || {}).fullName || "Unknown" };
-    })
-  );
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ messages: withNames, currentUserId: currentPersonId }));
-}
-function forbiddenJson(res) {
-  res.writeHead(403, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ error: "Not authorized" }));
-}
-// A job order's two parties live in different identity spaces (seller is a
-// `users` account, contractor is a `contractors` account) — this resolves
-// whichever one is currently logged in for a given job, or null.
-async function currentJobOrderParty(req, job) {
-  const user = await currentUser(req);
-  if (user && job.sellerId === user.id) return user;
-  const contractor = await currentContractor(req);
-  if (contractor && job.contractorId === contractor.id) return contractor;
-  return null;
-}
-
-export async function postJobOrderMessage(req, res, id) {
-  const job = await db.getJobOrderById(id);
-  const person = job && (await currentJobOrderParty(req, job));
-  if (!job || !person) return badRequest(res, "Not authorized for this job order.");
-  const b = await readBody(req);
-  if (b.body && b.body.trim()) await db.createMessage({ threadType: "job", threadId: id, senderId: person.id, body: b.body.trim() });
-  // Sent from either the inline chat block (seller/jobs, contractor/board)
-  // or a standalone chat page (/job/:id/chat, /contractor/messages) — bounce
-  // back to whichever it was.
-  const referer = req.headers.referer;
-  if (referer && referer.includes(`/job/${id}/chat`)) return redirect(res, `/job/${id}/chat`);
-  redirect(res, job.sellerId === person.id ? "/seller/jobs" : "/contractor/board");
-}
-
-export async function getJobOrderMessagesJson(req, res, id) {
-  const job = await db.getJobOrderById(id);
-  const person = job && (await currentJobOrderParty(req, job));
-  if (!job || !person) return forbiddenJson(res);
-  await messagesJson(res, await db.getMessagesForThread("job", id), person.id);
-}
-
-export async function postListingMessage(req, res, listingId) {
-  const user = await currentUser(req);
-  if (!user) return redirect(res, `/onboarding?next=/listing/${listingId}`);
-  const listing = await db.getListingById(listingId);
-  if (!listing) return badRequest(res, "Listing not found.");
-  const b = await readBody(req);
-  const isOwner = listing.ownerId === user.id;
-  const buyerId = isOwner ? b.buyerId : user.id;
-  if (!buyerId) return badRequest(res, "Missing buyer.");
-  if (isOwner && (await db.getMessagesForThread("listing", `${listingId}:${buyerId}`)).length === 0) {
-    return badRequest(res, "No existing thread with that buyer.");
-  }
-  if (b.body && b.body.trim()) await db.createMessage({ threadType: "listing", threadId: `${listingId}:${buyerId}`, senderId: user.id, body: b.body.trim() });
-  redirect(res, isOwner ? `/listing/${listingId}/chat?buyer=${encodeURIComponent(buyerId)}` : `/listing/${listingId}/chat`);
-}
-
-export async function getListingMessagesJson(req, res, listingId, query) {
-  const user = await currentUser(req);
-  const listing = await db.getListingById(listingId);
-  if (!user || !listing) return forbiddenJson(res);
-  const isOwner = listing.ownerId === user.id;
-  const buyerId = isOwner ? query.get("buyer") : user.id;
-  if (!buyerId) return forbiddenJson(res);
-  await messagesJson(res, await db.getMessagesForThread("listing", `${listingId}:${buyerId}`), user.id);
-}
-
-// ---------------- Leases ----------------
-export async function renewBookingHandler(req, res, id) {
-  const user = await currentUser(req);
-  const booking = await db.getBookingById(id);
-  if (!user || !booking || booking.buyerId !== user.id) return badRequest(res, "Not your lease.");
-  const b = await readBody(req);
-  const extraMonths = parseInt(b.extraMonths, 10) || 12;
-  await db.renewBooking(id, extraMonths);
-  redirect(res, "/account/leases");
-}
-
-// Tiered cancellation & make-good (lib/cancellation.js, Phase 5) — this
-// still only sets the lease to end at term expiry (setBookingAutoRenew), the
-// same as before Phase 5. What's new is that it now also determines which
-// tier the cancellation falls into and records the fee that tier implies,
-// so it's visible to both parties (myLeasesPage) instead of only ever
-// existing as unenforced text in the Terms. It does NOT charge the fee —
-// actually collecting it (a new Stripe charge against the buyer's card on
-// file) is real payments work deliberately left for a follow-up pass;
-// recording the obligation is the substantive change here.
-export async function endLeaseHandler(req, res, id) {
-  const user = await currentUser(req);
-  const booking = await db.getBookingById(id);
-  if (!user || !booking || booking.buyerId !== user.id) return badRequest(res, "Not your lease.");
-  const jobOrder = await db.getJobOrderByBookingId(id);
-  const tier = determineCancellationTier({ jobOrder, booking });
-  const feeAmount = computeCancellationFee({ tier, booking });
-  const b = await readBody(req);
-  await db.createCancellation({ bookingId: id, tier, feeAmount, reason: b.reason });
-  await db.setBookingAutoRenew(id, false);
-  redirect(res, "/account/leases");
-}
-
-// ---------------- Job orders ----------------
-export async function jobOrderAccess(req, res, id) {
-  const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/seller/jobs");
-  const job = await db.getJobOrderById(id);
-  if (!job || job.sellerId !== user.id) return badRequest(res, "Not your job order.");
-  const b = await readBody(req);
-  await db.updateJobOrder(id, { sellerAccessConfirmed: true, installWindow: b.installWindow || job.installWindow || "12–16 Aug" });
-  redirect(res, "/seller/jobs");
-}
-
-export async function jobOrderClaim(req, res, id) {
-  const contractor = await currentContractor(req);
-  if (!contractor) return redirect(res, "/contractor/login?next=/contractor/ping");
-  if (!contractor.isApprovedContractor) return redirect(res, "/contractor/ping");
-  const job = await db.getJobOrderById(id);
-  if (!job || job.status !== "broadcast") return redirect(res, "/contractor/ping");
-  await db.updateJobOrder(id, { contractorId: contractor.id, status: "new" });
-  const listing = await db.getListingById(job.listingId);
-  const seller = job.sellerId ? await db.getUserById(job.sellerId) : null;
-  if (seller && listing) await trySend(jobUpdateEmail(seller, listing, job, `${contractor.businessName || contractor.fullName} has accepted the install job — please confirm an access window from your job orders page`));
-  redirect(res, "/contractor/board");
-}
-
-export async function jobOrderConfirmSite(req, res, id) {
-  const contractor = await currentContractor(req);
-  const job = await db.getJobOrderById(id);
-  if (!contractor || !job || job.contractorId !== contractor.id) return badRequest(res, "Not your job order.");
-  await db.updateJobOrder(id, { status: "site_confirmed" });
-  redirect(res, "/contractor/board");
-}
-
-export async function jobOrderQuote(req, res, id) {
-  const contractor = await currentContractor(req);
-  const job = await db.getJobOrderById(id);
-  if (!contractor || !job || job.contractorId !== contractor.id) return badRequest(res, "Not your job order.");
-  const b = await readBody(req);
-  const quote = { print: Math.max(0, Number(b.print) || 0), install: Math.max(0, Number(b.install) || 0), uninstall: Math.max(0, Number(b.uninstall) || 0) };
-  await db.updateJobOrder(id, { status: "quote_sent", quote });
-  redirect(res, "/contractor/board");
-}
-
-export async function jobOrderSimulateBuyerAccept(req, res, id) {
-  const contractor = await currentContractor(req);
-  const job = await db.getJobOrderById(id);
-  if (!contractor || !job || job.contractorId !== contractor.id) return badRequest(res, "Not your job order.");
-  await db.updateJobOrder(id, { status: "quote_accepted" });
-  redirect(res, "/contractor/board");
-}
-
-// ---------------- Content-approval workflow (Phase 4) ----------------
-// Buyer uploads campaign artwork once the quote is accepted; the owner
-// approves or rejects it before a contractor can schedule print/install.
-export async function jobOrderUploadArtwork(req, res, id) {
-  const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/account/leases");
-  const job = await db.getJobOrderById(id);
-  if (!job || job.buyerId !== user.id) return badRequest(res, "Not your booking.");
-  if (STAGES.indexOf(job.status) < STAGES.indexOf("quote_accepted")) {
-    return badRequest(res, "Artwork can be uploaded once you've accepted the contractor's quote, not before.");
-  }
-  const ok = await runUpload(req, res, uploadArtwork, {
-    onError: (message) => redirect(res, `/account/leases?err=${encodeURIComponent(message)}`),
-  });
-  if (!ok) return;
-  if (!req.file) return badRequest(res, "Please choose an artwork file (image or PDF) to upload.");
-  await db.updateJobOrder(id, {
-    artworkUrl: artworkPublicUrl(req.file),
-    artworkStatus: "pending_review",
-    artworkRejectedReason: null,
-  });
-  const seller = job.sellerId ? await db.getUserById(job.sellerId) : null;
-  const listing = await db.getListingById(job.listingId);
-  if (seller && listing) await trySend(jobUpdateEmail(seller, listing, job, "the advertiser has uploaded campaign artwork for your review"));
-  redirect(res, "/account/leases");
-}
-
-export async function jobOrderApproveArtwork(req, res, id) {
-  const user = await currentUser(req);
-  const job = await db.getJobOrderById(id);
-  if (!user || !job || job.sellerId !== user.id) return badRequest(res, "Not your job order.");
-  if (job.artworkStatus !== "pending_review") return badRequest(res, "There's no artwork awaiting your review on this job.");
-  await db.updateJobOrder(id, { artworkStatus: "approved" });
-  redirect(res, "/seller/jobs");
-}
-
-export async function jobOrderRejectArtwork(req, res, id) {
-  const user = await currentUser(req);
-  const job = await db.getJobOrderById(id);
-  if (!user || !job || job.sellerId !== user.id) return badRequest(res, "Not your job order.");
-  if (job.artworkStatus !== "pending_review") return badRequest(res, "There's no artwork awaiting your review on this job.");
-  const b = await readBody(req);
-  if (!b.reason) return badRequest(res, "Please give the advertiser a reason so they know what to fix.");
-  await db.updateJobOrder(id, { artworkStatus: "rejected", artworkRejectedReason: b.reason });
-  const buyer = job.buyerId ? await db.getUserById(job.buyerId) : null;
-  const listing = await db.getListingById(job.listingId);
-  if (buyer && listing) await trySend(jobUpdateEmail(buyer, listing, job, `the space owner declined your artwork: "${b.reason}" — please upload a revised version`));
-  redirect(res, "/seller/jobs");
-}
-
-export async function jobOrderSchedule(req, res, id) {
-  const contractor = await currentContractor(req);
-  const job = await db.getJobOrderById(id);
-  if (!contractor || !job || job.contractorId !== contractor.id) return badRequest(res, "Not your job order.");
-  // Content-approval gate (New Style Assets/03-AD-SPACE-TRANSLATION.md §5 §4)
-  // — can't schedule a print/install run before the owner has actually
-  // approved what's going up.
-  if (job.artworkStatus !== "approved") {
-    return badRequest(res, "This job's artwork hasn't been approved by the space owner yet — it can't be scheduled until it is.");
-  }
-  const b = await readBody(req);
-  // The install_date column is a real timestamp — validate before it ever
-  // reaches Postgres so a malformed date is a friendly message, not a crash.
-  const parsed = new Date(b.installDate);
-  if (!b.installDate || isNaN(parsed.getTime())) return badRequest(res, "Please pick a valid install date from the date picker.");
-  await db.updateJobOrder(id, { status: "scheduled", installDate: parsed.toISOString() });
-  const listing = await db.getListingById(job.listingId);
-  if (listing) {
-    const seller = job.sellerId ? await db.getUserById(job.sellerId) : null;
-    const buyer = job.buyerId ? await db.getUserById(job.buyerId) : null;
-    const when = parsed.toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
-    if (seller) await trySend(jobUpdateEmail(seller, listing, job, `install scheduled for ${when}`));
-    if (buyer) await trySend(jobUpdateEmail(buyer, listing, job, `install scheduled for ${when}`));
-  }
-  redirect(res, "/contractor/board");
-}
-
-export async function jobOrderComplete(req, res, id) {
-  const contractor = await currentContractor(req);
-  const job = await db.getJobOrderById(id);
-  if (!contractor || !job || job.contractorId !== contractor.id) return badRequest(res, "Not your job order.");
-  await db.updateJobOrder(id, { status: "installed" });
-  const listing = await db.getListingById(job.listingId);
-  if (listing) {
-    const seller = job.sellerId ? await db.getUserById(job.sellerId) : null;
-    const buyer = job.buyerId ? await db.getUserById(job.buyerId) : null;
-    if (seller) await trySend(jobUpdateEmail(seller, listing, job, "install confirmed complete — your payout has been released and the lease is now active"));
-    if (buyer) await trySend(jobUpdateEmail(buyer, listing, job, "your ad is installed and live — the lease clock has started"));
-  }
-  redirect(res, "/contractor/board");
-}
-
-// ---------------- Contact ----------------
-export async function contactSubmit(req, res) {
-  const b = await readBody(req);
-  if (!b.name || !b.email || !b.message) return badRequest(res, "Name, email, and message are required.");
-  const topic = b.topic === "contractor" ? "contractor" : "general";
-  await db.createContactMessage({ name: b.name, email: b.email, message: b.message, topic });
-  // Also forward to the CONTACT_EMAIL inbox (env-configured) so submissions
-  // reach a real mailbox, not just the admin dashboard.
-  if (process.env.CONTACT_EMAIL) await trySend(contactForwardEmail(b.name, b.email, topic, b.message));
-  redirect(res, topic === "contractor" ? "/contractor/support?sent=1" : "/contact?sent=1");
+  await db.deleteListingByOwner(listing.id);
+  redirect(res, "/sell?deleted=1");
 }
 
 // ---------------- Account ----------------
@@ -954,237 +243,227 @@ export async function updateAccountProfile(req, res) {
   const user = await currentUser(req);
   if (!user) return redirect(res, "/onboarding?next=/account");
   const b = await readBody(req);
-  if (!b.fullName || !b.email || !b.mobile) {
-    return redirect(res, `/account?err=${encodeURIComponent("Name, email, and mobile are required.")}`);
+  const fullName = clean(b.fullName, 80);
+  const email = clean(b.email, 200).toLowerCase();
+  const back = (msg) => redirect(res, withParam("/account", "err", msg));
+  if (!fullName || !email) return back("Name and email are required.");
+  if (!EMAIL_RE.test(email)) return back("That email address doesn't look right.");
+  const googleBusinessUrl = clean(b.googleBusinessUrl, 300) || null;
+  if (googleBusinessUrl) {
+    let ok = false;
+    try {
+      ok = new URL(googleBusinessUrl).protocol === "https:";
+    } catch {}
+    if (!ok) return back("The Google Business link must start with https://");
   }
-  const existing = await db.getUserByEmail(b.email);
-  if (existing && existing.id !== user.id) {
-    return redirect(res, `/account?err=${encodeURIComponent("Another account already uses that email.")}`);
-  }
+  const existing = await db.getUserByEmail(email);
+  if (existing && existing.id !== user.id) return back("Another account already uses that email.");
+  const emailChanged = email !== String(user.email).toLowerCase();
   await db.updateUser(user.id, {
-    fullName: b.fullName,
-    email: b.email,
-    mobile: b.mobile,
-    address: b.address || null,
-    businessName: b.businessName || null,
-    abn: b.abn || null,
-    googleBusinessUrl: b.googleBusinessUrl || null,
+    fullName,
+    email,
+    mobile: clean(b.mobile, 30) || null,
+    businessName: clean(b.businessName, 100) || null,
+    googleBusinessUrl,
+    ...(emailChanged ? { emailVerifiedAt: isEmailConfigured() ? null : new Date().toISOString() } : {}),
   });
-  redirect(res, "/account?updated=Contact info");
+  if (emailChanged && isEmailConfigured()) {
+    await startVerification({ ...user, fullName, email });
+    return redirect(res, "/account?updated=Profile saved. Check your new inbox to verify it — your email");
+  }
+  redirect(res, "/account?updated=Personal info");
 }
 
 export async function updateAccountPassword(req, res) {
   const user = await currentUser(req);
   if (!user) return redirect(res, "/onboarding?next=/account");
   const b = await readBody(req);
-  if (!verifyPassword(b.currentPassword || "", user.passwordHash, user.passwordSalt)) {
-    return redirect(res, `/account?err=${encodeURIComponent("Current password is incorrect.")}`);
-  }
-  if (!isStrongPassword(b.newPassword)) {
-    return redirect(res, `/account?err=${encodeURIComponent("Password too weak — " + PASSWORD_HINT)}`);
-  }
-  if (b.newPassword !== b.confirmPassword) {
-    return redirect(res, `/account?err=${encodeURIComponent("New password and confirmation don't match.")}`);
-  }
+  const back = (msg) => redirect(res, withParam("/account#security", "err", msg));
+  if (!verifyPassword(String(b.currentPassword || ""), user.passwordHash, user.passwordSalt)) return back("Current password is incorrect.");
+  if (!isStrongPassword(b.newPassword)) return back(`Password too weak — ${PASSWORD_HINT}`);
+  if (b.newPassword !== b.confirmPassword) return back("New password and confirmation don't match.");
   const { hash, salt } = hashPassword(b.newPassword);
   await db.updateUser(user.id, { passwordHash: hash, passwordSalt: salt });
-  redirect(res, "/account?updated=Password");
+  // Log out every other device, keep this one.
+  await db.destroySessionsForUser(user.id);
+  const session = await db.createSession(user.id);
+  redirect(res, "/account?updated=Password", sessionCookieHeader(session.token));
 }
 
-export async function updateAccountBanking(req, res) {
+export async function updateAccountNotifications(req, res) {
   const user = await currentUser(req);
   if (!user) return redirect(res, "/onboarding?next=/account");
   const b = await readBody(req);
-  if (!b.bankBsb || !b.bankAccount || !b.bankAccountName) {
-    return redirect(res, `/account?err=${encodeURIComponent("BSB, account number, and account name are all required.")}`);
-  }
-  await db.updateUser(user.id, { bankBsb: b.bankBsb, bankAccount: b.bankAccount, bankAccountName: b.bankAccountName });
-  redirect(res, "/account?updated=Banking details");
+  await db.updateUser(user.id, { notifyMessages: b.notifyMessages === "1" });
+  redirect(res, "/account?updated=Notification settings");
 }
 
-// ---------------- Contractor applications ----------------
-export async function contractorApplyHandler(req, res) {
-  const contractor = await currentContractor(req);
-  if (!contractor) return redirect(res, "/contractor/login?next=/contractor/apply");
-  const ok = await runUpload(req, res, uploadContractorDocs, {
-    onError: (message) => redirect(res, `/contractor/apply?err=${encodeURIComponent(message)}`),
-  });
-  if (!ok) return;
-  const b = req.body || {};
-  const files = req.files || {};
-  const insuranceFile = files.insuranceDoc && files.insuranceDoc[0];
-  const regoFile = files.companyRegoDoc && files.companyRegoDoc[0];
-  if (!b.businessNumber || !b.companyName || !insuranceFile) {
-    return badRequest(res, "Business number, company name, and a valid insurance document (image or PDF) are required.");
-  }
-  // insuranceFile.key is the S3/R2 object key (multer-s3) — the local-disk
-  // fallback uses .filename instead. Either way this is a private-bucket
-  // key, resolved to a signed URL on demand by downloadContractorDoc below.
-  await db.createContractorApplication({
-    contractorId: contractor.id,
-    businessNumber: b.businessNumber,
-    companyName: b.companyName,
-    companyRegistrationNumber: b.companyRegistrationNumber || null,
-    insuranceExpiry: b.insuranceExpiry || null,
-    insuranceDocPath: insuranceFile.key || insuranceFile.filename,
-    companyRegoDocPath: regoFile ? regoFile.key || regoFile.filename : null,
-  });
-  await db.updateContractor(contractor.id, { businessName: b.companyName, contractorApplicationStatus: "pending" });
-  redirect(res, "/contractor/apply?submitted=1");
-}
-
-export async function adminApproveContractorApplication(req, res, id) {
-  const user = await currentUser(req);
-  if (!user || !hasPermission(user, "canApproveContractors")) return badRequest(res, "Not authorized.");
-  await db.approveContractorApplication(id, user.id);
-  redirect(res, "/admin/contractor-applications");
-}
-
-export async function adminRejectContractorApplication(req, res, id) {
-  const user = await currentUser(req);
-  if (!user || !hasPermission(user, "canApproveContractors")) return badRequest(res, "Not authorized.");
+// ---------------- Contact ----------------
+export async function contactSubmit(req, res) {
   const b = await readBody(req);
-  await db.rejectContractorApplication(id, user.id, b.reason || "Not specified");
-  redirect(res, "/admin/contractor-applications");
+  // Honeypot: bots fill every field, people never see this one.
+  if (b.website) return redirect(res, "/contact?sent=1");
+  const back = (msg) => redirect(res, withParam("/contact", "err", msg));
+  const name = clean(b.name, 80);
+  const email = clean(b.email, 200);
+  const message = clean(b.message, 4000);
+  if (!name || !email || !message) return back("Name, email and message are all required.");
+  if (!EMAIL_RE.test(email)) return back("That email address doesn't look right.");
+  if (!formLimit(req, "contact").allowed) return back("Too many messages from your connection — please try again later.");
+  await db.createContactMessage({ name, email, message, topic: "general" });
+  if (process.env.CONTACT_EMAIL) await trySend(contactForwardEmail(name, email, "general", message));
+  redirect(res, "/contact?sent=1");
 }
 
-export async function downloadContractorDoc(req, res, id, field) {
+// ---------------- Reports ----------------
+export async function createReportHandler(req, res) {
   const user = await currentUser(req);
-  const contractor = await currentContractor(req);
-  const application = await db.getContractorApplicationById(id);
-  if (!application) return badRequest(res, "Not found.");
-  const isApplicant = contractor && application.contractorId === contractor.id;
-  const isStaff = user && hasPermission(user, "canApproveContractors");
-  if (!isApplicant && !isStaff) return badRequest(res, "Not authorized.");
-  const key = field === "insuranceDoc" ? application.insuranceDocPath : field === "companyRegoDoc" ? application.companyRegoDocPath : null;
-  if (!key) return badRequest(res, "No such document.");
-
-  if (isS3Configured()) {
-    // Private bucket — hand back a short-lived signed URL instead of
-    // streaming the file through this process.
-    const url = await getContractorDocUrl(key);
-    res.writeHead(302, { Location: url });
-    return res.end();
-  }
-
-  // Local-disk fallback (no S3/R2 configured — see lib/upload.js).
-  const filePath = path.join(CONTRACTOR_DOCS_DIR, key);
-  if (!filePath.startsWith(CONTRACTOR_DOCS_DIR) || !fs.existsSync(filePath)) return badRequest(res, "File not found.");
-  res.writeHead(200, { "Content-Type": "application/octet-stream" });
-  fs.createReadStream(filePath).pipe(res);
-}
-
-// ---------------- Admin: staff & permissions ----------------
-export async function createStaffUser(req, res) {
-  const user = await currentUser(req);
-  if (!user || !user.isAdmin) return badRequest(res, "Super-admin only.");
+  if (!user) return redirect(res, "/onboarding");
   const b = await readBody(req);
-  if (!b.fullName || !b.email || !b.mobile || !b.password) {
-    return badRequest(res, "Full name, email, mobile, and a password are all required.");
+  const reason = REPORT_REASONS.some(([v]) => v === b.reason) ? b.reason : null;
+  const details = clean(b.details, 2000) || null;
+  let report;
+  let backHref;
+  let summary;
+
+  if (b.targetType === "listing") {
+    const listing = await db.getListingById(clean(b.listingId, 40));
+    if (!listing || listing.status === "deleted") return redirect(res, "/");
+    backHref = `/listing/${listing.id}/report`;
+    if (!reason) return redirect(res, backHref);
+    if (!formLimit(req, "report").allowed || (await db.hasOpenReportFrom(user.id, "listing", listing.id))) return redirect(res, `${backHref}?sent=1`);
+    report = await db.createReport({ reporterId: user.id, targetType: "listing", listingId: listing.id, reportedUserId: listing.ownerId, reason, details });
+    summary = `listing ${listing.id} “${listing.title}”`;
+  } else if (b.targetType === "conversation") {
+    const conversation = await db.getConversationById(clean(b.conversationId, 40));
+    const role = db.conversationRole(conversation, user.id);
+    if (!role) return redirect(res, "/account/messages");
+    backHref = `/messages/${conversation.id}/report`;
+    if (!reason) return redirect(res, backHref);
+    if (!formLimit(req, "report").allowed || (await db.hasOpenReportFrom(user.id, "conversation", conversation.id))) return redirect(res, `${backHref}?sent=1`);
+    report = await db.createReport({
+      reporterId: user.id,
+      targetType: "conversation",
+      conversationId: conversation.id,
+      listingId: conversation.listingId,
+      reportedUserId: role === "buyer" ? conversation.sellerId : conversation.buyerId,
+      reason,
+      details,
+    });
+    summary = `conversation ${conversation.id} about “${conversation.listingTitle}”`;
+  } else {
+    return redirect(res, "/");
   }
-  if (!isStrongPassword(b.password)) {
-    return badRequest(res, "Password too weak — " + PASSWORD_HINT);
+  if (process.env.CONTACT_EMAIL) await trySend(reportAlertEmail(report, user, summary));
+  redirect(res, `${backHref}?sent=1`);
+}
+
+// ---------------- Admin / moderation ----------------
+async function requireModerator(req, res) {
+  const user = await currentUser(req);
+  if (!user || !hasPermission(user, "canAccessSupport")) {
+    res.writeHead(403, { "Content-Type": "text/plain" });
+    res.end("Not authorized.");
+    return null;
   }
-  if (await db.getUserByEmail(b.email)) return badRequest(res, "An account with that email already exists.");
-  const { hash, salt } = hashPassword(b.password);
-  const newUser = await db.createUser({ fullName: b.fullName, email: b.email, mobile: b.mobile, passwordHash: hash, passwordSalt: salt });
+  return user;
+}
+
+async function removeListingAndNotify(listingId, reason, admin) {
+  const removed = await db.removeListing(listingId, reason, admin.id);
+  if (removed) {
+    const owner = await db.getUserById(removed.ownerId);
+    if (owner) await trySend(listingRemovedEmail(owner, removed, reason));
+  }
+  return removed;
+}
+
+export async function resolveReportHandler(req, res, id) {
+  const admin = await requireModerator(req, res);
+  if (!admin) return;
+  const report = await db.getReportById(id);
+  if (!report) return redirect(res, "/admin/reports");
+  const b = await readBody(req);
+  const note = clean(b.note, 500) || null;
+  if (b.action === "remove_listing" && report.listingId) {
+    await removeListingAndNotify(report.listingId, note || "Breach of the Frontage Terms of Use.", admin);
+    await db.resolveReport(id, { status: "actioned", resolvedBy: admin.id, resolutionNote: `Listing removed${note ? `: ${note}` : ""}` });
+  } else if (b.action === "suspend_user" && report.reportedUserId) {
+    const target = await db.getUserById(report.reportedUserId);
+    if (target && !target.isAdmin) await db.suspendUser(target.id, note || `Report ${id}`);
+    await db.resolveReport(id, { status: "actioned", resolvedBy: admin.id, resolutionNote: `User suspended${note ? `: ${note}` : ""}` });
+  } else if (b.action === "actioned") {
+    await db.resolveReport(id, { status: "actioned", resolvedBy: admin.id, resolutionNote: note });
+  } else if (b.action === "dismiss") {
+    await db.resolveReport(id, { status: "dismissed", resolvedBy: admin.id, resolutionNote: note });
+  }
+  redirect(res, "/admin/reports?done=1");
+}
+
+export async function removeListingHandler(req, res, id) {
+  const admin = await requireModerator(req, res);
+  if (!admin) return;
+  const b = await readBody(req);
+  const reason = clean(b.reason, 500);
+  if (!reason) return redirect(res, "/admin/listings");
+  await removeListingAndNotify(id, reason, admin);
+  redirect(res, "/admin/listings?done=1");
+}
+
+export async function restoreListingHandler(req, res, id) {
+  const admin = await requireModerator(req, res);
+  if (!admin) return;
+  await db.restoreListing(id);
+  redirect(res, "/admin/listings?done=1");
+}
+
+export async function suspendUserHandler(req, res, id) {
+  const admin = await requireModerator(req, res);
+  if (!admin) return;
+  const target = await db.getUserById(id);
+  if (target && !target.isAdmin && target.id !== admin.id) {
+    const b = await readBody(req);
+    await db.suspendUser(id, clean(b.reason, 500) || null);
+  }
+  redirect(res, `/admin/users?done=1&q=${encodeURIComponent(id)}`);
+}
+
+export async function unsuspendUserHandler(req, res, id) {
+  const admin = await requireModerator(req, res);
+  if (!admin) return;
+  await db.unsuspendUser(id);
+  redirect(res, `/admin/users?done=1&q=${encodeURIComponent(id)}`);
+}
+
+async function requireSuperAdmin(req, res) {
+  const user = await currentUser(req);
+  if (!user || !user.isAdmin) {
+    res.writeHead(403, { "Content-Type": "text/plain" });
+    res.end("Super-admin only.");
+    return null;
+  }
+  return user;
+}
+
+// Grants moderation to an existing account, by email.
+export async function grantStaffHandler(req, res) {
+  if (!(await requireSuperAdmin(req, res))) return;
+  const b = await readBody(req);
+  const target = await db.getUserByEmail(clean(b.email, 200));
+  if (!target) return redirect(res, withParam("/admin/staff", "err", "No account with that email — ask them to sign up first."));
   const patch = {};
   for (const p of PERMISSIONS) patch[p.key] = b[p.key] === "1";
-  await db.updateUser(newUser.id, patch);
-  redirect(res, "/admin/staff?created=1");
+  await db.updateUser(target.id, patch);
+  redirect(res, "/admin/staff?done=1");
 }
 
 export async function updateUserPermissions(req, res, id) {
-  const user = await currentUser(req);
-  if (!user || !user.isAdmin) return badRequest(res, "Super-admin only.");
+  if (!(await requireSuperAdmin(req, res))) return;
   const target = await db.getUserById(id);
-  if (!target || target.isAdmin) return badRequest(res, "Cannot modify this account.");
+  if (!target || target.isAdmin) return redirect(res, "/admin/staff");
   const b = await readBody(req);
   const patch = {};
   for (const p of PERMISSIONS) patch[p.key] = b[p.key] === "1";
   await db.updateUser(id, patch);
-  redirect(res, "/admin/staff");
-}
-
-// ---------------- Stripe webhook (safety net) ----------------
-// Source of truth for "did the buyer actually pay" in the rare case the
-// client never completes the round trip back to createBookingHandler (e.g.
-// the card is charged but the tab closes before the form re-submits). Reads
-// the metadata attached to the PaymentIntent at creation
-// (createBookingIntentHandler above) to finalize the booking from here
-// alone if needed. Needs the raw request body — Stripe signs the exact
-// bytes, so this does not go through lib/body.js's readBody().
-export async function stripeWebhook(req, res) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const rawBody = Buffer.concat(chunks);
-  const signature = req.headers["stripe-signature"];
-
-  let event;
-  try {
-    event = constructWebhookEvent(rawBody, signature);
-  } catch (err) {
-    res.writeHead(400, { "Content-Type": "text/plain" });
-    return res.end(`Webhook signature verification failed: ${err.message}`);
-  }
-
-  if (event.type === "payment_intent.succeeded") {
-    const intent = event.data.object;
-    const { listingId, buyerId, term } = intent.metadata || {};
-    if (listingId && buyerId && term) {
-      const existingPayment = await db.getPaymentByStripeIntentId(intent.id);
-      if (!existingPayment) {
-        const listing = await db.getListingById(listingId);
-        if (listing && listing.status === "live") {
-          await db.createBookingBundle({
-            listing,
-            buyerId,
-            term: parseInt(term, 10),
-            signature: "(confirmed via Stripe — see PaymentIntent " + intent.id + ")",
-            paymentIntentId: intent.id,
-          });
-        }
-      }
-    }
-  }
-
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ received: true }));
-}
-
-// ---------------- Stripe Connect Express onboarding (seller payouts) ----------------
-export async function connectPayoutsHandler(req, res) {
-  const user = await currentUser(req);
-  if (!user) return redirect(res, "/onboarding?next=/account");
-  if (!isStripeConfigured()) return badRequest(res, "Stripe is not configured yet.");
-
-  let accountId = user.stripeConnectAccountId;
-  if (!accountId) {
-    accountId = await createConnectAccount(user.email);
-    await db.updateUser(user.id, { stripeConnectAccountId: accountId });
-  }
-  const proto = req.headers["x-forwarded-proto"] || "http";
-  const base = `${proto}://${req.headers.host}`;
-  const url = await createConnectOnboardingLink(accountId, {
-    refreshUrl: `${base}/account?connect=refresh`,
-    returnUrl: `${base}/account?connect=done`,
-  });
-  redirect(res, url);
-}
-
-// ---------------- Admin: listing moderation ----------------
-export async function removeListingHandler(req, res, id) {
-  const user = await currentUser(req);
-  if (!user || !hasPermission(user, "canAccessSupport")) return badRequest(res, "Not authorized.");
-  const b = await readBody(req);
-  if (!b.reason) return badRequest(res, "A reason is required to remove a listing.");
-  await db.removeListing(id, b.reason, user.id);
-  redirect(res, "/admin/listings");
-}
-
-export async function restoreListingHandler(req, res, id) {
-  const user = await currentUser(req);
-  if (!user || !hasPermission(user, "canAccessSupport")) return badRequest(res, "Not authorized.");
-  await db.restoreListing(id);
-  redirect(res, "/admin/listings");
+  redirect(res, "/admin/staff?done=1");
 }

@@ -1,79 +1,124 @@
 // Frontage — plain Node.js http server (no framework).
-// Persistence is Postgres (lib/db.js), file uploads go to S3/R2 (lib/upload.js),
-// and payments are real Stripe (lib/payments.js) once their env vars are set —
-// see .env.example and DEPLOYMENT.md. Requires DATABASE_URL to run at all.
+// A classifieds marketplace for advertising space: listings + messaging,
+// with every deal done off-platform. Persistence is Postgres (lib/db.js),
+// photo uploads go to S3/R2 (lib/upload.js). Requires DATABASE_URL.
+// The v1 transactional app is archived in archive/v1-transactional/.
 
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import "dotenv/config";
-import crypto from "node:crypto";
 import * as pages from "./routes/pages.js";
+import * as messages from "./routes/messages.js";
 import * as api from "./routes/api.js";
-import { layout } from "./lib/layout.js";
-import { currentUser, parseCookies } from "./lib/auth.js";
+import * as db from "./lib/db.js";
+import { parseCookies, cookieSecureFlag } from "./lib/auth.js";
 import { readBody } from "./lib/body.js";
+import { appBaseUrl } from "./lib/email.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.join(__dirname, "public");
 const PORT = process.env.PORT || 3000;
+const isHttps = /^https:/i.test(process.env.APP_BASE_URL || "");
 
-const STATIC_TYPES = { ".css": "text/css", ".js": "application/javascript", ".svg": "image/svg+xml" };
+const STATIC_TYPES = {
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".avif": "image/avif",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  ".ico": "image/x-icon",
+};
+const STATIC_FILES = new Set(["/style.css", "/client.js", "/browse.js", "/listing.js", "/listing-form.js", "/chat.js", "/listing-map.js", "/favicon.svg", "/og-default.png"]);
 
 function serveStatic(req, res, pathname) {
-  const filePath = path.join(__dirname, "public", pathname);
-  if (!filePath.startsWith(path.join(__dirname, "public"))) return false;
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return false;
-  const ext = path.extname(filePath);
-  res.writeHead(200, { "Content-Type": STATIC_TYPES[ext] || "application/octet-stream" });
+  const filePath = path.join(PUBLIC_DIR, pathname);
+  if (!filePath.startsWith(PUBLIC_DIR + path.sep)) return false;
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return false;
+  }
+  if (stat.isDirectory()) return false;
+  const isUpload = pathname.startsWith("/uploads/");
+  res.writeHead(200, {
+    "Content-Type": STATIC_TYPES[path.extname(filePath).toLowerCase()] || "application/octet-stream",
+    "Content-Length": stat.size,
+    "Cache-Control": isUpload ? "public, max-age=31536000, immutable" : "public, max-age=600",
+  });
   fs.createReadStream(filePath).pipe(res);
   return true;
 }
 
-async function notFound(req, res) {
-  const user = await currentUser(req);
-  res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
-  res.end(await layout({ title: "Not found", user, body: `<div class="panel"><h2>404</h2><p class="muted">That page doesn't exist. <a href="/" style="color:var(--orange)">Back to browse</a></p></div>` }));
+// ---------- Security headers (every response) ----------
+function setSecurityHeaders(res) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  if (isHttps) res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
 }
 
-function serverError(req, res, err) {
-  console.error(err);
-  res.writeHead(500, { "Content-Type": "text/plain" });
-  res.end("Something went wrong: " + err.message);
+// ---------- Cross-site POST protection ----------
+// Browsers send Origin (or at least Referer) on form posts. A POST whose
+// origin isn't this site is rejected; the session cookie is also
+// SameSite=Lax, so this is a second layer. Requests with neither header
+// (curl, server-to-server) carry no browser cookies to abuse.
+function isSameOriginPost(req) {
+  const source = req.headers.origin || req.headers.referer;
+  if (!source) return true;
+  let host;
+  try {
+    host = new URL(source).host;
+  } catch {
+    return false;
+  }
+  const allowed = new Set([req.headers.host]);
+  try {
+    allowed.add(new URL(appBaseUrl()).host);
+  } catch {}
+  return allowed.has(host);
 }
 
 // ---------- Private mode ----------
-// Set SITE_PASSCODE in the environment to lock the whole site behind a
-// single shared passcode while it's being refined — visitors see a minimal
-// gate page until they enter it once (cookie remembers them for 30 days).
-// Remove the env var and redeploy to go public. The Stripe webhook is
-// exempt (Stripe's servers can't type a passcode).
+// Set SITE_PASSCODE to lock the whole site behind one shared passcode
+// (staging, or pre-launch review). Remove it to go public.
 function gateHash() {
   return crypto.createHash("sha256").update(process.env.SITE_PASSCODE).digest("hex");
 }
 function gatePage(res, wrong) {
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Frontage — private preview</title></head>
+  res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><meta name="robots" content="noindex, nofollow"/><title>Frontage — private preview</title></head>
 <body style="margin:0;background:#EDEBE6;color:#1B2A3D;font-family:Arial,Helvetica,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh">
   <form method="POST" action="/gate" style="background:#fff;border:1px solid #DAD6CC;border-radius:12px;padding:32px;max-width:340px;text-align:center">
     <div style="font-weight:bold;font-size:18px;letter-spacing:.02em">FRONTAGE</div>
-    <p style="font-size:13px;color:#8B9199">This site is in private preview. Enter the access code to continue.</p>
+    <p style="font-size:13px;color:#5B6472">This site is in private preview. Enter the access code to continue.</p>
     ${wrong ? `<p style="font-size:13px;color:#C4574B">That code isn't right — try again.</p>` : ""}
-    <input type="password" name="passcode" autofocus style="width:100%;box-sizing:border-box;padding:11px;border-radius:8px;border:1px solid #DAD6CC;margin-bottom:12px" />
-    <button type="submit" style="width:100%;background:#FF6B35;color:#fff;border:none;padding:11px;border-radius:8px;font-weight:bold;cursor:pointer">Enter</button>
+    <input type="password" name="passcode" aria-label="Access code" autofocus style="width:100%;box-sizing:border-box;padding:11px;border-radius:8px;border:1px solid #DAD6CC;margin-bottom:12px" />
+    <button type="submit" style="width:100%;background:#1B2A3D;color:#fff;border:none;padding:11px;border-radius:8px;font-weight:bold;cursor:pointer">Enter</button>
   </form>
 </body></html>`);
 }
 async function handleGate(req, res, pathname) {
-  if (!process.env.SITE_PASSCODE) return false; // public — no gate
-  if (pathname === "/api/stripe/webhook" || pathname === "/ads.txt") return false;
-  const cookies = parseCookies(req);
-  if (cookies["frontage_gate"] === gateHash()) return false; // already through
+  if (!process.env.SITE_PASSCODE) return false;
+  if (pathname === "/healthz" || pathname === "/robots.txt") return false;
+  if (parseCookies(req)["frontage_gate"] === gateHash()) return false;
   if (req.method === "POST" && pathname === "/gate") {
     const b = await readBody(req);
-    if (b.passcode === process.env.SITE_PASSCODE) {
-      res.writeHead(302, { Location: "/", "Set-Cookie": `frontage_gate=${gateHash()}; HttpOnly; Path=/; Max-Age=${60 * 60 * 24 * 30}; SameSite=Lax` });
+    const given = Buffer.from(String(b.passcode || ""));
+    const expected = Buffer.from(process.env.SITE_PASSCODE);
+    if (given.length === expected.length && crypto.timingSafeEqual(given, expected)) {
+      res.writeHead(302, { Location: "/", "Set-Cookie": `frontage_gate=${gateHash()}; HttpOnly; Path=/; Max-Age=${60 * 60 * 24 * 30}; SameSite=Lax${cookieSecureFlag()}` });
       res.end();
     } else {
       gatePage(res, true);
@@ -84,144 +129,157 @@ async function handleGate(req, res, pathname) {
   return true;
 }
 
+// ---------- Retired v1 URLs → 301 ----------
+function retiredRedirect(pathname) {
+  let m;
+  if ((m = pathname.match(/^\/book\/([^/]+)$/))) return `/listing/${m[1]}`;
+  if ((m = pathname.match(/^\/listing\/([^/]+)\/chat$/))) return `/listing/${m[1]}`;
+  if (pathname === "/plan" || pathname === "/account/leases" || pathname === "/seller/inquiries" || pathname === "/seller/jobs" || pathname.startsWith("/job/"))
+    return "/account/messages";
+  if (pathname === "/sell/insights" || pathname.startsWith("/sell/insights/")) return "/sell";
+  if (pathname.startsWith("/contractor") || pathname.startsWith("/admin/deals") || pathname === "/admin/contractor-applications" || pathname === "/sell/bdr-new" || pathname.startsWith("/claim/") || pathname.startsWith("/order/") || pathname.startsWith("/contract/"))
+    return "/";
+  if (pathname === "/terms/buyer" || pathname === "/terms/seller" || pathname === "/terms/non-discrimination") return "/terms";
+  if (pathname === "/investors") return "/about";
+  return null;
+}
+
+// ---------- robots.txt + sitemap.xml ----------
+function robotsTxt(res) {
+  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+  if (process.env.NOINDEX === "1" || process.env.NOINDEX === "true" || process.env.SITE_PASSCODE) return res.end("User-agent: *\nDisallow: /\n");
+  res.end(
+    `User-agent: *\nDisallow: /api/\nDisallow: /admin/\nDisallow: /account\nDisallow: /messages/\nDisallow: /sell/edit/\nDisallow: /sell/new\nDisallow: /onboarding\nDisallow: /reset-password\nDisallow: /forgot-password\n\nSitemap: ${appBaseUrl()}/sitemap.xml\n`
+  );
+}
+async function sitemapXml(res) {
+  const base = appBaseUrl();
+  const fixed = ["/", "/about", "/how-it-works", "/pricing-guide", "/safety", "/sell/welcome", "/terms", "/privacy", "/contact"];
+  const listings = await db.getListings();
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const urls = [
+    ...fixed.map((p) => `<url><loc>${esc(base + p)}</loc></url>`),
+    ...listings.map((l) => `<url><loc>${esc(`${base}/listing/${l.id}`)}</loc><lastmod>${esc(String(l.updatedAt || l.createdAt).slice(0, 10))}</lastmod></url>`),
+  ];
+  res.writeHead(200, { "Content-Type": "application/xml; charset=utf-8" });
+  res.end(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>\n`);
+}
+
+function serverError(req, res, err) {
+  const ref = crypto.randomBytes(4).toString("hex");
+  console.error(`[error ${ref}] ${req.method} ${req.url}`, err);
+  if (res.headersSent) return res.end();
+  const tooLarge = err && err.code === "BODY_TOO_LARGE";
+  const wantsJson = String(req.headers.accept || "").includes("application/json");
+  const message = tooLarge ? "That was too much data to send at once." : "Something went wrong on our side. Please try again.";
+  const status = tooLarge ? 413 : 500;
+  if (wantsJson) {
+    res.writeHead(status, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ error: message, ref }));
+  }
+  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Frontage</title><link rel="stylesheet" href="/style.css"/></head>
+<body><main class="site-main"><div class="panel empty-state"><h1>${tooLarge ? "Too much data" : "Sorry — something went wrong"}</h1><p class="muted">${message} (ref ${ref})</p><a class="btn btn-primary" href="/">Back to Frontage</a></div></main></body></html>`);
+}
+
 const server = http.createServer(async (req, res) => {
   try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    setSecurityHeaders(res);
+    const url = new URL(req.url, "http://localhost");
     const { pathname } = url;
     const query = url.searchParams;
-    const method = req.method;
+    const method = req.method === "HEAD" ? "GET" : req.method;
+
+    if (method === "GET" && pathname === "/healthz") {
+      await db.ping();
+      res.writeHead(200, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+      return res.end("ok");
+    }
+
+    if (method === "POST" && !isSameOriginPost(req)) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      return res.end("Cross-site request blocked.");
+    }
 
     if (await handleGate(req, res, pathname)) return;
 
-    // static assets
-    if (
-      method === "GET" &&
-      (pathname === "/style.css" ||
-        pathname === "/client.js" ||
-        pathname === "/wall-visualizer.js" ||
-        pathname === "/map.js" ||
-        pathname === "/google-map.js" ||
-        pathname === "/listing-map.js" ||
-        pathname.startsWith("/uploads/listings/") ||
-        pathname.startsWith("/uploads/artwork/"))
-    ) {
+    if (method === "GET" && (STATIC_FILES.has(pathname) || pathname.startsWith("/uploads/listings/"))) {
       if (serveStatic(req, res, pathname)) return;
     }
+    if (method === "GET" && pathname === "/robots.txt") return robotsTxt(res);
+    if (method === "GET" && pathname === "/sitemap.xml") return await sitemapXml(res);
 
-    // AdSense verifies ad placements via a file at the domain root — only
-    // meaningful once ADSENSE_CLIENT_ID is set (see lib/ads.js).
-    if (method === "GET" && pathname === "/ads.txt") {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      const pubId = (process.env.ADSENSE_CLIENT_ID || "").replace(/^ca-/, "");
-      return res.end(pubId ? `google.com, ${pubId}, DIRECT, f08c47fec0942fa0\n` : "");
+    if (method === "GET") {
+      const to = retiredRedirect(pathname);
+      if (to) {
+        res.writeHead(301, { Location: to });
+        return res.end();
+      }
     }
 
-    // ---------- GET pages ----------
-    if (method === "GET" && pathname === "/") return await pages.browsePage(req, res, query);
-    if (method === "GET" && pathname === "/api/listings/map") return await api.listingsMapJson(req, res, query);
-    if (method === "GET" && pathname === "/api/estimate-eyes") return await api.estimateEyesJson(req, res, query);
-    if (method === "GET" && pathname === "/onboarding") return await pages.onboardingPage(req, res, query, query.get("err"));
-    if (method === "GET" && pathname === "/welcome") return await pages.welcomePage(req, res, query);
-    if (method === "GET" && pathname === "/terms/buyer") return await pages.buyerTermsPage(req, res);
-    if (method === "GET" && pathname === "/terms/seller") return await pages.sellerTermsPage(req, res);
-    if (method === "GET" && pathname === "/terms/non-discrimination") return await pages.nonDiscriminationPage(req, res);
-    if (method === "GET" && pathname === "/sell/welcome") return await pages.sellWelcomePage(req, res);
-    if (method === "GET" && pathname === "/sell/new") return await pages.sellNewPage(req, res, query);
-    if (method === "GET" && pathname === "/seller/jobs") return await pages.sellerJobsPage(req, res);
-    if (method === "GET" && pathname === "/contractor/ping") return await pages.contractorPingPage(req, res);
-    if (method === "GET" && pathname === "/contractor/board") return await pages.contractorBoardPage(req, res);
-    if (method === "GET" && pathname === "/contractor/apply") return await pages.contractorApplyPage(req, res, query);
-    if (method === "GET" && pathname === "/admin/contractor-applications") return await pages.adminContractorApplicationsPage(req, res);
-    if (method === "GET" && pathname === "/admin/staff") return await pages.adminStaffPage(req, res, query);
-    if (method === "GET" && pathname === "/admin/deals") return await pages.adminDealsPage(req, res);
-    if (method === "GET" && pathname === "/admin/listings") return await pages.adminListingsPage(req, res);
-    if (method === "GET" && pathname === "/sell/bdr-new") return await pages.bdrNewListingPage(req, res, query);
-    if (method === "GET" && pathname === "/contractor/support") return await pages.contractorSupportPage(req, res, query);
-    if (method === "GET" && pathname === "/contractor/login") return await pages.contractorLoginPage(req, res, query);
-    if (method === "GET" && pathname === "/contractor/signup") return await pages.contractorSignupPage(req, res, query);
-    if (method === "GET" && pathname === "/contractor/account") return await pages.contractorAccountPage(req, res, query);
-    if (method === "GET" && pathname === "/contractor/messages") return await pages.contractorMessagesPage(req, res);
-    if (method === "GET" && pathname === "/account") return await pages.accountPage(req, res, query);
-    if (method === "GET" && pathname === "/account/leases") return await pages.myLeasesPage(req, res);
-    if (method === "GET" && pathname === "/account/messages") return await pages.messagesInboxPage(req, res);
-    if (method === "GET" && pathname === "/seller/inquiries") return await pages.sellerInquiriesPage(req, res);
-    if (method === "GET" && pathname === "/about") return await pages.aboutPage(req, res);
-    if (method === "GET" && pathname === "/how-it-works") return await pages.howItWorksPage(req, res);
-    if (method === "GET" && pathname === "/contact") return await pages.contactPage(req, res, query);
-    if (method === "GET" && pathname === "/terms") return await pages.termsPage(req, res);
-    if (method === "GET" && pathname === "/investors") return await pages.investorsPage(req, res);
-    if (method === "GET" && pathname === "/verify") return await api.verifyEmailHandler(req, res, query);
-
     let m;
-    if (method === "GET" && (m = pathname.match(/^\/listing\/([^/]+)$/))) return await pages.listingDetailPage(req, res, m[1]);
-    if (method === "GET" && (m = pathname.match(/^\/listing\/([^/]+)\/chat$/))) return await pages.listingChatPage(req, res, m[1], query);
-    if (method === "GET" && (m = pathname.match(/^\/job\/([^/]+)\/chat$/))) return await pages.jobChatPage(req, res, m[1]);
-    if (method === "GET" && (m = pathname.match(/^\/sell\/insights\/([^/]+)$/))) return await pages.listingInsightsPage(req, res, m[1]);
-    if (method === "GET" && (m = pathname.match(/^\/book\/([^/]+)$/))) return await pages.bookPage(req, res, m[1], query);
-    if (method === "GET" && pathname === "/plan") return await pages.cartPage(req, res);
-    if (method === "GET" && (m = pathname.match(/^\/order\/([^/]+)$/))) return await pages.orderConfirmationPage(req, res, m[1]);
-    if (method === "GET" && (m = pathname.match(/^\/contract\/([^/]+)$/))) return await pages.contractViewPage(req, res, m[1]);
-    if (method === "GET" && (m = pathname.match(/^\/admin\/deals\/([^/]+)$/))) return await pages.adminDealDetailPage(req, res, m[1]);
-    if (method === "GET" && (m = pathname.match(/^\/claim\/([^/]+)$/))) return await pages.claimListingPage(req, res, m[1]);
-    if (method === "GET" && (m = pathname.match(/^\/sell\/edit\/([^/]+)$/))) return await pages.editListingPage(req, res, m[1], query);
-    if (method === "GET" && (m = pathname.match(/^\/api\/contractor-applications\/([^/]+)\/doc\/([^/]+)$/))) return await api.downloadContractorDoc(req, res, m[1], m[2]);
-    if (method === "GET" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/messages$/))) return await api.getJobOrderMessagesJson(req, res, m[1]);
-    if (method === "GET" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/messages$/))) return await api.getListingMessagesJson(req, res, m[1], query);
+    // ---------- GET pages ----------
+    if (method === "GET") {
+      if (pathname === "/") return await pages.browsePage(req, res, query);
+      if (pathname === "/api/listings/map") return await pages.listingsMapJson(req, res, query);
+      if (pathname === "/onboarding") return await pages.onboardingPage(req, res, query);
+      if (pathname === "/welcome") return await pages.welcomePage(req, res, query);
+      if (pathname === "/verify") return await api.verifyEmailHandler(req, res, query);
+      if (pathname === "/forgot-password") return await pages.forgotPasswordPage(req, res, query);
+      if (pathname === "/reset-password") return await pages.resetPasswordPage(req, res, query);
+      if (pathname === "/sell/welcome") return await pages.sellWelcomePage(req, res);
+      if (pathname === "/sell") return await pages.myListingsPage(req, res, query);
+      if (pathname === "/sell/new") return await pages.newListingPage(req, res);
+      if (pathname === "/account") return await pages.accountPage(req, res, query);
+      if (pathname === "/account/messages") return await messages.inboxPage(req, res);
+      if (pathname === "/about") return await pages.aboutPage(req, res);
+      if (pathname === "/how-it-works") return await pages.howItWorksPage(req, res);
+      if (pathname === "/pricing-guide") return await pages.pricingGuidePage(req, res);
+      if (pathname === "/safety") return await pages.safetyPage(req, res);
+      if (pathname === "/terms") return await pages.termsPage(req, res);
+      if (pathname === "/privacy") return await pages.privacyPage(req, res);
+      if (pathname === "/contact") return await pages.contactPage(req, res, query);
+      if (pathname === "/admin/reports") return await pages.adminReportsPage(req, res, query);
+      if (pathname === "/admin/listings") return await pages.adminListingsPage(req, res, query);
+      if (pathname === "/admin/users") return await pages.adminUsersPage(req, res, query);
+      if (pathname === "/admin/staff") return await pages.adminStaffPage(req, res, query);
+      if ((m = pathname.match(/^\/listing\/([^/]+)$/))) return await pages.listingDetailPage(req, res, m[1]);
+      if ((m = pathname.match(/^\/listing\/([^/]+)\/report$/))) return await pages.reportListingPage(req, res, m[1], query);
+      if ((m = pathname.match(/^\/sell\/edit\/([^/]+)$/))) return await pages.editListingPage(req, res, m[1]);
+      if ((m = pathname.match(/^\/messages\/([^/]+)$/))) return await messages.conversationPage(req, res, m[1]);
+      if ((m = pathname.match(/^\/messages\/([^/]+)\/report$/))) return await messages.reportConversationPage(req, res, m[1], query);
+      if ((m = pathname.match(/^\/api\/conversations\/([^/]+)\/messages$/))) return await messages.conversationMessagesJson(req, res, m[1], query);
+      if ((m = pathname.match(/^\/admin\/conversations\/([^/]+)$/))) return await pages.adminConversationPage(req, res, m[1]);
+    }
 
-    // ---------- POST api ----------
-    if (method === "POST" && pathname === "/api/auth/signup") return await api.signup(req, res);
-    if (method === "POST" && pathname === "/api/auth/login") return await api.login(req, res);
-    if (method === "POST" && pathname === "/api/auth/logout") return await api.logout(req, res);
-    if (method === "POST" && pathname === "/api/contractor-auth/signup") return await api.contractorSignup(req, res);
-    if (method === "POST" && pathname === "/api/contractor-auth/login") return await api.contractorLogin(req, res);
-    if (method === "POST" && pathname === "/api/contractor-auth/logout") return await api.contractorLogout(req, res);
-    if (method === "POST" && pathname === "/api/listings") return await api.createListingHandler(req, res);
-    if (method === "POST" && pathname === "/api/bookings/create-intent") return await api.createBookingIntentHandler(req, res);
-    if (method === "POST" && pathname === "/api/bookings") return await api.createBookingHandler(req, res);
-    if (method === "POST" && pathname === "/api/cart") return await api.addToCartHandler(req, res);
-    if (method === "POST" && (m = pathname.match(/^\/api\/cart\/([^/]+)\/remove$/))) return await api.removeFromCartHandler(req, res, m[1]);
-    if (method === "POST" && pathname === "/api/cart/create-intent") return await api.createCartIntentHandler(req, res);
-    if (method === "POST" && pathname === "/api/cart/checkout") return await api.checkoutCartHandler(req, res);
-    if (method === "POST" && pathname === "/api/bdr/listings") return await api.createBdrListingHandler(req, res);
-    if (method === "POST" && (m = pathname.match(/^\/api\/claim\/([^/]+)$/))) return await api.claimListingHandler(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/update$/))) return await api.updateListingHandler(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/photos$/))) return await api.addListingPhotosHandler(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/photos\/([^/]+)\/remove$/))) return await api.removeListingPhotoHandler(req, res, m[1], m[2]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/photos\/([^/]+)\/move\/(up|down)$/))) return await api.moveListingPhotoHandler(req, res, m[1], m[2], m[3]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/delete$/))) return await api.deleteListingHandler(req, res, m[1]);
-    if (method === "POST" && pathname === "/api/account/profile") return await api.updateAccountProfile(req, res);
-    if (method === "POST" && pathname === "/api/account/password") return await api.updateAccountPassword(req, res);
-    if (method === "POST" && pathname === "/api/account/banking") return await api.updateAccountBanking(req, res);
-    if (method === "POST" && pathname === "/api/account/connect-payouts") return await api.connectPayoutsHandler(req, res);
-    if (method === "POST" && pathname === "/api/account/resend-verification") return await api.resendVerificationHandler(req, res);
-    if (method === "POST" && pathname === "/api/stripe/webhook") return await api.stripeWebhook(req, res);
-    if (method === "POST" && pathname === "/api/contact") return await api.contactSubmit(req, res);
-    if (method === "POST" && pathname === "/api/contractor/apply") return await api.contractorApplyHandler(req, res);
-    if (method === "POST" && (m = pathname.match(/^\/api\/admin\/contractor-applications\/([^/]+)\/approve$/))) return await api.adminApproveContractorApplication(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/admin\/contractor-applications\/([^/]+)\/reject$/))) return await api.adminRejectContractorApplication(req, res, m[1]);
-    if (method === "POST" && pathname === "/api/admin/staff") return await api.createStaffUser(req, res);
-    if (method === "POST" && (m = pathname.match(/^\/api\/admin\/users\/([^/]+)\/permissions$/))) return await api.updateUserPermissions(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/admin\/listings\/([^/]+)\/remove$/))) return await api.removeListingHandler(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/admin\/listings\/([^/]+)\/restore$/))) return await api.restoreListingHandler(req, res, m[1]);
+    // ---------- POST ----------
+    if (method === "POST") {
+      if (pathname === "/api/auth/signup") return await api.signup(req, res);
+      if (pathname === "/api/auth/login") return await api.login(req, res);
+      if (pathname === "/api/auth/logout") return await api.logout(req, res);
+      if (pathname === "/api/auth/forgot-password") return await api.forgotPassword(req, res);
+      if (pathname === "/api/auth/reset-password") return await api.resetPassword(req, res);
+      if (pathname === "/api/account/profile") return await api.updateAccountProfile(req, res);
+      if (pathname === "/api/account/password") return await api.updateAccountPassword(req, res);
+      if (pathname === "/api/account/notifications") return await api.updateAccountNotifications(req, res);
+      if (pathname === "/api/account/resend-verification") return await api.resendVerificationHandler(req, res);
+      if (pathname === "/api/listings") return await api.createListingHandler(req, res);
+      if (pathname === "/api/contact") return await api.contactSubmit(req, res);
+      if (pathname === "/api/reports") return await api.createReportHandler(req, res);
+      if (pathname === "/api/admin/staff") return await api.grantStaffHandler(req, res);
+      if ((m = pathname.match(/^\/api\/listings\/([^/]+)\/update$/))) return await api.updateListingHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/listings\/([^/]+)\/delete$/))) return await api.deleteListingHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/listings\/([^/]+)\/messages$/))) return await messages.messageSellerHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/conversations\/([^/]+)\/messages$/))) return await messages.replyHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/admin\/reports\/([^/]+)\/resolve$/))) return await api.resolveReportHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/admin\/listings\/([^/]+)\/remove$/))) return await api.removeListingHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/admin\/listings\/([^/]+)\/restore$/))) return await api.restoreListingHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/admin\/users\/([^/]+)\/suspend$/))) return await api.suspendUserHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/admin\/users\/([^/]+)\/unsuspend$/))) return await api.unsuspendUserHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/admin\/users\/([^/]+)\/permissions$/))) return await api.updateUserPermissions(req, res, m[1]);
+    }
 
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/access$/))) return await api.jobOrderAccess(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/claim$/))) return await api.jobOrderClaim(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/confirm-site$/))) return await api.jobOrderConfirmSite(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/quote$/))) return await api.jobOrderQuote(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/simulate-buyer-accept$/))) return await api.jobOrderSimulateBuyerAccept(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/artwork$/))) return await api.jobOrderUploadArtwork(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/artwork\/approve$/))) return await api.jobOrderApproveArtwork(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/artwork\/reject$/))) return await api.jobOrderRejectArtwork(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/schedule$/))) return await api.jobOrderSchedule(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/complete$/))) return await api.jobOrderComplete(req, res, m[1]);
-
-    if (method === "POST" && (m = pathname.match(/^\/api\/bookings\/([^/]+)\/renew$/))) return await api.renewBookingHandler(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/bookings\/([^/]+)\/end-lease$/))) return await api.endLeaseHandler(req, res, m[1]);
-
-    if (method === "POST" && (m = pathname.match(/^\/api\/joborders\/([^/]+)\/messages$/))) return await api.postJobOrderMessage(req, res, m[1]);
-    if (method === "POST" && (m = pathname.match(/^\/api\/listings\/([^/]+)\/messages$/))) return await api.postListingMessage(req, res, m[1]);
-
-    await notFound(req, res);
+    await pages.notFoundPage(req, res);
   } catch (err) {
     serverError(req, res, err);
   }
@@ -229,9 +287,4 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Frontage running at http://localhost:${PORT}`);
-  console.log(`Demo accounts (password: password123):`);
-  console.log(`  marco@castlehillbjj.com.au   — seller (log in at /onboarding)`);
-  console.log(`  jordan@openhouserealty.com.au — buyer (log in at /onboarding)`);
-  console.log(`  alex@thesigndepot.com.au     — contractor, pre-approved (log in at /contractor/login)`);
-  console.log(`  admin@frontage.app           — super-admin (log in at /onboarding, then visit /admin/staff)`);
 });

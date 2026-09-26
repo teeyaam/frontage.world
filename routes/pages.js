@@ -1,55 +1,35 @@
-import { layout, contractorLayout, escapeHtml } from "../lib/layout.js";
-import { currentUser, currentContractor } from "../lib/auth.js";
+import { layout, escapeHtml, SITE_TAGLINE } from "../lib/layout.js";
+import { currentUser, safeNext, PASSWORD_PATTERN, PASSWORD_HINT } from "../lib/auth.js";
 import * as db from "../lib/db.js";
+import { priceLabel, sizeLabel, formatDate, timeAgo, listedAgo } from "../lib/format.js";
 import {
-  money,
-  formatMm,
-  formatDate,
-  svgSpaceDiagram,
-  svgEyesGauge,
-  STAGE_LABELS,
-  STAGES,
-  estimateJobFee,
-  leaseEndIso,
-  daysUntil,
-  GST_RATE,
-  gstOn,
-  withGst,
-} from "../lib/format.js";
-import { CATEGORIES, CATEGORY_LABEL, LISTING_TITLE_MAX_LENGTH, LISTING_DESC_MAX_LENGTH, LISTING_MIN_PHOTOS, LISTING_MAX_DIMENSION_MM } from "../lib/categories.js";
+  CATEGORIES,
+  CATEGORY_LABEL,
+  LISTING_TITLE_MAX_LENGTH,
+  LISTING_DESC_MAX_LENGTH,
+  LISTING_PRICE_NOTE_MAX_LENGTH,
+  LISTING_MAX_PHOTOS,
+  LISTING_MAX_DIMENSION_M,
+} from "../lib/categories.js";
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
-import { isStripeConfigured } from "../lib/payments.js";
 import { isEmailConfigured } from "../lib/email.js";
-import { adUnitMarkup } from "../lib/ads.js";
-import { PASSWORD_PATTERN, PASSWORD_HINT } from "../lib/auth.js";
-import { COUNTRIES } from "../lib/countries.js";
 import { filterListings } from "../lib/listingFilters.js";
-import { approximateCoords, distanceKm } from "../lib/geo.js";
-import {
-  AUDIENCE_TYPES,
-  AUDIENCE_TYPE_LABEL,
-  SURFACE_TYPES,
-  SURFACE_TYPE_LABEL,
-  ILLUMINATION_OPTIONS,
-  ILLUMINATION_LABEL,
-  ACCESS_TYPES,
-  ACCESS_TYPE_LABEL,
-  PERMIT_STATUSES,
-  PERMIT_STATUS_LABEL,
-} from "../lib/listingSpecs.js";
-import { earliestStartDate, computeLeadTimeDays } from "../lib/flightCalendar.js";
-import { determineCancellationTier, computeCancellationFee, CANCELLATION_TIER_LABEL } from "../lib/cancellation.js";
-import { termsSection, TERMS_CLAUSES, CANCELLATION_CLAUSE_BUYER } from "../lib/legal.js";
+import { approximateCoords, distanceKm, publicCoords, publicLocationLine, placesCountries } from "../lib/geo.js";
+import { browserMapsKey, mapsEmbedUrl } from "../lib/maps.js";
+import { youTubeThumbnail, youTubeEmbedUrl, youTubeWatchUrl } from "../lib/youtube.js";
+import { trackOnLoad } from "../lib/analytics.js";
+import { PRICING_SCENARIOS, PRICING_FACTORS, PRICE_NOTE_EXAMPLES } from "../lib/pricingGuide.js";
+import { termsHtml, privacyHtml, SAFETY_TIPS, LEGAL_UPDATED } from "../lib/legal.js";
 
-function send(res, status, html) {
+export function send(res, status, html) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
   res.end(html);
 }
-function redirect(res, location) {
+export function redirect(res, location) {
   res.writeHead(302, { Location: location });
   res.end();
 }
-async function requireUser(req, res, nextPath) {
+export async function requireUser(req, res, nextPath) {
   const user = await currentUser(req);
   if (!user) {
     redirect(res, `/onboarding?next=${encodeURIComponent(nextPath)}`);
@@ -57,2559 +37,757 @@ async function requireUser(req, res, nextPath) {
   }
   return user;
 }
-// Since the Staff area has zero presence in the main nav (access is via a
-// single footer link only), each admin page renders this strip so a staff
-// member can reach whichever other admin sections they have permission for
-// once they've landed on any one of them.
-// Suburb/city + postcode + country, however much of it a listing actually
-// has — replaces the old hardcoded ", Sydney" so listings anywhere in the
-// world display correctly. Existing listings created before country/
-// postcode existed just show the suburb, same as before.
-function locationLine(l) {
-  return [l.suburb, l.postcode].filter(Boolean).join(" ") + (l.country ? `, ${l.country}` : "");
-}
-
-function adminSubnav(user, activeKey) {
-  const items = [];
-  if (hasPermission(user, "canApproveContractors")) items.push({ key: "contractor-apps", href: "/admin/contractor-applications", label: "Contractor department" });
-  if (hasPermission(user, "canAccessSupport")) items.push({ key: "deals", href: "/admin/deals", label: "Customer service" }, { key: "listings", href: "/admin/listings", label: "Listings" });
-  if (hasPermission(user, "canCreateBdrListings")) items.push({ key: "bdr", href: "/sell/bdr-new", label: "Create BDR listing" });
-  if (user.isAdmin) items.push({ key: "staff", href: "/admin/staff", label: "Manage staff" });
-  if (items.length <= 1) return "";
-  return `<div class="admin-subnav">${items.map((i) => `<a href="${i.href}"${i.key === activeKey ? ' class="active"' : ""}>${i.label}</a>`).join("")}</div>`;
-}
-
-async function requireContractor(req, res, nextPath) {
-  const contractor = await currentContractor(req);
-  if (!contractor) {
-    redirect(res, `/contractor/login?next=${encodeURIComponent(nextPath)}`);
-    return null;
-  }
-  return contractor;
-}
 async function requirePermission(req, res, key, nextPath) {
-  const user = await currentUser(req);
-  if (!user) {
-    redirect(res, `/onboarding?next=${encodeURIComponent(nextPath)}`);
-    return null;
-  }
+  const user = await requireUser(req, res, nextPath);
+  if (!user) return null;
   if (!hasPermission(user, key)) {
-    send(res, 403, await layout({ title: "Forbidden", user, body: `<div class="panel"><h2>403</h2><p class="muted">You don't have access to this area.</p></div>` }));
+    send(res, 403, await layout({ title: "Forbidden", user, body: `<div class="panel"><h2>403</h2><p class="muted">You don't have access to this area.</p></div>`, noindex: true }));
     return null;
   }
   return user;
 }
 async function requireSuperAdmin(req, res, nextPath) {
-  const user = await currentUser(req);
-  if (!user) {
-    redirect(res, `/onboarding?next=${encodeURIComponent(nextPath)}`);
-    return null;
-  }
+  const user = await requireUser(req, res, nextPath);
+  if (!user) return null;
   if (!user.isAdmin) {
-    send(res, 403, await layout({ title: "Forbidden", user, body: `<div class="panel"><h2>403</h2><p class="muted">Super-admin access only.</p></div>` }));
+    send(res, 403, await layout({ title: "Forbidden", user, body: `<div class="panel"><h2>403</h2><p class="muted">Super-admin access only.</p></div>`, noindex: true }));
     return null;
   }
   return user;
 }
 
+export async function notFoundPage(req, res, message = "That page doesn't exist, or the listing has been taken down.") {
+  const user = await currentUser(req);
+  send(
+    res,
+    404,
+    await layout({
+      title: "Not found",
+      user,
+      noindex: true,
+      body: `<div class="panel empty-state"><h1>Not found</h1><p class="muted">${escapeHtml(message)}</p><a href="/" class="btn btn-primary">Browse spaces</a></div>`,
+    })
+  );
+}
+
+function notice(message, kind = "green") {
+  return message ? `<div class="notice notice-${kind}" role="status">${escapeHtml(message)}</div>` : "";
+}
+
+export function coverPhoto(l) {
+  return (l.photos || [])[0] || (l.listingPhotos || [])[0] || null;
+}
+
+function categoryLabel(c) {
+  return CATEGORY_LABEL[c] || "Other";
+}
+
+function adminSubnav(user, activeKey) {
+  const items = [];
+  if (hasPermission(user, "canAccessSupport")) {
+    items.push({ key: "reports", href: "/admin/reports", label: "Reports" }, { key: "listings", href: "/admin/listings", label: "Listings" }, { key: "users", href: "/admin/users", label: "Users" });
+  }
+  if (user.isAdmin) items.push({ key: "staff", href: "/admin/staff", label: "Staff access" });
+  if (items.length <= 1) return "";
+  return `<div class="admin-subnav">${items.map((i) => `<a href="${i.href}"${i.key === activeKey ? ' class="active"' : ""}>${i.label}</a>`).join("")}</div>`;
+}
+
 // ---------------- Browse ----------------
 const SORT_OPTIONS = {
   newest: { label: "Newest", cmp: (a, b) => (b.__seq || 0) - (a.__seq || 0) },
-  price_asc: { label: "Price: low to high", cmp: (a, b) => a.price - b.price },
-  price_desc: { label: "Price: high to low", cmp: (a, b) => b.price - a.price },
-  exposure_desc: { label: "Most exposure", cmp: (a, b) => (b.estimatedEyesPerDay || 0) - (a.estimatedEyesPerDay || 0) },
+  price_asc: { label: "Price: low to high", cmp: (a, b) => (a.price > 0 ? a.price : Infinity) - (b.price > 0 ? b.price : Infinity) },
+  price_desc: { label: "Price: high to low", cmp: (a, b) => (b.price || 0) - (a.price || 0) },
 };
+// Every param that should survive a category-chip click or a filter submit.
+const FILTER_PARAM_KEYS = ["q", "where", "minPrice", "maxPrice", "sort", "view"];
 
-// Every filter/sort param that should survive a category-chip click or a
-// filter-form submit, carried forward as hidden fields / querystring so
-// browsing never silently drops an active filter.
-// "view" rides along with the filters so switching category (a plain link)
-// keeps you in map view instead of snapping back to the list.
-const FILTER_PARAM_KEYS = ["q", "country", "city", "minPrice", "maxPrice", "minArea", "minEyes", "sort", "view"];
+export function listingCard(l) {
+  const photo = coverPhoto(l);
+  return `<a class="card" href="/listing/${escapeHtml(l.id)}">
+      <div class="card-diagram">${photo ? `<img src="${escapeHtml(photo)}" alt="" loading="lazy" />` : `<span class="muted small">No photo</span>`}</div>
+      <div class="card-body">
+        <div class="card-price">${escapeHtml(priceLabel(l, { withNote: false }))}${l.priceNote && l.price > 0 ? ` <span class="muted card-price-note">${escapeHtml(l.priceNote)}</span>` : ""}</div>
+        <h3 class="card-title">${escapeHtml(l.title)}</h3>
+        <div class="muted small">${escapeHtml(categoryLabel(l.category))}${l.suburb ? ` · ${escapeHtml(l.suburb)}` : ""}</div>
+      </div>
+    </a>`;
+}
 
 export async function browsePage(req, res, query) {
   const user = await currentUser(req);
   const allListings = await db.getListings();
-  let listings = allListings;
-  // Distinct values across every live listing, for the country/city filter
-  // datalists — autocomplete that reflects what's actually listed, rather
-  // than a static country list that may not match any real inventory.
-  const knownCountries = [...new Set(allListings.map((l) => l.country).filter(Boolean))].sort();
-  const knownCities = [...new Set(allListings.map((l) => l.suburb).filter(Boolean))].sort();
-  const cat = query.get("category");
-  // Math.max(0, ...) clamps a negative/malformed querystring value to "not
-  // set" rather than letting it silently do nothing (a negative min is
-  // harmless as a filter, but nonsensical to show back in the form).
+  const cat = CATEGORIES.includes(query.get("category")) ? query.get("category") : null;
   const clampNonNegative = (n) => (Number.isFinite(n) && n >= 0 ? n : NaN);
   const minPrice = clampNonNegative(parseFloat(query.get("minPrice")));
   const maxPrice = clampNonNegative(parseFloat(query.get("maxPrice")));
-  const minArea = clampNonNegative(parseFloat(query.get("minArea"))); // buyer-facing unit: m²
-  const minEyes = clampNonNegative(parseInt(query.get("minEyes"), 10));
-  const countryFilter = (query.get("country") || "").toLowerCase();
-  const cityFilter = (query.get("city") || "").toLowerCase();
   const sortKey = SORT_OPTIONS[query.get("sort")] ? query.get("sort") : "newest";
   const mapView = query.get("view") === "map";
 
-  // Shared with the map data endpoint (lib/listingFilters.js) so the pins
-  // shown in map view are filtered exactly like the list/grid, instead of
-  // the map silently ignoring category/search/price filters.
-  listings = filterListings(listings, query);
-  listings = listings.slice().sort(SORT_OPTIONS[sortKey].cmp);
+  let listings = filterListings(allListings, query).slice().sort(SORT_OPTIONS[sortKey].cmp);
 
-  // Zero-results fallback: a search for a real but unlisted suburb used to
-  // just say "no spaces match" and leave the buyer stuck. If a location was
-  // actually searched (the City/Suburb filter, or the main search box),
-  // suggest the nearest suburbs that do have matching listings instead.
-  // "Matching" ignores only the location text — category/price/etc still
-  // apply, so the suggestions are still relevant, not just nearby noise.
-  const locationTerm = (query.get("city") || query.get("q") || "").trim();
-  let nearbySuggestions = [];
+  // Zero results for a place search: suggest the nearest suburbs that do
+  // have matching listings, instead of a dead end.
+  const locationTerm = (query.get("where") || query.get("q") || "").trim();
+  let nearby = [];
   if (listings.length === 0 && locationTerm) {
-    const noLocationParams = new URLSearchParams(query);
-    noLocationParams.delete("q");
-    noLocationParams.delete("city");
-    const candidates = filterListings(allListings, noLocationParams);
-    if (candidates.length) {
-      const target = await approximateCoords(locationTerm, query.get("country") || undefined);
+    const params = new URLSearchParams(query);
+    params.delete("q");
+    params.delete("where");
+    const candidates = filterListings(allListings, params);
+    const target = candidates.length ? await approximateCoords(locationTerm) : null;
+    if (target) {
       const bySuburb = new Map();
       for (const l of candidates) {
-        if (typeof l.lat !== "number" || typeof l.lng !== "number" || !l.suburb) continue;
+        if (l.lat == null || !l.suburb) continue;
         const key = l.suburb.toLowerCase();
-        if (key === locationTerm.toLowerCase()) continue;
-        const dist = distanceKm(target, { lat: l.lat, lng: l.lng });
+        const dist = distanceKm(target, { lat: Number(l.lat), lng: Number(l.lng) });
         const entry = bySuburb.get(key) || { suburb: l.suburb, dist: Infinity, count: 0 };
         entry.count += 1;
-        if (dist < entry.dist) entry.dist = dist;
+        entry.dist = Math.min(entry.dist, dist);
         bySuburb.set(key, entry);
       }
-      nearbySuggestions = [...bySuburb.values()].sort((a, b) => a.dist - b.dist).slice(0, 5);
+      nearby = [...bySuburb.values()].sort((a, b) => a.dist - b.dist).slice(0, 5);
     }
   }
-  // Same param set as withParams below, but also carries "category" (which
-  // withParams deliberately drops for the Clear-filters link) and swaps in
-  // the suggested suburb as the city filter, dropping the free-text search
-  // that came up empty.
-  function nearbySuburbHref(suburb) {
-    const params = new URLSearchParams();
-    for (const key of FILTER_PARAM_KEYS) {
-      if (key === "q") continue;
-      const val = query.get(key);
-      if (val) params.set(key, val);
-    }
-    if (cat && cat !== "all") params.set("category", cat);
-    params.set("city", suburb);
-    return `/?${params.toString()}`;
-  }
-  const noResultsHtml = nearbySuggestions.length
-    ? `<p class="muted">No spaces match "${escapeHtml(locationTerm)}". Try a nearby suburb instead:</p>
-       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-         ${nearbySuggestions
-           .map((s) => `<a href="${nearbySuburbHref(s.suburb)}" class="btn btn-outline btn-sm">${escapeHtml(s.suburb)} (${s.count})</a>`)
-           .join("")}
-       </div>`
-    : `<p class="muted">No spaces match that search.</p>`;
 
-  // Carries every active filter/sort param forward into a link's querystring
-  // (used by category chips) so switching category never resets a filter.
   function withParams(extra) {
     const params = new URLSearchParams();
-    for (const key of FILTER_PARAM_KEYS) {
-      const val = query.get(key);
-      if (val) params.set(key, val);
-    }
+    for (const key of FILTER_PARAM_KEYS) if (query.get(key)) params.set(key, query.get(key));
+    if (cat) params.set("category", cat);
     Object.entries(extra).forEach(([k, v]) => (v ? params.set(k, v) : params.delete(k)));
     const qs = params.toString();
     return qs ? `/?${qs}` : "/";
   }
 
-  const cards = listings
-    .map(
-      (l) => `
-      <a class="card" href="/listing/${l.id}">
-        <div class="card-diagram">
-          ${l.photos && l.photos.length ? `<img src="${escapeHtml(l.photos[0])}" alt="" />` : svgSpaceDiagram(l.sizeW, l.sizeH)}
-          ${
-            l.estimatedEyesPerDay
-              ? `<div class="eyes-pill">${l.estimatedEyesPerDay >= 1000 ? (l.estimatedEyesPerDay / 1000).toFixed(1) + "k" : l.estimatedEyesPerDay}/day</div>`
-              : ""
-          }
-        </div>
-        <div class="card-body">
-          <h3 style="font-size:15.5px;font-weight:600;letter-spacing:-0.005em">${escapeHtml(l.title)}</h3>
-          <div class="muted small" style="margin-bottom:8px">${escapeHtml(l.venue)} · ${escapeHtml(locationLine(l))}${l.subtype ? ` · ${escapeHtml(l.subtype)}` : ""}</div>
-          <div class="row-between">
-            <div class="mono" style="font-weight:700;font-size:14.5px">${money(l.price)}<span class="muted small" style="font-family:'Inter',sans-serif;font-weight:500"> /mo + GST</span></div>
-            <span class="small" style="color:var(--orange);font-weight:600">View space →</span>
-          </div>
-        </div>
-      </a>`
-    )
-    .join("");
+  const noResultsHtml = nearby.length
+    ? `<div class="panel empty-state"><p class="muted">No spaces match “${escapeHtml(locationTerm)}” yet. Nearby suburbs with spaces:</p>
+         <div class="chip-row">${nearby.map((s) => `<a href="${withParams({ q: "", where: s.suburb })}" class="chip-pill">${escapeHtml(s.suburb)} (${s.count})</a>`).join("")}</div></div>`
+    : allListings.length === 0
+    ? `<div class="panel empty-state"><h2>Be the first to list a space</h2><p class="muted">Got a wall, fence, window or screen people can see? List it free in a couple of minutes.</p><a href="/sell/welcome" class="btn btn-accent">List your space</a></div>`
+    : `<div class="panel empty-state"><p class="muted">No spaces match that search.</p><a href="/" class="btn btn-outline btn-sm">Clear search</a></div>`;
 
   const categoryChips = ["all", ...CATEGORIES]
     .map((c) => {
       const active = (cat || "all") === c;
-      return `<a href="${withParams({ category: c === "all" ? "" : c })}" class="chip-pill${active ? " is-active" : ""}">${c === "all" ? "All spaces" : CATEGORY_LABEL[c]}</a>`;
+      return `<a href="${withParams({ category: c === "all" ? "" : c })}" class="chip-pill${active ? " is-active" : ""}">${c === "all" ? "All spaces" : categoryLabel(c)}</a>`;
     })
-    .join(" ");
-
-  const sortOptionsHtml = Object.entries(SORT_OPTIONS)
-    .map(([key, opt]) => `<option value="${key}"${key === sortKey ? " selected" : ""}>${opt.label}</option>`)
     .join("");
 
-  const activeFilterCount = [minPrice, maxPrice, minArea, minEyes].filter(Number.isFinite).length + (countryFilter ? 1 : 0) + (cityFilter ? 1 : 0);
-
-  // Google Maps when a key is configured (see .env.example) — otherwise the
-  // free Leaflet/OpenStreetMap map, same as before. Either way the toggle
-  // and card layout behave identically; only the map engine differs.
-  const googleMapsKey = process.env.GOOGLE_MAPS_API_KEY;
+  const activeFilterCount = [minPrice, maxPrice].filter(Number.isFinite).length + (query.get("where") ? 1 : 0) + (sortKey !== "newest" ? 1 : 0);
+  const googleKey = browserMapsKey();
 
   const body = `
-    <div class="row-between" style="margin-bottom:28px;flex-wrap:wrap;gap:16px;padding-top:8px">
-      <h1 style="font-size:28px;font-weight:700;letter-spacing:-0.01em;margin:0">Browse spaces</h1>
-      ${user ? `<a href="/sell/new" class="btn btn-accent">List a space →</a>` : `<a href="/onboarding" class="btn btn-accent">Get started →</a>`}
-    </div>
+    <section class="hero-row">
+      <div>
+        <h1 class="hero-headline">Advertising space, direct from the owner.</h1>
+        <p class="hero-sub">${escapeHtml(SITE_TAGLINE)} Message the owner and deal directly — listing is free.</p>
+      </div>
+      <a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent btn-lg">List your space — free</a>
+    </section>
 
-    <div class="row-between" style="margin-bottom:22px;flex-wrap:wrap;gap:14px;padding-bottom:22px;border-bottom:1px solid var(--border)">
-      <form method="GET" action="/" class="field-pill" style="flex:1;min-width:240px;max-width:520px">
+    <div class="browse-toolbar">
+      <form method="GET" action="/" class="field-pill" role="search">
         ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
-        ${FILTER_PARAM_KEYS.filter((k) => k !== "q").map((k) => (query.get(k) ? `<input type="hidden" name="${k}" value="${escapeHtml(query.get(k))}" />` : "")).join("")}
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--steel)"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-        <input type="text" name="q" placeholder="Search suburb, venue, or space" value="${escapeHtml(query.get("q") || "")}" />
+        ${FILTER_PARAM_KEYS.filter((k) => k !== "q")
+          .map((k) => (query.get(k) ? `<input type="hidden" name="${k}" value="${escapeHtml(query.get(k))}" />` : ""))
+          .join("")}
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="search" name="q" aria-label="Search" placeholder="Search spaces, suburbs or keywords" value="${escapeHtml(query.get("q") || "")}" />
       </form>
-      <div style="display:flex;gap:10px;flex-wrap:wrap">
-        <button type="button" id="map-toggle-btn" class="btn-pill btn" style="padding:11px 20px">${mapView ? "📋 List view" : "🗺️ Map view"}</button>
+      <div class="toolbar-buttons">
+        <button type="button" id="map-toggle-btn" class="btn-pill btn">${mapView ? "List view" : "Map view"}</button>
         <details class="nav-dropdown" id="filters-details">
-          <summary class="btn-pill btn" style="padding:11px 20px;cursor:pointer;list-style:none">⚙️ Filters${activeFilterCount ? ` (${activeFilterCount})` : ""}</summary>
-        <form method="GET" action="/" class="nav-dropdown-menu filters-menu" style="padding:16px;min-width:260px;right:0;left:auto">
-          ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
-          ${query.get("q") ? `<input type="hidden" name="q" value="${escapeHtml(query.get("q"))}" />` : ""}
-          ${mapView ? `<input type="hidden" name="view" value="map" />` : ""}
-          <div class="form-row">
-            <div class="field" style="margin-bottom:10px"><label>Country</label><input list="filter-countries" name="country" value="${escapeHtml(query.get("country") || "")}" placeholder="Any" /></div>
-            <div class="field" style="margin-bottom:10px"><label>City / Suburb</label><input list="filter-cities" name="city" value="${escapeHtml(query.get("city") || "")}" placeholder="Any" /></div>
-          </div>
-          <datalist id="filter-countries">${knownCountries.map((c) => `<option value="${escapeHtml(c)}"></option>`).join("")}</datalist>
-          <datalist id="filter-cities">${knownCities.map((c) => `<option value="${escapeHtml(c)}"></option>`).join("")}</datalist>
-          <div class="form-row">
-            <div class="field" style="margin-bottom:10px"><label>Min price/mo</label><input type="number" name="minPrice" min="0" value="${Number.isFinite(minPrice) ? minPrice : ""}" placeholder="$0" /></div>
-            <div class="field" style="margin-bottom:10px"><label>Max price/mo</label><input type="number" name="maxPrice" min="0" value="${Number.isFinite(maxPrice) ? maxPrice : ""}" placeholder="Any" /></div>
-          </div>
-          <div class="field" style="margin-bottom:10px"><label>Min size (m²)</label><input type="number" step="0.1" min="0" name="minArea" value="${Number.isFinite(minArea) ? minArea : ""}" placeholder="Any" /></div>
-          <div class="field" style="margin-bottom:10px"><label>Min exposure (eyes/day)</label><input type="number" name="minEyes" min="0" value="${Number.isFinite(minEyes) ? minEyes : ""}" placeholder="Any" /></div>
-          <div class="field" style="margin-bottom:12px"><label>Sort by</label><select name="sort">${sortOptionsHtml}</select></div>
-          <div style="display:flex;gap:8px">
-            <button class="btn btn-primary btn-sm" type="submit" style="flex:1">Apply</button>
-            <a href="${withParams({ country: "", city: "", minPrice: "", maxPrice: "", minArea: "", minEyes: "", sort: "" })}" class="btn btn-outline btn-sm" data-filter-link>Clear</a>
-          </div>
-        </form>
+          <summary class="btn-pill btn">Filters${activeFilterCount ? ` (${activeFilterCount})` : ""}</summary>
+          <form method="GET" action="/" class="nav-dropdown-menu filters-menu">
+            ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
+            ${query.get("q") ? `<input type="hidden" name="q" value="${escapeHtml(query.get("q"))}" />` : ""}
+            ${mapView ? `<input type="hidden" name="view" value="map" />` : ""}
+            <div class="field"><label for="f-where">Suburb, state or postcode</label><input id="f-where" name="where" value="${escapeHtml(query.get("where") || "")}" placeholder="Any" /></div>
+            <div class="form-row">
+              <div class="field"><label for="f-min">Min price</label><input id="f-min" type="number" name="minPrice" min="0" value="${Number.isFinite(minPrice) ? minPrice : ""}" placeholder="$0" /></div>
+              <div class="field"><label for="f-max">Max price</label><input id="f-max" type="number" name="maxPrice" min="0" value="${Number.isFinite(maxPrice) ? maxPrice : ""}" placeholder="Any" /></div>
+            </div>
+            <div class="field"><label for="f-sort">Sort by</label><select id="f-sort" name="sort">${Object.entries(SORT_OPTIONS)
+              .map(([key, opt]) => `<option value="${key}"${key === sortKey ? " selected" : ""}>${opt.label}</option>`)
+              .join("")}</select></div>
+            <div class="small muted" style="margin-bottom:12px">Listings with “price on request” are always included.</div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-primary btn-sm" type="submit" style="flex:1">Apply</button>
+              <a href="${withParams({ where: "", minPrice: "", maxPrice: "", sort: "" })}" class="btn btn-outline btn-sm" data-filter-link>Clear</a>
+            </div>
+          </form>
         </details>
       </div>
     </div>
-    <div id="browse-map" style="display:${mapView ? "block" : "none"};height:420px;border-radius:var(--radius-lg);overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
-    <div class="row-between" style="margin-bottom:28px;flex-wrap:wrap;gap:10px">
-      <div id="category-chips" style="display:flex;flex-wrap:wrap;gap:8px">${categoryChips}</div>
-    </div>
-    <h2 style="font-size:22px;font-weight:700;letter-spacing:-0.01em;margin:0 0 24px">${listings.length} space${listings.length === 1 ? "" : "s"}${cat && cat !== "all" ? ` · ${escapeHtml(CATEGORY_LABEL[cat] || cat)}` : ""}</h2>
-    <div id="browse-results"${mapView ? ` style="display:none"` : ""}>${listings.length === 0 ? noResultsHtml : `<div class="grid">${cards}</div>`}</div>
-    <div id="browse-below-fold" style="margin-top:24px${mapView ? ";display:none" : ""}">${adUnitMarkup("ADSENSE_SLOT_BROWSE")}</div>
+    <div id="category-chips" class="chip-row">${categoryChips}</div>
+    <div id="browse-map" class="browse-map"${mapView ? "" : " hidden"}></div>
+    <h2 class="results-heading">${listings.length} space${listings.length === 1 ? "" : "s"}${cat ? ` · ${escapeHtml(categoryLabel(cat))}` : ""}</h2>
+    <div id="browse-results"${mapView ? " hidden" : ""}>${listings.length === 0 ? noResultsHtml : `<div class="grid">${listings.map(listingCard).join("")}</div>`}</div>
     <script>
-      (function () {
-        var btn = document.getElementById("map-toggle-btn");
-        var mapEl = document.getElementById("browse-map");
-        var resultsEl = document.getElementById("browse-results");
-        var belowFoldEl = document.getElementById("browse-below-fold");
-        var loaded = false;
-
-        // Mirrors the current mode into the URL (?view=map) without a reload,
-        // so category chips — which are plain links carrying the same param
-        // forward — come back in map view instead of snapping to the list.
-        function rememberView(isMap) {
-          if (!window.history || !window.history.replaceState) return;
-          var url = new URL(window.location.href);
-          if (isMap) url.searchParams.set("view", "map");
-          else url.searchParams.delete("view");
-          window.history.replaceState({}, "", url.toString());
-          syncFilterLinks(isMap);
-        }
-
-        // Category chips and the "Clear filters" link are plain <a href="/?...">
-        // tags rendered once at page load, so toggling map view client-side
-        // (no reload) left their href stuck on whatever "view" the page was
-        // rendered with — following one bounced you back to list view instead
-        // of staying in map view. Keep them in sync with the live toggle state.
-        function syncFilterLinks(isMap) {
-          var links = document.querySelectorAll('#category-chips a[href], [data-filter-link]');
-          links.forEach(function (a) {
-            var href = new URL(a.getAttribute("href"), window.location.href);
-            if (isMap) href.searchParams.set("view", "map");
-            else href.searchParams.delete("view");
-            a.setAttribute("href", href.pathname + href.search);
-          });
-        }
-
-        function showMap() {
-          mapEl.style.display = "block";
-          resultsEl.style.display = "none";
-          belowFoldEl.style.display = "none";
-          btn.textContent = "📋 List view";
-          rememberView(true);
-          if (!loaded) {
-            loaded = true;
-            window.FRONTAGE_MAP_TARGET = "browse-map";
-            ${
-              googleMapsKey
-                ? `var loaderScript = document.createElement("script");
-            loaderScript.src = "/google-map.js";
-            loaderScript.onload = function () {
-              var gScript = document.createElement("script");
-              gScript.src = "https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(googleMapsKey)}&callback=frontageInitGoogleMap";
-              gScript.async = true;
-              document.head.appendChild(gScript);
-            };
-            document.body.appendChild(loaderScript);`
-                : `var link = document.createElement("link");
-            link.rel = "stylesheet";
-            link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-            document.head.appendChild(link);
-            var leafletScript = document.createElement("script");
-            leafletScript.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-            leafletScript.onload = function () {
-              var mapScript = document.createElement("script");
-              mapScript.src = "/map.js";
-              document.body.appendChild(mapScript);
-            };
-            document.body.appendChild(leafletScript);`
-            }
-          } else if (window.__frontageMap) {
-            setTimeout(function () {
-              if (window.google && window.google.maps) {
-                google.maps.event.trigger(window.__frontageMap, "resize");
-              } else if (window.__frontageMap.invalidateSize) {
-                window.__frontageMap.invalidateSize();
-              }
-            }, 50);
-          }
-        }
-
-        function showList() {
-          mapEl.style.display = "none";
-          resultsEl.style.display = "";
-          belowFoldEl.style.display = "";
-          btn.textContent = "🗺️ Map view";
-          rememberView(false);
-        }
-
-        btn.addEventListener("click", function () {
-          if (mapEl.style.display !== "none") showList();
-          else showMap();
-        });
-
-        // Server rendered the page already in map view (?view=map) — kick the
-        // map engine off now rather than waiting for a click that won't come.
-        if (${mapView ? "true" : "false"}) showMap();
-      })();
+      window.FRONTAGE_MAP = ${JSON.stringify({ target: "browse-map", engine: googleKey ? "google" : "leaflet", key: googleKey || null, startInMap: mapView })};
     </script>
+    <script src="/browse.js" defer></script>
   `;
 
-  send(res, 200, await layout({ title: "Browse spaces", activeNav: "browse", user, body }));
+  send(
+    res,
+    200,
+    await layout({
+      title: cat ? `${categoryLabel(cat)} advertising space` : "Advertising space for rent",
+      activeNav: "browse",
+      user,
+      body,
+      canonicalPath: cat ? `/?category=${cat}` : "/",
+    })
+  );
 }
 
-// Full-screen photo viewer with prev/next — replaces the old
-// `<a target="_blank">` navigation, which some browsers/OSes treated as a
-// download prompt for images served from R2 instead of opening them.
-// Clicking a photo now only ever opens this in-page overlay.
-function lightboxMarkup(photos) {
-  // Raw JS source inside a <script> tag, not an HTML attribute — no
-  // HTML-escaping needed, just guard against a literal "</script>" if a
-  // photo URL ever contained one.
-  const photosJs = JSON.stringify(photos).replace(/</g, "\\u003c");
-  return `
-    <div id="frontage-lightbox" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:2000;align-items:center;justify-content:center;flex-direction:column">
-      <button type="button" onclick="frontageCloseLightbox()" aria-label="Close" style="position:absolute;top:16px;right:20px;background:none;border:none;color:#fff;font-size:30px;cursor:pointer;line-height:1;padding:6px">&times;</button>
-      <button type="button" onclick="frontagePrevPhoto()" aria-label="Previous photo" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:#fff;font-size:38px;cursor:pointer;padding:10px">&#8249;</button>
-      <img id="frontage-lightbox-img" src="" alt="" style="max-width:88vw;max-height:78vh;object-fit:contain;border-radius:6px" />
-      <button type="button" onclick="frontageNextPhoto()" aria-label="Next photo" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:#fff;font-size:38px;cursor:pointer;padding:10px">&#8250;</button>
-      <div id="frontage-lightbox-counter" class="small" style="color:#fff;margin-top:10px"></div>
-    </div>
-    <script>
-      (function () {
-        var photos = ${photosJs};
-        var idx = 0;
-        var overlay = document.getElementById("frontage-lightbox");
-        var imgEl = document.getElementById("frontage-lightbox-img");
-        var counterEl = document.getElementById("frontage-lightbox-counter");
-        function render() {
-          imgEl.src = photos[idx];
-          counterEl.textContent = (idx + 1) + " / " + photos.length;
-        }
-        window.frontageOpenLightbox = function (i) {
-          idx = i;
-          render();
-          overlay.style.display = "flex";
-        };
-        window.frontageCloseLightbox = function () {
-          overlay.style.display = "none";
-        };
-        window.frontagePrevPhoto = function () {
-          idx = (idx - 1 + photos.length) % photos.length;
-          render();
-        };
-        window.frontageNextPhoto = function () {
-          idx = (idx + 1) % photos.length;
-          render();
-        };
-        overlay.addEventListener("click", function (e) {
-          if (e.target === overlay) window.frontageCloseLightbox();
-        });
-        document.addEventListener("keydown", function (e) {
-          if (overlay.style.display === "none") return;
-          if (e.key === "Escape") window.frontageCloseLightbox();
-          if (e.key === "ArrowLeft") window.frontagePrevPhoto();
-          if (e.key === "ArrowRight") window.frontageNextPhoto();
-        });
-      })();
-    </script>
-  `;
-}
-
-// Country-code select + national-number input, combined into a single
-// "mobile" value (e.g. "+61 412 345 678") by the client script right
-// before submit — the server just receives one mobile field either way.
-function mobileFieldMarkup({ idPrefix = "mobile", value = "" } = {}) {
-  // A previously-entered mobile comes back as "+61 412345678" — split it so a
-  // failed submit repopulates both the dial-code select and the number.
-  const [priorDial, priorNumber] = (() => {
-    const trimmed = String(value || "").trim();
-    if (!trimmed) return ["", ""];
-    const spaceAt = trimmed.indexOf(" ");
-    return spaceAt === -1 ? ["", trimmed] : [trimmed.slice(0, spaceAt), trimmed.slice(spaceAt + 1)];
-  })();
-  const options = COUNTRIES.map(
-    (c) => `<option value="${c.dial}" data-min="${c.digits[0]}" data-max="${c.digits[1]}"${
-      priorDial ? (c.dial === priorDial ? " selected" : "") : c.iso === "AU" ? " selected" : ""
-    }>${escapeHtml(c.name)} (${c.dial})</option>`
-  ).join("");
-  return `<div class="field">
-    <label>Mobile</label>
-    <div style="display:flex;gap:8px">
-      <select id="${idPrefix}-dial" style="flex:0 0 168px">${options}</select>
-      <input type="tel" id="${idPrefix}-number" required inputmode="numeric" pattern="[0-9]*" placeholder="412 345 678" value="${escapeHtml(priorNumber)}" style="flex:1" />
-    </div>
-    <div class="hint" id="${idPrefix}-hint"></div>
-  </div>
-  <script>
-    (function () {
-      var sel = document.getElementById("${idPrefix}-dial");
-      var num = document.getElementById("${idPrefix}-number");
-      var hint = document.getElementById("${idPrefix}-hint");
-      var form = num.closest("form");
-      function update() {
-        var opt = sel.options[sel.selectedIndex];
-        num.setAttribute("maxlength", opt.getAttribute("data-max"));
-        var min = opt.getAttribute("data-min"), max = opt.getAttribute("data-max");
-        hint.textContent = (min === max ? min : min + "–" + max) + " digits, no spaces";
-      }
-      sel.addEventListener("change", update);
-      update();
-      if (form) {
-        form.addEventListener("submit", function () {
-          var hidden = document.createElement("input");
-          hidden.type = "hidden";
-          hidden.name = "mobile";
-          hidden.value = sel.value + " " + num.value;
-          form.appendChild(hidden);
-        });
-      }
-    })();
-  </script>`;
-}
-
-// Password + confirm-password pair with a live "do these match" hint. The
-// `pattern`/`title` mirror lib/auth.js's isStrongPassword() exactly so a
-// password the client accepts is never rejected as a surprise server-side.
-function passwordFieldsMarkup({ idPrefix = "pw", label = "Password" } = {}) {
-  return `
-    <div class="field">
-      <label>${escapeHtml(label)}</label>
-      <div class="pw-wrap">
-        <input type="password" name="password" id="${idPrefix}-password" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" placeholder="At least 10 characters" minlength="10" />
-        <button type="button" class="pw-toggle" id="${idPrefix}-reveal" aria-label="Show password">Show</button>
-      </div>
-    </div>
-    <div class="small muted" style="margin-top:-8px;margin-bottom:14px">${escapeHtml(PASSWORD_HINT)}</div>
-    <div class="field">
-      <label>Confirm ${escapeHtml(label.toLowerCase())}</label>
-      <div class="pw-wrap">
-        <input type="password" name="confirmPassword" id="${idPrefix}-confirm" required />
-        <button type="button" class="pw-toggle" id="${idPrefix}-confirm-reveal" aria-label="Show password">Show</button>
-      </div>
-    </div>
-    <div class="small" id="${idPrefix}-match-hint" style="margin-top:-8px;margin-bottom:14px"></div>
-    <script>
-      (function () {
-        var pw = document.getElementById("${idPrefix}-password");
-        var cf = document.getElementById("${idPrefix}-confirm");
-        var hint = document.getElementById("${idPrefix}-match-hint");
-        function check() {
-          if (!cf.value) { hint.textContent = ""; return; }
-          if (pw.value === cf.value) { hint.textContent = "✓ Passwords match"; hint.style.color = "var(--green)"; }
-          else { hint.textContent = "Passwords do not match"; hint.style.color = "var(--red)"; }
-        }
-        pw.addEventListener("input", check);
-        cf.addEventListener("input", check);
-
-        function wireReveal(btnId, input) {
-          var btn = document.getElementById(btnId);
-          if (!btn) return;
-          btn.addEventListener("click", function () {
-            var showing = input.type === "text";
-            input.type = showing ? "password" : "text";
-            btn.textContent = showing ? "Show" : "Hide";
-            btn.setAttribute("aria-label", showing ? "Show password" : "Hide password");
-          });
-        }
-        wireReveal("${idPrefix}-reveal", pw);
-        wireReveal("${idPrefix}-confirm-reveal", cf);
-      })();
-    </script>`;
+// JSON for the browse map. Coordinates are the public (possibly
+// approximate) ones — the exact pin never leaves the server unless the
+// seller chose to show it.
+export async function listingsMapJson(req, res, query) {
+  const listings = filterListings(await db.getListings(), query)
+    .map((l) => {
+      const c = publicCoords(l);
+      if (!c) return null;
+      return { id: l.id, title: l.title, price: priceLabel(l, { withNote: false }), suburb: l.suburb || "", category: categoryLabel(l.category), photo: coverPhoto(l), lat: c.lat, lng: c.lng, exact: c.exact };
+    })
+    .filter(Boolean);
+  res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  res.end(JSON.stringify({ listings }));
 }
 
 // ---------------- Listing detail ----------------
+function lightboxMarkup(photos) {
+  const photosJs = JSON.stringify(photos).replace(/</g, "\\u003c");
+  return `
+    <div id="frontage-lightbox" class="lightbox" hidden>
+      <button type="button" class="lightbox-close" data-lb="close" aria-label="Close">&times;</button>
+      <button type="button" class="lightbox-prev" data-lb="prev" aria-label="Previous photo">&#8249;</button>
+      <img id="frontage-lightbox-img" src="" alt="" />
+      <button type="button" class="lightbox-next" data-lb="next" aria-label="Next photo">&#8250;</button>
+      <div id="frontage-lightbox-counter" class="lightbox-counter"></div>
+    </div>
+    <script>window.FRONTAGE_PHOTOS = ${photosJs};</script>`;
+}
+
 export async function listingDetailPage(req, res, id) {
   const user = await currentUser(req);
-  const listing = await db.getListingById(id);
-  if (!listing || listing.status !== "live") return send(res, 404, await layout({ title: "Not found", user, body: "<p>Listing not found.</p>" }));
+  const listing = await db.getPublicListing(id);
+  // The owner (and moderators) can still see their own non-live listing.
+  if (!listing) {
+    const raw = await db.getListingById(id);
+    const canSee = raw && user && (raw.ownerId === user.id || hasPermission(user, "canAccessSupport")) && raw.status !== "deleted";
+    if (!canSee) return notFoundPage(req, res, "This listing doesn't exist or is no longer available.");
+    return renderListing(req, res, user, raw);
+  }
+  return renderListing(req, res, user, listing);
+}
+
+async function renderListing(req, res, user, listing) {
   const owner = await db.getUserById(listing.ownerId);
-  if (!user || user.id !== listing.ownerId) await db.incrementListingView(listing.id);
+  const isOwner = Boolean(user && user.id === listing.ownerId);
+  const isLive = listing.status === "live";
+  if (!isOwner && isLive) await db.incrementListingView(listing.id);
 
   const photos = listing.photos || [];
-  const isOwner = Boolean(user && user.id === listing.ownerId);
-  // Real audience data (Phase 1's site-spec fields) in place of the old
-  // free-text "footfall" column, which was never actually collected
-  // anywhere in the UI and only ever showed its seed default ("New
-  // listing") — a placeholder masquerading as a stat. Omitted entirely
-  // when the owner hasn't supplied anything, rather than showing a
-  // meaningless value just to fill a third column.
-  const audienceUnit = listing.audienceType === "vehicle" ? "vehicles" : listing.audienceType === "pedestrian" ? "people" : "people/vehicles";
-  const audienceLine = listing.dailyTrafficCount
-    ? `~${Number(listing.dailyTrafficCount).toLocaleString("en-AU")} ${audienceUnit}/day (owner-supplied)`
-    : listing.audienceType
-    ? AUDIENCE_TYPE_LABEL[listing.audienceType]
-    : null;
-  const thumbStrip =
-    photos.length > 1
-      ? `<div style="display:flex;gap:6px;margin-top:6px">${photos
-          .slice(1)
-          .map(
-            (p, i) =>
-              `<button type="button" onclick="frontageOpenLightbox(${i + 1})" style="padding:0;border:1px solid var(--border);border-radius:6px;cursor:zoom-in;background:none"><img src="${escapeHtml(p)}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:5px;display:block" /></button>`
-          )
-          .join("")}</div>`
-      : "";
+  const existingConversation = user && !isOwner ? await db.getConversationFor(listing.id, user.id) : null;
+  const size = sizeLabel(listing);
+  const locationLine = publicLocationLine(listing);
+  const embed = mapsEmbedUrl(listing);
+  const coords = publicCoords(listing);
+  const nextPath = `/listing/${listing.id}`;
+  const sendError = new URL(req.url, "http://localhost").searchParams.get("err");
 
-  const body = `
-    <a href="/" class="small muted">← Back to browse</a>
-    <div class="two-col" style="margin-top:14px;align-items:start">
-      <div>
-        <div class="panel" style="padding:0;overflow:hidden">
-          <div class="card-diagram" style="height:280px;background:var(--concrete)">${
-            photos.length
-              ? `<button type="button" onclick="frontageOpenLightbox(0)" title="View full photo" style="width:100%;height:100%;padding:0;border:none;background:none;cursor:zoom-in"><img src="${escapeHtml(photos[0])}" alt="" style="width:100%;height:100%;object-fit:contain" /></button>`
-              : svgSpaceDiagram(listing.sizeW, listing.sizeH, { big: true })
-          }</div>
-        </div>
-        ${photos.length ? `<div class="small muted" style="margin-top:6px">Click the photo to view it full size.</div>` : ""}
-        ${thumbStrip}
-        ${photos.length ? lightboxMarkup(photos) : ""}
-      </div>
-      <div>
-        ${listing.estimatedEyesPerDay ? `<div style="margin-bottom:8px">${svgEyesGauge(listing.estimatedEyesPerDay, { big: true })}</div>` : ""}
-        <h1 style="font-size:26px">${escapeHtml(listing.title)}</h1>
-        <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(locationLine(listing))}${listing.subtype ? ` · ${escapeHtml(listing.subtype)}` : ""}</div>
-        <p style="margin-bottom:18px">${escapeHtml(listing.desc)}</p>
-        <div style="font-size:15px;font-weight:600;margin-bottom:6px">
-          ${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)} <span class="muted" style="font-weight:400">·</span> ${money(listing.price)}/mo <span class="muted" style="font-weight:400">excl. GST</span>${audienceLine ? ` <span class="muted" style="font-weight:400">·</span> ${escapeHtml(audienceLine)}` : ""}
-        </div>
-        <details class="small muted" style="margin-bottom:18px">
-          <summary style="cursor:pointer;color:var(--orange);font-weight:600">What do these numbers mean?</summary>
-          <div style="margin-top:8px;line-height:1.6">
-            <strong>Lease rate</strong> is the monthly rent paid to the space owner, shown excluding GST — GST is added at checkout. Installing and removing your ad is quoted separately by the contractor before you commit; it is not included in this rate.<br/>
-            ${
-              audienceLine
-                ? `<strong>Audience</strong> is the space owner's own declaration, not independently verified by Frontage.<br/>`
-                : ""
-            }
-            ${
-              listing.estimatedEyesPerDay
-                ? `<strong>Eyes/day</strong> (${listing.estimatedEyesPerDay.toLocaleString("en-AU")}) is Frontage's estimate of how many people pass the space each day, based on its category and size. It's a planning guide, not an audited impressions count.`
-                : ""
-            }
-          </div>
-        </details>
+  const gallery = photos.length
+    ? `<div class="gallery">
+        <button type="button" class="gallery-main" data-photo="0" aria-label="View photo 1 of ${photos.length} full size"><img src="${escapeHtml(photos[0])}" alt="${escapeHtml(listing.title)}" /></button>
         ${
-          listing.lat != null && listing.lng != null
-            ? `<div id="listing-mini-map" style="height:170px;border-radius:10px;overflow:hidden;border:1px solid var(--border);margin-bottom:18px"></div>
-               <script>window.FRONTAGE_SINGLE_LISTING = { lat: ${listing.lat}, lng: ${listing.lng}, title: ${JSON.stringify(listing.title)} };</script>
-               <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-               <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-               <script src="/listing-map.js"></script>`
+          photos.length > 1
+            ? `<div class="gallery-thumbs">${photos
+                .map((p, i) => `<button type="button" data-photo="${i}" aria-label="View photo ${i + 1}"><img src="${escapeHtml(p)}" alt="" loading="lazy" /></button>`)
+                .join("")}</div>`
             : ""
         }
+      </div>${lightboxMarkup(photos)}`
+    : `<div class="gallery"><div class="gallery-main gallery-empty muted">No photos yet</div></div>`;
+
+  const video = listing.youtubeId
+    ? `<section class="detail-section">
+        <h2>Video</h2>
+        <div class="yt-facade" data-embed="${escapeHtml(youTubeEmbedUrl(listing.youtubeId))}">
+          <button type="button" class="yt-play" aria-label="Play video">
+            <img src="${escapeHtml(youTubeThumbnail(listing.youtubeId))}" alt="" loading="lazy" />
+            <span class="yt-play-icon" aria-hidden="true">▶</span>
+          </button>
+        </div>
+        <div class="small muted" style="margin-top:6px">Plays from YouTube. <a href="${escapeHtml(youTubeWatchUrl(listing.youtubeId))}" target="_blank" rel="noopener" class="link">Open on YouTube</a></div>
+      </section>`
+    : "";
+
+  const map = embed
+    ? `<iframe class="detail-map" title="Map showing ${listing.showExactLocation ? "the location" : "the approximate area"} of this space" src="${escapeHtml(embed)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe>`
+    : coords
+    ? `<div id="listing-mini-map" class="detail-map"></div>
+       <script>window.FRONTAGE_SINGLE_LISTING = ${JSON.stringify({ lat: coords.lat, lng: coords.lng, exact: coords.exact })};</script>
+       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+       <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+       <script src="/listing-map.js" defer></script>`
+    : "";
+
+  let actionBox;
+  if (isOwner) {
+    actionBox = `<div class="notice notice-blue">This is your listing${isLive ? "" : ` — <strong>${listing.status === "removed" ? "removed by moderators" : escapeHtml(listing.status)}</strong>`}.</div>
+      <a href="/sell/edit/${escapeHtml(listing.id)}" class="btn btn-primary btn-block">Edit listing</a>
+      <a href="/account/messages" class="btn btn-outline btn-block" style="margin-top:10px">View messages</a>
+      <div class="small muted" style="margin-top:10px">${listing.viewCount || 0} view${listing.viewCount === 1 ? "" : "s"} from other people.</div>`;
+  } else if (!isLive) {
+    actionBox = `<div class="notice notice-orange">This listing isn't live, so it can't be messaged.</div>`;
+  } else if (!user) {
+    actionBox = `<a href="/onboarding?next=${encodeURIComponent(nextPath)}" class="btn btn-accent btn-block btn-lg" id="message-seller">Message seller</a>
+      <div class="small muted" style="text-align:center;margin-top:8px">Free account needed so the seller's reply reaches you.</div>`;
+  } else {
+    actionBox = `${existingConversation && existingConversation.lastMessageAt ? `<a href="/messages/${escapeHtml(existingConversation.id)}" class="btn btn-outline btn-block" style="margin-bottom:12px">View your conversation →</a>` : ""}
+      <form method="POST" action="/api/listings/${escapeHtml(listing.id)}/messages" class="composer" id="message-seller" data-single-submit>
+        <label for="first-message" class="composer-label">${existingConversation && existingConversation.lastMessageAt ? "Send another message" : "Send the seller a message"}</label>
+        <textarea id="first-message" name="body" rows="3" maxlength="2000" required>${existingConversation && existingConversation.lastMessageAt ? "" : "Hi, is this space still available?"}</textarea>
+        <button class="btn btn-accent btn-block" type="submit">Send</button>
+      </form>`;
+  }
+
+  const body = `
+    <a href="/" class="small muted back-link">← Back to browse</a>
+    <div class="detail-layout">
+      <div class="detail-main">
+        ${gallery}
+        <section class="detail-section">
+          <h2>About this space</h2>
+          <p class="prewrap">${escapeHtml(listing.description)}</p>
+        </section>
+        <section class="detail-section">
+          <h2>Details</h2>
+          <dl class="detail-facts">
+            <div><dt>Type of space</dt><dd>${escapeHtml(categoryLabel(listing.category))}</dd></div>
+            ${size ? `<div><dt>Size</dt><dd>${escapeHtml(size)}</dd></div>` : ""}
+            <div><dt>Price</dt><dd>${escapeHtml(priceLabel(listing))}</dd></div>
+            <div><dt>Location</dt><dd>${escapeHtml(locationLine)}${listing.showExactLocation ? "" : ` <span class="muted small">(approximate)</span>`}</dd></div>
+            <div><dt>Listed</dt><dd>${escapeHtml(formatDate(listing.createdAt))}</dd></div>
+            <div><dt>Listing ID</dt><dd class="mono">${escapeHtml(listing.id)}</dd></div>
+          </dl>
+        </section>
+        ${video}
+        ${map ? `<section class="detail-section"><h2>Location</h2>${map}<div class="small muted" style="margin-top:6px">${listing.showExactLocation ? escapeHtml(locationLine) : `Approximate area — the seller shares the exact spot when you message them.`}</div></section>` : ""}
+      </div>
+      <aside class="detail-side">
+        <div class="side-card">
+          <h1 class="detail-title">${escapeHtml(listing.title)}</h1>
+          <div class="detail-price">${escapeHtml(priceLabel(listing, { withNote: false }))}${listing.priceNote && listing.price > 0 ? ` <span class="muted detail-price-note">${escapeHtml(listing.priceNote)}</span>` : ""}</div>
+          ${!(listing.price > 0) && listing.priceNote ? `<div class="muted small">${escapeHtml(listing.priceNote)}</div>` : ""}
+          <div class="muted small" style="margin:6px 0 16px">${escapeHtml(categoryLabel(listing.category))} · ${escapeHtml(listing.suburb || locationLine)} · ${escapeHtml(listedAgo(listing.createdAt))}</div>
+          ${notice(sendError, "orange")}
+          ${actionBox}
+        </div>
         ${
           owner
-            ? `<div class="panel" style="margin-bottom:18px;display:flex;gap:12px;align-items:center">
-                 <div style="width:44px;height:44px;border-radius:50%;background:var(--concrete);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--ink);flex-shrink:0">${escapeHtml(
-                   (owner.businessName || owner.fullName || "?").charAt(0).toUpperCase()
-                 )}</div>
-                 <div style="flex:1;min-width:0">
-                   <div style="font-weight:700">${escapeHtml(owner.businessName || owner.fullName)}</div>
-                   <div class="small muted">Listed by ${escapeHtml(owner.fullName)}</div>
-                   ${owner.googleBusinessUrl ? `<a href="${escapeHtml(owner.googleBusinessUrl)}" target="_blank" rel="noopener" class="small" style="color:var(--blue)">View on Google →</a>` : ""}
+            ? `<div class="side-card seller-card">
+                 <div class="avatar" aria-hidden="true">${escapeHtml((owner.businessName || owner.fullName || "?").charAt(0).toUpperCase())}</div>
+                 <div style="min-width:0">
+                   <div style="font-weight:700">${escapeHtml(owner.businessName || String(owner.fullName).split(" ")[0])}</div>
+                   <div class="small muted">Seller · on Frontage since ${escapeHtml(new Date(owner.createdAt).toLocaleDateString("en-AU", { month: "short", year: "numeric" }))}</div>
+                   ${owner.googleBusinessUrl ? `<a href="${escapeHtml(owner.googleBusinessUrl)}" target="_blank" rel="noopener nofollow" class="small link">Google Business profile →</a>` : ""}
                  </div>
                </div>`
             : ""
         }
-        <div style="margin-bottom:18px">${adUnitMarkup("ADSENSE_SLOT_LISTING")}</div>
-        ${
-          isOwner
-            ? `<div class="badge badge-blue" style="margin-bottom:12px;display:block;padding:10px">This is your listing.</div>
-               <a href="/sell/insights/${listing.id}" class="btn btn-primary btn-block">View insights</a>
-               <a href="/seller/inquiries" class="btn btn-outline btn-block" style="margin-top:10px">Buyer inquiries</a>`
-            : `<a href="/book/${listing.id}" class="btn btn-primary btn-block">Book this space</a>
-               <form method="POST" action="/api/cart" style="margin-top:10px">
-                 <input type="hidden" name="listingId" value="${listing.id}" />
-                 <input type="hidden" name="term" value="12" />
-                 <button class="btn btn-outline btn-block" type="submit">+ Add to media plan</button>
-               </form>
-               <a href="/listing/${listing.id}/chat" class="btn btn-outline btn-block" style="margin-top:10px">Ask the seller a question</a>
-               ${user ? "" : `<div class="small muted" style="text-align:center;margin-top:8px">You'll need an account to message — it's how the seller's reply reaches you.</div>`}`
-        }
-      </div>
+        <div class="side-card safety-card">
+          <strong class="small">Stay safe</strong>
+          <p class="small muted">Frontage never handles payments. See the space before you pay, and never pay by gift card or crypto. <a href="/safety" class="link">Safety tips</a></p>
+        </div>
+        ${!isOwner ? `<div class="small" style="text-align:center"><a href="/listing/${escapeHtml(listing.id)}/report" class="muted link-quiet">Report this listing</a></div>` : ""}
+      </aside>
     </div>
+    ${isLive && !isOwner ? `<div class="mobile-cta"><a href="#message-seller" class="btn btn-accent btn-block">Message seller</a></div>` : ""}
+    ${trackOnLoad("view_listing", { listing_id: listing.id, category: listing.category })}
+    <script src="/listing.js" defer></script>
   `;
-  send(res, 200, await layout({ title: listing.title, activeNav: "browse", user, body }));
+
+  const description = `${priceLabel(listing)} · ${categoryLabel(listing.category)} in ${listing.suburb || "Australia"}. ${String(listing.description || "").slice(0, 150)}`;
+  send(
+    res,
+    200,
+    await layout({
+      title: listing.title,
+      activeNav: "browse",
+      user,
+      body,
+      description,
+      ogImage: coverPhoto(listing) || undefined,
+      canonicalPath: `/listing/${listing.id}`,
+      noindex: !isLive,
+    })
+  );
 }
 
-// ---------------- Listing inquiry chat ----------------
-export async function listingChatPage(req, res, listingId, query) {
-  const user = await requireUser(req, res, `/listing/${listingId}/chat`);
-  if (!user) return;
-  const listing = await db.getListingById(listingId);
-  if (!listing) return send(res, 404, await layout({ title: "Not found", user, body: "<p>Listing not found.</p>" }));
+// ---------------- Report a listing ----------------
+export const REPORT_REASONS = [
+  ["scam", "Scam or fraud"],
+  ["not_owner", "They don't control this space"],
+  ["misleading", "Misleading or inaccurate"],
+  ["prohibited", "Prohibited or offensive content"],
+  ["not_ad_space", "Not advertising space"],
+  ["spam", "Spam or duplicate"],
+  ["harassment", "Harassment or abuse"],
+  ["other", "Something else"],
+];
 
-  const isOwner = listing.ownerId === user.id;
-  let buyerId;
-  if (isOwner) {
-    buyerId = query.get("buyer");
-    if (!buyerId) return redirect(res, "/seller/inquiries");
-  } else {
-    buyerId = user.id;
+export async function reportListingPage(req, res, id, query) {
+  const user = await requireUser(req, res, `/listing/${id}/report`);
+  if (!user) return;
+  const listing = await db.getPublicListing(id);
+  if (!listing) return notFoundPage(req, res);
+  const body = reportFormMarkup({
+    heading: "Report this listing",
+    subject: listing.title,
+    action: "/api/reports",
+    hidden: { targetType: "listing", listingId: listing.id },
+    backHref: `/listing/${listing.id}`,
+    sent: query.get("sent"),
+  });
+  send(res, 200, await layout({ title: "Report listing", user, body, noindex: true }));
+}
+
+export function reportFormMarkup({ heading, subject, action, hidden, backHref, sent }) {
+  if (sent) {
+    return `<div class="form-card narrow-card"><h1>Thanks — we've got your report</h1><p class="muted">Our team reviews every report. We may not be able to tell you what action we took, for the other person's privacy.</p><a class="btn btn-primary" href="${escapeHtml(backHref)}">Back</a></div>`;
   }
-  const threadId = `${listing.id}:${buyerId}`;
-  const messages = await db.getMessagesForThread("listing", threadId);
-  const buyer = await db.getUserById(buyerId);
+  return `<div class="form-card narrow-card">
+    <a href="${escapeHtml(backHref)}" class="small muted">← Back</a>
+    <h1 style="margin-top:8px">${escapeHtml(heading)}</h1>
+    <p class="muted small">“${escapeHtml(subject)}”. Reports are confidential — the other person isn't told who reported them.</p>
+    <form method="POST" action="${escapeHtml(action)}" data-single-submit>
+      ${Object.entries(hidden)
+        .map(([k, v]) => `<input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}" />`)
+        .join("")}
+      <fieldset class="field radio-list"><legend>What's wrong?</legend>
+        ${REPORT_REASONS.map(([v, l], i) => `<label><input type="radio" name="reason" value="${v}"${i === 0 ? " required" : ""} /> ${escapeHtml(l)}</label>`).join("")}
+      </fieldset>
+      <div class="field"><label for="report-details">Anything else we should know? (optional)</label><textarea id="report-details" name="details" rows="4" maxlength="2000"></textarea></div>
+      <button class="btn btn-primary btn-block" type="submit">Send report</button>
+    </form>
+  </div>`;
+}
 
-  const body = `
-    <a href="${isOwner ? "/seller/inquiries" : `/listing/${listing.id}`}" class="small muted">← Back</a>
-    <h1 style="font-size:20px;margin:10px 0 4px">${escapeHtml(listing.title)}</h1>
-    <div class="small muted" style="margin-bottom:16px">${isOwner ? `Conversation with ${escapeHtml(buyer ? buyer.fullName : buyerId)}` : `Conversation with the seller`}</div>
-    <div class="panel">
-      <div class="chat-thread" data-poll-url="/api/listings/${listing.id}/messages?buyer=${encodeURIComponent(buyerId)}" data-current-user="${escapeHtml(user.id)}">
-        ${await renderChatBubbles(messages, user.id)}
+// ---------------- Auth pages ----------------
+function passwordFieldsMarkup({ idPrefix = "pw", name = "password", label = "Password" } = {}) {
+  return `
+    <div class="field">
+      <label for="${idPrefix}-password">${escapeHtml(label)}</label>
+      <div class="pw-wrap">
+        <input type="password" name="${name}" id="${idPrefix}-password" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" minlength="10" autocomplete="new-password" />
+        <button type="button" class="pw-toggle" data-reveal="${idPrefix}-password" aria-label="Show password">Show</button>
       </div>
-      ${
-        !isOwner && messages.length === 0
-          ? `<div style="margin-top:12px">
-               <div class="small muted" style="margin-bottom:8px">Not sure what to ask? Tap one to start:</div>
-               <div style="display:flex;flex-wrap:wrap;gap:8px">
-                 ${[
-                   "Is this space still available?",
-                   "Can I see more photos of the wall?",
-                   "What condition is the surface in?",
-                   "Are there any restrictions on what I can advertise?",
-                   "When could installation happen?",
-                 ]
-                   .map((q) => `<button type="button" class="btn btn-outline btn-sm starter-q">${escapeHtml(q)}</button>`)
-                   .join("")}
-               </div>
-             </div>`
-          : ""
-      }
-      <form method="POST" action="/api/listings/${listing.id}/messages" class="chat-form" style="margin-top:10px">
-        <input type="hidden" name="buyerId" value="${escapeHtml(buyerId)}" />
-        <input name="body" id="chat-body" placeholder="Ask a question..." required />
-        <button class="btn btn-primary btn-sm" type="submit">Send</button>
-      </form>
+      <div class="hint">${escapeHtml(PASSWORD_HINT)}</div>
     </div>
-    <script>
-      (function () {
-        var input = document.getElementById('chat-body');
-        [].forEach.call(document.querySelectorAll('.starter-q'), function (b) {
-          b.addEventListener('click', function () {
-            input.value = b.textContent;
-            input.focus();
-          });
-        });
-      })();
-    </script>
-  `;
-  send(res, 200, await layout({ title: "Messages", activeNav: isOwner ? "seller-inquiries" : "browse", user, body }));
-}
-
-export async function sellerInquiriesPage(req, res) {
-  const user = await requireUser(req, res, "/seller/inquiries");
-  if (!user) return;
-  const threads = await db.getListingThreadsForSeller(user.id);
-  const rows = (
-    await Promise.all(
-      threads.map(async (t) => {
-        const listing = await db.getListingById(t.listingId);
-        const buyer = await db.getUserById(t.buyerId);
-        return `<a class="job-row" href="/listing/${t.listingId}/chat?buyer=${encodeURIComponent(t.buyerId)}" style="display:block">
-        <div class="row-between">
-          <div><strong>${escapeHtml(listing ? listing.title : t.listingId)}</strong><div class="small muted">${escapeHtml(buyer ? buyer.fullName : t.buyerId)}</div></div>
-          <div class="small muted">${formatDate(t.lastAt)}</div>
-        </div>
-        <div class="small muted" style="margin-top:6px">${escapeHtml(t.lastMessage)}</div>
-      </a>`;
-      })
-    )
-  ).join("");
-  const body = `<h1 style="font-size:22px;margin-bottom:16px">Buyer inquiries</h1>${threads.length === 0 ? `<div class="panel"><p class="muted">No messages yet — questions buyers ask from a listing page will show up here.</p></div>` : `<div class="job-list">${rows}</div>`}`;
-  send(res, 200, await layout({ title: "Buyer inquiries", activeNav: "seller-inquiries", user, body }));
-}
-
-// ---------------- Unified messages inbox ----------------
-export async function messagesInboxPage(req, res) {
-  const user = await requireUser(req, res, "/account/messages");
-  if (!user) return;
-
-  await db.markMessagesSeen(user.id);
-
-  const buyerThreads = (await db.getListingThreadsForBuyer(user.id)).map((t) => ({ ...t, perspective: "buyer" }));
-  const sellerThreads = (await db.getListingThreadsForSeller(user.id)).map((t) => ({ ...t, perspective: "seller" }));
-  const listingThreads = [...buyerThreads, ...sellerThreads].sort((a, b) => new Date(b.lastAt) - new Date(a.lastAt));
-
-  const listingRows = (
-    await Promise.all(
-      listingThreads.map(async (t) => {
-        const listing = await db.getListingById(t.listingId);
-        const other = t.perspective === "buyer" ? await db.getUserById(listing ? listing.ownerId : null) : await db.getUserById(t.buyerId);
-        const href = t.perspective === "buyer" ? `/listing/${t.listingId}/chat` : `/listing/${t.listingId}/chat?buyer=${encodeURIComponent(t.buyerId)}`;
-        return `<a class="job-row" href="${href}" style="display:block">
-        <div class="row-between">
-          <div><strong>${escapeHtml(listing ? listing.title : t.listingId)}</strong><div class="small muted">${t.perspective === "buyer" ? "You asked" : "Buyer inquiry"} · ${escapeHtml(other ? other.fullName : "—")}</div></div>
-          <div class="small muted">${formatDate(t.lastAt)}</div>
-        </div>
-        <div class="small muted" style="margin-top:6px">${escapeHtml(t.lastMessage)}</div>
-      </a>`;
-      })
-    )
-  ).join("");
-
-  const jobThreads = await db.getJobThreadsForUser(user.id);
-  const jobRows = (
-    await Promise.all(
-      jobThreads.map(async (t) => {
-        const listing = await db.getListingById(t.listingId);
-        return `<a class="job-row" href="/job/${t.jobOrderId}/chat" style="display:block">
-        <div class="row-between">
-          <div><strong>${escapeHtml(listing ? listing.title : t.listingId)}</strong><div class="small muted">Job ${t.jobOrderId} · as ${t.role}</div></div>
-          <div class="small muted">${formatDate(t.lastAt)}</div>
-        </div>
-        <div class="small muted" style="margin-top:6px">${t.lastMessage ? escapeHtml(t.lastMessage) : "No messages yet"}</div>
-      </a>`;
-      })
-    )
-  ).join("");
-
-  const body = `
-    <h1 style="font-size:22px;margin-bottom:16px">Messages</h1>
-    <h2 style="font-size:15px;margin-bottom:10px">Listing enquiries</h2>
-    ${listingThreads.length === 0 ? `<div class="panel" style="margin-bottom:24px"><p class="muted">No listing conversations yet.</p></div>` : `<div class="job-list" style="margin-bottom:24px">${listingRows}</div>`}
-    <h2 style="font-size:15px;margin-bottom:10px">Job order chats</h2>
-    ${jobThreads.length === 0 ? `<div class="panel"><p class="muted">No job order chats yet.</p></div>` : `<div class="job-list">${jobRows}</div>`}
-  `;
-  send(res, 200, await layout({ title: "Messages", activeNav: "account-messages", user, body }));
-}
-
-export async function jobChatPage(req, res, id) {
-  const job = await db.getJobOrderById(id);
-  const user = await currentUser(req);
-  const contractor = await currentContractor(req);
-  const asSeller = Boolean(job && user && job.sellerId === user.id);
-  const asContractor = Boolean(job && contractor && job.contractorId === contractor.id);
-
-  if (!user && !contractor) return redirect(res, `/onboarding?next=${encodeURIComponent(`/job/${id}/chat`)}`);
-  if (!job || (!asSeller && !asContractor)) {
-    // Not this job's seller or contractor — show a 404 in whichever portal
-    // they're actually logged into, without leaking whether the job exists.
-    return user
-      ? send(res, 404, await layout({ title: "Not found", user, body: "<p>Job order not found.</p>" }))
-      : send(res, 404, await contractorLayout({ title: "Not found", contractor, body: "<p>Job order not found.</p>" }));
-  }
-
-  const person = asSeller ? user : contractor;
-  const listing = await db.getListingById(job.listingId);
-  const messages = await db.getMessagesForThread("job", job.id);
-  const backHref = asSeller ? "/account/messages" : "/contractor/messages";
-  const renderLayout = asSeller ? layout : contractorLayout;
-  const identityKey = asSeller ? "user" : "contractor";
-
-  const body = `
-    <a href="${backHref}" class="small muted">← Back to messages</a>
-    <h1 style="font-size:20px;margin:10px 0 4px">${escapeHtml(listing ? listing.title : job.listingId)}</h1>
-    <div class="small muted" style="margin-bottom:16px">Job ${job.id} · Status: ${STAGE_LABELS[job.status]}</div>
-    <div class="panel">
-      <div class="chat-thread" data-poll-url="/api/joborders/${job.id}/messages" data-current-user="${escapeHtml(person.id)}">
-        ${await renderChatBubbles(messages, person.id)}
+    <div class="field">
+      <label for="${idPrefix}-confirm">Confirm ${escapeHtml(label.toLowerCase())}</label>
+      <div class="pw-wrap">
+        <input type="password" name="confirmPassword" id="${idPrefix}-confirm" required autocomplete="new-password" data-match="${idPrefix}-password" />
+        <button type="button" class="pw-toggle" data-reveal="${idPrefix}-confirm" aria-label="Show password">Show</button>
       </div>
-      <form method="POST" action="/api/joborders/${job.id}/messages" class="chat-form" style="margin-top:10px">
-        <input name="body" placeholder="Message about this job..." required />
-        <button class="btn btn-primary btn-sm" type="submit">Send</button>
-      </form>
-    </div>
-  `;
-  send(res, 200, await renderLayout({ title: "Job chat", activeNav: asSeller ? "account-messages" : "contractor-messages", [identityKey]: person, body }));
+      <div class="hint" data-match-hint="${idPrefix}-confirm"></div>
+    </div>`;
 }
 
-// ---------------- Onboarding (unified signup/login) ----------------
-export async function onboardingPage(req, res, query, errorMsg) {
+export async function onboardingPage(req, res, query) {
   const user = await currentUser(req);
-  const next = query.get("next") || "/";
+  const next = safeNext(query.get("next"));
   if (user) return redirect(res, next);
-
-  // Which tab opens first: an error from a failed signup keeps you on
-  // Sign up; otherwise Sign up is still the default (matches the previous
-  // layout's left-to-right emphasis) but either tab is one click away.
+  const errorMsg = query.get("err");
   const startTab = query.get("tab") === "login" ? "login" : "signup";
 
   const body = `
     <div class="auth-card">
-      <h1 style="font-size:24px;margin-bottom:22px;text-align:center">Welcome to Frontage</h1>
-      <div class="auth-tabs">
-        <button type="button" class="auth-tab" id="tab-signup-btn">Sign up</button>
-        <button type="button" class="auth-tab" id="tab-login-btn">Log in</button>
+      <h1 style="text-align:center;margin-bottom:22px">Welcome to Frontage</h1>
+      <div class="auth-tabs" role="tablist">
+        <button type="button" class="auth-tab" data-tab="signup" role="tab">Sign up</button>
+        <button type="button" class="auth-tab" data-tab="login" role="tab">Log in</button>
       </div>
-
-      ${errorMsg ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(errorMsg)}</div>` : ""}
-
-      <div class="auth-panel" id="panel-signup">
-        <p class="small muted" style="margin-bottom:18px">One account for browsing, booking, or listing space — no role to pick up front. We only ask for business or payment details later, right when you actually list or book.</p>
-        <form method="POST" action="/api/auth/signup">
+      ${notice(errorMsg, "orange")}
+      <div class="auth-panel" data-panel="signup">
+        <p class="small muted" style="margin-bottom:18px">One free account to message sellers and list your own space.</p>
+        <form method="POST" action="/api/auth/signup" data-single-submit>
           <input type="hidden" name="next" value="${escapeHtml(next)}" />
-          <div class="field"><label>Full name</label><input name="fullName" required placeholder="Jordan Reyes" value="${escapeHtml(query.get("fullName") || "")}" /></div>
-          <div class="field"><label>Email</label><input type="email" name="email" required placeholder="jordan@email.com" value="${escapeHtml(query.get("email") || "")}" /></div>
-          ${mobileFieldMarkup({ idPrefix: "signup-mobile", value: query.get("mobile") || "" })}
-          ${passwordFieldsMarkup({ idPrefix: "signup-pw" })}
-          <button class="btn btn-accent btn-block" type="submit" style="margin-top:6px">Create free account</button>
+          <div class="field"><label for="su-name">Full name</label><input id="su-name" name="fullName" required maxlength="80" autocomplete="name" value="${escapeHtml(query.get("fullName") || "")}" /></div>
+          <div class="field"><label for="su-email">Email</label><input id="su-email" type="email" name="email" required maxlength="200" autocomplete="email" value="${escapeHtml(query.get("email") || "")}" /></div>
+          <div class="field"><label for="su-mobile">Mobile <span class="optional">(optional)</span></label><input id="su-mobile" type="tel" name="mobile" maxlength="30" autocomplete="tel" value="${escapeHtml(query.get("mobile") || "")}" /></div>
+          ${passwordFieldsMarkup({ idPrefix: "su" })}
+          <label class="consent-row small"><input type="checkbox" name="agreeTerms" value="1" required /> <span>I agree to the <a href="/terms" target="_blank" class="link">Terms</a> and <a href="/privacy" target="_blank" class="link">Privacy Policy</a>.</span></label>
+          <button class="btn btn-accent btn-block" type="submit">Create free account</button>
         </form>
       </div>
-
-      <div class="auth-panel" id="panel-login">
-        <p class="small muted" style="margin-bottom:18px">Log in to pick up where you left off.</p>
-        <form method="POST" action="/api/auth/login">
+      <div class="auth-panel" data-panel="login">
+        <form method="POST" action="/api/auth/login" data-single-submit>
           <input type="hidden" name="next" value="${escapeHtml(next)}" />
-          <div class="field"><label>Email</label><input type="email" name="email" required /></div>
-          <div class="field"><label>Password</label><input type="password" name="password" required /></div>
-          <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Log in</button>
+          <div class="field"><label for="li-email">Email</label><input id="li-email" type="email" name="email" required autocomplete="email" value="${escapeHtml(query.get("loginEmail") || "")}" /></div>
+          <div class="field"><label for="li-pw">Password</label>
+            <div class="pw-wrap"><input id="li-pw" type="password" name="password" required autocomplete="current-password" /><button type="button" class="pw-toggle" data-reveal="li-pw" aria-label="Show password">Show</button></div>
+          </div>
+          <button class="btn btn-primary btn-block" type="submit">Log in</button>
         </form>
-        <div class="divider"></div>
-        <p class="small muted">Demo accounts (password <span class="mono">password123</span>):</p>
-        <ul class="small muted" style="padding-left:18px">
-          <li>marco@castlehillbjj.com.au — seller</li>
-          <li>jordan@openhouserealty.com.au — buyer</li>
-        </ul>
+        <p class="small" style="text-align:center;margin-top:14px"><a href="/forgot-password" class="link">Forgot your password?</a></p>
       </div>
-
-      <p class="small muted" style="margin-top:20px;text-align:center">Contractor? That's a separate login at <a href="/contractor/login" style="color:var(--orange)">/contractor/login</a>.</p>
     </div>
-    <script>
-      (function () {
-        var tabs = { signup: document.getElementById('tab-signup-btn'), login: document.getElementById('tab-login-btn') };
-        var panels = { signup: document.getElementById('panel-signup'), login: document.getElementById('panel-login') };
-        function show(name) {
-          Object.keys(tabs).forEach(function (k) {
-            tabs[k].classList.toggle('is-active', k === name);
-            panels[k].hidden = k !== name;
-          });
-        }
-        tabs.signup.addEventListener('click', function () { show('signup'); });
-        tabs.login.addEventListener('click', function () { show('login'); });
-        show(${JSON.stringify(startTab)});
-      })();
-    </script>
+    <script>window.FRONTAGE_AUTH_TAB = ${JSON.stringify(startTab)};</script>
   `;
-  send(res, 200, await layout({ title: "Sign up / Log in", user: null, body }));
+  send(res, 200, await layout({ title: "Sign up or log in", user: null, body, noindex: true }));
 }
 
-// Post-signup confirmation. The account is already created and logged in at
-// this point — this page exists so a new user is told, explicitly, that a
-// verification email is waiting, instead of being dropped back on browse.
+// Post-signup "check your inbox" page.
 export async function welcomePage(req, res, query) {
   const user = await currentUser(req);
   if (!user) return redirect(res, "/onboarding");
-  const next = query.get("next") || "/";
-
+  const next = safeNext(query.get("next"));
   const body = `
-    <div class="form-card" style="max-width:560px;margin:40px auto;text-align:center">
-      <div style="font-size:44px;line-height:1;margin-bottom:12px">📬</div>
-      <h1 style="font-size:24px;margin-bottom:8px">Thanks for signing up, ${escapeHtml((user.fullName || "").split(" ")[0] || "there")}!</h1>
-      <p class="muted" style="margin-bottom:18px">
-        We've sent a confirmation link to <strong>${escapeHtml(user.email)}</strong>.
-        Please open it to verify your email — you'll need a verified address before you can book a space.
-      </p>
-      <p class="small muted" style="margin-bottom:22px">Can't find it? Check your spam or promotions folder.</p>
-      <a href="${escapeHtml(next)}" class="btn btn-primary btn-block">Continue browsing</a>
-      <form method="POST" action="/api/account/resend-verification" style="margin-top:10px">
-        <button class="btn btn-outline btn-block" type="submit">Resend the email</button>
-      </form>
+    <div class="form-card narrow-card" style="text-align:center">
+      <div style="font-size:44px;line-height:1;margin-bottom:12px" aria-hidden="true">📬</div>
+      <h1>Thanks for signing up, ${escapeHtml(String(user.fullName || "").split(" ")[0] || "there")}!</h1>
+      <p class="muted">We've sent a link to <strong>${escapeHtml(user.email)}</strong>. Open it to verify your email — you'll need to before you can message sellers or list a space.</p>
+      <p class="small muted">Can't find it? Check your spam or promotions folder.</p>
+      <a href="${escapeHtml(next)}" class="btn btn-primary btn-block">Continue</a>
+      <form method="POST" action="/api/account/resend-verification" style="margin-top:10px"><button class="btn btn-outline btn-block" type="submit">Resend the email</button></form>
     </div>
+    <script>window.frontageTrack && window.frontageTrack("sign_up", {});</script>
   `;
-  send(res, 200, await layout({ title: "Check your email", user, body }));
+  send(res, 200, await layout({ title: "Check your email", user, body, noindex: true }));
 }
 
-// First-time "become a seller" intro — shown once, before the listing
-// wizard, only to a user with zero listings (the nav's "Switch to listing a
-// space" link routes here instead of straight to /sell/new). Mirrors
-// Airbnb's host-type/intro chooser screens (listing-create_01-04, 09) as a
-// deliberate mode-switch moment, even though Frontage keeps one unified
-// account underneath rather than a separate host mode.
+export async function forgotPasswordPage(req, res, query) {
+  const user = await currentUser(req);
+  const body = query.get("sent")
+    ? `<div class="form-card narrow-card"><h1>Check your email</h1><p class="muted">If an account exists for that address, we've sent a link to reset the password. It expires in 1 hour.</p><a href="/onboarding?tab=login" class="btn btn-primary">Back to log in</a></div>`
+    : `<div class="form-card narrow-card">
+        <h1>Reset your password</h1>
+        <p class="muted small">Enter your account email and we'll send you a reset link.</p>
+        ${notice(query.get("err"), "orange")}
+        <form method="POST" action="/api/auth/forgot-password" data-single-submit>
+          <div class="field"><label for="fp-email">Email</label><input id="fp-email" type="email" name="email" required autocomplete="email" /></div>
+          <button class="btn btn-primary btn-block" type="submit">Send reset link</button>
+        </form>
+      </div>`;
+  send(res, 200, await layout({ title: "Reset password", user, body, noindex: true }));
+}
+
+export async function resetPasswordPage(req, res, query) {
+  const token = query.get("token") || "";
+  const target = await db.getUserByResetToken(token);
+  const body = target
+    ? `<div class="form-card narrow-card">
+        <h1>Choose a new password</h1>
+        ${notice(query.get("err"), "orange")}
+        <form method="POST" action="/api/auth/reset-password" data-single-submit>
+          <input type="hidden" name="token" value="${escapeHtml(token)}" />
+          ${passwordFieldsMarkup({ idPrefix: "rp", label: "New password" })}
+          <button class="btn btn-primary btn-block" type="submit">Save new password</button>
+        </form>
+      </div>`
+    : `<div class="form-card narrow-card"><h1>This link has expired</h1><p class="muted">Reset links work once and expire after an hour.</p><a href="/forgot-password" class="btn btn-primary">Send a new link</a></div>`;
+  send(res, 200, await layout({ title: "Choose a new password", user: null, body, noindex: true }));
+}
+
+// ---------------- Selling ----------------
 export async function sellWelcomePage(req, res) {
-  const user = await requireUser(req, res, "/sell/welcome");
-  if (!user) return;
-  const existing = await db.getListingsByOwner(user.id);
-  if (existing.length > 0) return redirect(res, "/sell/new");
-
+  const user = await currentUser(req);
+  if (user && (await db.getListingsByOwner(user.id)).length > 0) return redirect(res, "/sell");
+  const steps = [
+    ["Snap a few photos", "Show the space and what people see from the street. One photo is enough to start; up to 10 is better."],
+    ["Set your price and details", "Any price you like — per month, per week, or “price on request”. Our pricing guide helps you gauge it."],
+    ["Chat and deal directly", "Advertisers message you on Frontage. You agree the terms and get paid directly — Frontage takes no cut."],
+  ];
   const body = `
-    <div style="max-width:560px;margin:40px auto;text-align:center">
-      <h1 style="font-size:32px;font-weight:700;letter-spacing:-0.02em;margin-bottom:14px;text-wrap:balance">It's easy to start earning on Frontage</h1>
-      <p class="muted" style="font-size:15px;margin-bottom:40px">Three steps, and your wall, window, or fence is live on the marketplace.</p>
-    </div>
-    <div style="max-width:560px;margin:0 auto 40px;display:flex;flex-direction:column;gap:24px">
-      <div style="display:flex;gap:16px;align-items:flex-start">
-        <div class="mono" style="width:32px;height:32px;border-radius:50%;background:var(--surface-sunken,var(--concrete));display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">1</div>
-        <div><strong style="font-size:15px">Tell us about your space</strong><div class="small muted" style="margin-top:2px">Where it is, how big, and what kind of surface it is.</div></div>
-      </div>
-      <div style="display:flex;gap:16px;align-items:flex-start">
-        <div class="mono" style="width:32px;height:32px;border-radius:50%;background:var(--surface-sunken,var(--concrete));display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">2</div>
-        <div><strong style="font-size:15px">Add photos and set your rate</strong><div class="small muted" style="margin-top:2px">We'll suggest a rate and an audience estimate based on similar spaces.</div></div>
-      </div>
-      <div style="display:flex;gap:16px;align-items:flex-start">
-        <div class="mono" style="width:32px;height:32px;border-radius:50%;background:var(--surface-sunken,var(--concrete));display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">3</div>
-        <div><strong style="font-size:15px">Publish and start earning</strong><div class="small muted" style="margin-top:2px">Advertisers pay the full term up front; you're paid out monthly, minus a 15% fee.</div></div>
-      </div>
-    </div>
-    <div style="max-width:340px;margin:0 auto">
-      <a href="/sell/new" class="btn btn-accent btn-block btn-lg">Get started →</a>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "List your space", activeNav: "sell", user, body }));
+    <div class="sell-intro">
+      <h1>Turn your wall, fence or window into income</h1>
+      <p class="muted">List advertising space for free. Local businesses find it, message you, and you deal directly.</p>
+      <ol class="step-list">
+        ${steps.map(([t, d], i) => `<li><span class="step-num-lg">${i + 1}</span><div><strong>${t}</strong><div class="small muted">${d}</div></div></li>`).join("")}
+      </ol>
+      <a href="${user ? "/sell/new" : "/onboarding?next=%2Fsell%2Fnew"}" class="btn btn-accent btn-block btn-lg">Get started</a>
+      <p class="small muted" style="text-align:center;margin-top:12px">Not sure what to charge? <a href="/pricing-guide" class="link">Read the pricing guide</a>.</p>
+    </div>`;
+  send(res, 200, await layout({ title: "List your advertising space for free", activeNav: "sell", user, body, canonicalPath: "/sell/welcome" }));
 }
 
-// ---------------- List a space ----------------
-export async function sellNewPage(req, res, query) {
-  const user = await requireUser(req, res, "/sell/new");
+export async function myListingsPage(req, res, query) {
+  const user = await requireUser(req, res, "/sell");
   if (!user) return;
-
-  const myListings = await db.getListingsByOwner(user.id);
-  const needsPayout = !user.bankAccount;
-
-  const created = query.get("created");
-  const deleted = query.get("deleted");
-  const err = query.get("err");
-
+  const listings = await db.getListingsByOwner(user.id);
   const statusBadge = (l) =>
-    l.status === "leased"
-      ? `<span class="badge badge-blue">LEASED</span>`
-      : l.status === "removed"
-      ? `<span class="badge badge-steel">REMOVED</span>`
-      : `<span class="badge badge-green">LIVE</span>`;
-  const listRows = myListings
+    l.status === "live" ? `<span class="badge badge-green">Live</span>` : l.status === "removed" ? `<span class="badge badge-orange">Removed by moderators</span>` : `<span class="badge badge-steel">${escapeHtml(l.status)}</span>`;
+  const rows = listings
     .map(
-      (l) => `<div class="job-row row-between">
-        <div><strong>${escapeHtml(l.title)}</strong> ${statusBadge(l)}<div class="small muted">${escapeHtml(l.venue)} · ${money(l.price)}/mo</div></div>
-        <div><a href="/listing/${l.id}" class="small" style="color:var(--orange)">View →</a> &nbsp; <a href="/sell/edit/${l.id}" class="small" style="color:var(--ink)">Edit →</a> &nbsp; <a href="/sell/insights/${l.id}" class="small" style="color:var(--blue)">Insights →</a></div>
+      (l) => `<div class="listing-row">
+        <a href="/listing/${escapeHtml(l.id)}" class="listing-row-thumb">${coverPhoto(l) ? `<img src="${escapeHtml(coverPhoto(l))}" alt="" loading="lazy" />` : ""}</a>
+        <div class="listing-row-body">
+          <a href="/listing/${escapeHtml(l.id)}"><strong>${escapeHtml(l.title)}</strong></a> ${statusBadge(l)}
+          <div class="small muted">${escapeHtml(priceLabel(l))} · ${escapeHtml(categoryLabel(l.category))} · ${l.viewCount || 0} views · listed ${escapeHtml(timeAgo(l.createdAt))}</div>
+          ${l.status === "removed" && l.removedReason ? `<div class="small" style="color:var(--red)">Reason: ${escapeHtml(l.removedReason)}</div>` : ""}
+        </div>
+        <div class="listing-row-actions"><a href="/sell/edit/${escapeHtml(l.id)}" class="btn btn-outline btn-sm">Edit</a></div>
       </div>`
     )
     .join("");
-
   const body = `
-    <h1 style="font-size:22px;margin-bottom:6px">List your space</h1>
-    <p class="muted" style="margin-bottom:20px">We only ask for business and payout details the first time you list.</p>
-    ${created ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Listing created — it's live on the marketplace.</div>` : ""}
-    ${deleted ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Listing deleted.</div>` : ""}
-    ${err ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(err)}</div>` : ""}
-
-    ${myListings.length ? `<div class="panel" style="margin-bottom:24px"><h3 style="font-size:14px;margin-bottom:10px">Your listings</h3><div class="job-list">${listRows}</div></div>` : ""}
-
-    <div class="form-card form-card-wide">
-      <!-- Three-segment progress bar (New Style Assets/02-DESIGN-SYSTEM.md
-           §5 "Progress") — six field-group steps grouped into three named
-           phases, echoing the reference wizard's "tell us about your place /
-           make it stand out / finish up and publish" shape. -->
-      <div class="wizard-progress" id="wizard-progress">
-        <div class="wizard-progress-seg" data-segment="1"><div class="wizard-progress-seg-fill"></div></div>
-        <div class="wizard-progress-seg" data-segment="2"><div class="wizard-progress-seg-fill"></div></div>
-        <div class="wizard-progress-seg" data-segment="3"><div class="wizard-progress-seg-fill"></div></div>
-      </div>
-      <div class="wizard-step-label" id="wizard-step-label"></div>
-
-      <form method="POST" action="/api/listings" enctype="multipart/form-data" id="new-listing-form">
-        <!-- Step 1 — basics -->
-        <div class="wizard-step" data-step="1" data-segment="1">
-          <h2 style="font-size:16px;margin-bottom:14px">Tell us about your space</h2>
-          <div class="form-row">
-            <div class="field"><label>Business or venue name</label><input name="venue" required placeholder="${escapeHtml(user.businessName || "Castle Hill BJJ Academy")}" value="${escapeHtml(user.businessName || "")}" /></div>
-            <div class="field">
-              <label>Listing title
-                <button type="button" class="info-btn" data-info="title-info" aria-label="Tips for a good title">i</button>
-              </label>
-              <input name="title" id="title-input" required maxlength="${LISTING_TITLE_MAX_LENGTH}" placeholder="Wall above the mats" />
-              <div class="small muted" id="title-count" style="margin-top:4px">0/${LISTING_TITLE_MAX_LENGTH}</div>
-              <div class="info-pop" id="title-info" hidden>
-                <strong>Writing a good title</strong>
-                <p class="small" style="margin:6px 0 0;line-height:1.6">Say exactly where the space is — buyers scan titles fast. Good examples: "Wall above the mats", "Fence facing the highway", "Window beside the till". Skip vague titles like "Great spot!" — your venue name is already shown separately.</p>
-              </div>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="field"><label>Category</label>
-              <select name="category" id="category-select">
-                ${CATEGORIES.map((c) => `<option value="${c}">${CATEGORY_LABEL[c]}</option>`).join("")}
-              </select>
-            </div>
-            <div class="field"><label>Space type (optional)</label><input name="subtype" placeholder="e.g. front fence panel, driveway sign board" /></div>
-          </div>
-        </div>
-
-        <!-- Step 2 — address & dimensions -->
-        <div class="wizard-step" data-step="2" data-segment="1" hidden>
-          <h2 style="font-size:16px;margin-bottom:14px">Where is it, and how big?</h2>
-          <div class="form-row">
-            <div class="field"><label>Suburb / City</label><input name="suburb" required placeholder="Castle Hill" /></div>
-            <div class="field"><label>Premises address</label><input name="address" required value="${escapeHtml(user.address || "")}" placeholder="14 Wattle St, Castle Hill NSW" /></div>
-          </div>
-          <div class="form-row">
-            <div class="field"><label>Postcode (optional)</label><input name="postcode" placeholder="2154" /></div>
-            <div class="field"><label>Country</label><input name="country" value="Australia" placeholder="Australia" /></div>
-          </div>
-          <div class="small muted" style="margin:-6px 0 14px">We'll place your pin on the map automatically from the suburb and address above.</div>
-          <div class="form-row">
-            <div class="field"><label>Width (mm)</label><input type="number" id="sizeW" name="sizeW" required min="1" max="${LISTING_MAX_DIMENSION_MM}" placeholder="2000" />
-              <div class="hint">Up to ${LISTING_MAX_DIMENSION_MM / 1000}m. Double-check you're entering millimetres, not metres.</div>
-            </div>
-            <div class="field"><label>Height (mm)</label><input type="number" id="sizeH" name="sizeH" required min="1" max="${LISTING_MAX_DIMENSION_MM}" placeholder="3000" /></div>
-          </div>
-          <button type="button" id="ar-preview-btn" class="btn btn-outline btn-block">📷 Preview on your wall</button>
-        </div>
-
-        <!-- Step 3 — site specifications (NEW: audience/surface/illumination/
-             access/permit — Phase 1's fields. All optional: an advertiser
-             benefits from knowing these, but a seller who doesn't have the
-             answer yet shouldn't be blocked from listing. -->
-        <div class="wizard-step" data-step="3" data-segment="2" hidden>
-          <h2 style="font-size:16px;margin-bottom:4px">Specifications</h2>
-          <p class="small muted" style="margin-bottom:14px">All optional — the more you fill in, the more an advertiser can judge the space without asking.</p>
-          <div class="form-row">
-            <div class="field"><label>Audience</label>
-              <select name="audienceType"><option value="">Not sure</option>${AUDIENCE_TYPES.map((a) => `<option value="${a}">${AUDIENCE_TYPE_LABEL[a]}</option>`).join("")}</select>
-            </div>
-            <div class="field"><label>Daily traffic count (optional)</label><input type="number" name="dailyTrafficCount" min="0" placeholder="e.g. 12000" />
-              <div class="hint">Your own estimate — shown to advertisers as owner-supplied, not independently verified.</div>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="field"><label>Surface</label>
-              <select name="surfaceType"><option value="">Not sure</option>${SURFACE_TYPES.map((s) => `<option value="${s}">${SURFACE_TYPE_LABEL[s]}</option>`).join("")}</select>
-            </div>
-            <div class="field"><label>Illumination</label>
-              <select name="illumination"><option value="">Not sure</option>${ILLUMINATION_OPTIONS.map((i) => `<option value="${i}">${ILLUMINATION_LABEL[i]}</option>`).join("")}</select>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="field"><label>Access for installers</label>
-              <select name="accessType"><option value="">Not sure</option>${ACCESS_TYPES.map((a) => `<option value="${a}">${ACCESS_TYPE_LABEL[a]}</option>`).join("")}</select>
-            </div>
-            <div class="field"><label>Access notes (optional)</label><input name="accessNotes" maxlength="500" placeholder="e.g. key with reception, gate code required" /></div>
-          </div>
-          <div class="field-group field-group-row">
-            <div class="field"><label>Permit status</label>
-              <select name="permitStatus"><option value="">Not sure</option>${PERMIT_STATUSES.map((p) => `<option value="${p}">${PERMIT_STATUS_LABEL[p]}</option>`).join("")}</select>
-            </div>
-            <div class="field"><label>Permit reference (optional)</label><input name="permitReference" maxlength="200" placeholder="Council permit #" /></div>
-            <div class="field"><label>Expires (optional)</label><input type="date" name="permitExpiry" /></div>
-          </div>
-          <div class="small muted" style="margin-top:-6px">This is your declaration — Frontage doesn't verify permit status on your behalf. See the <a href="/terms/seller" target="_blank" style="color:var(--orange)">Seller Terms</a> for what happens if signage is later found non-compliant.</div>
-        </div>
-
-        <!-- Step 4 — photos & description -->
-        <div class="wizard-step" data-step="4" data-segment="2" hidden>
-          <h2 style="font-size:16px;margin-bottom:14px">Photos and description</h2>
-          <div class="field">
-            <label>Photos <span class="muted" style="text-transform:none">(at least ${LISTING_MIN_PHOTOS}, up to 8)</span></label>
-            <input type="file" id="photos-input" name="photos" accept="image/*" multiple required />
-            <div class="small muted" style="margin-top:4px">Clear, well-lit photos help buyers trust the listing — include a wide shot of the space and a close-up of the exact spot.</div>
-            <div class="small" id="photos-error" style="margin-top:4px;color:var(--red);display:none">Please choose at least ${LISTING_MIN_PHOTOS} photos.</div>
-          </div>
-          <div class="field">
-            <label>Description</label>
-            <textarea name="desc" id="desc-input" rows="3" maxlength="${LISTING_DESC_MAX_LENGTH}" placeholder="What makes this space worth advertising on?"></textarea>
-            <div class="small muted" id="desc-count" style="margin-top:4px">0/${LISTING_DESC_MAX_LENGTH}</div>
-          </div>
-        </div>
-
-        <!-- Step 5 — pricing -->
-        <div class="wizard-step" data-step="5" data-segment="3" hidden>
-          <h2 style="font-size:16px;margin-bottom:14px">Set your rate</h2>
-          <div class="form-row">
-            <div class="field">
-              <label>Monthly rate (AUD, excl. GST)
-                <button type="button" class="info-btn" data-info="price-info" aria-label="How to work out a rate">i</button>
-              </label>
-              <input type="number" name="price" required min="1" step="0.01" placeholder="100" />
-              <div class="info-pop" id="price-info" hidden>
-                <strong>Working out a rate</strong>
-                <p class="small" style="margin:6px 0 0;line-height:1.6">Check what similar spaces in your suburb are charging on <a href="/" target="_blank" style="color:var(--orange)">Browse</a> first. As a rough guide, low-traffic spots typically go for $50–150/mo and high-traffic prime locations $300+. This is what buyers pay before GST — you keep 85% of it, paid out monthly.</p>
-              </div>
-            </div>
-            <div class="field"><label>Estimated daily eyes</label><input type="number" name="estimatedEyesPerDay" id="eyes-input" min="0" placeholder="e.g. 250" />
-              <div class="small muted" style="margin-top:4px" id="eyes-hint">Auto-estimated from category and size — adjust it if you know better.</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Step 6 — review, payout, publish -->
-        <div class="wizard-step" data-step="6" data-segment="3" hidden>
-          <h2 style="font-size:16px;margin-bottom:14px">Review and publish</h2>
-          ${
-            needsPayout
-              ? `<h3 style="font-size:13px;margin-bottom:10px">Where should we send your earnings?</h3>
-          <p class="small muted" style="margin-bottom:10px">Only asked once — payouts are sent monthly, minus Frontage's 15% fee.</p>
-          <div class="form-row">
-            <div class="field"><label>BSB</label><input name="bankBsb" required placeholder="062-000" /></div>
-            <div class="field"><label>Account number</label><input name="bankAccount" required placeholder="12345678" /></div>
-          </div>
-          <div class="field"><label>Account name</label><input name="bankAccountName" required placeholder="${escapeHtml(user.businessName || "Account name")}" /></div>`
-              : `<div class="small muted" style="margin-bottom:10px">Payouts go to the bank account already on file (••••${escapeHtml(user.bankAccount ? user.bankAccount.slice(-4) : "")}).</div>`
-          }
-          <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Publish listing</button>
-        </div>
-
-        <!-- Fixed-shape footer: Back is a plain link-style button, Next is
-             the step's forward action — only step 6 shows the real submit
-             button above instead. Doc 02 §6 notes the wizard footer stays
-             fixed while content scrolls; kept in-flow here rather than
-             actually position:fixed, which would need its own stacking
-             work against the existing sticky site header. -->
-        <div class="wizard-nav">
-          <button type="button" class="btn btn-outline" id="wizard-back" hidden>← Back</button>
-          <button type="button" class="btn btn-primary" id="wizard-next" style="margin-left:auto">Next</button>
-        </div>
-      </form>
+    <div class="page-head">
+      <h1>My listings</h1>
+      <a href="/sell/new" class="btn btn-accent">+ New listing</a>
     </div>
-    <script src="/wall-visualizer.js"></script>
-    <script>
-      (function () {
-        // "i" buttons reveal their explanatory block in place (same pattern
-        // as the checkout page's installer-cost tooltip).
-        [].forEach.call(document.querySelectorAll('.info-btn'), function (b) {
-          b.addEventListener('click', function () {
-            var pop = document.getElementById(b.getAttribute('data-info'));
-            if (pop) pop.hidden = !pop.hidden;
-          });
-        });
-
-        function wireCounter(inputId, countId, max) {
-          var el = document.getElementById(inputId);
-          var countEl = document.getElementById(countId);
-          if (!el || !countEl) return;
-          function update() { countEl.textContent = el.value.length + '/' + max; }
-          el.addEventListener('input', update);
-          update();
-        }
-        wireCounter('title-input', 'title-count', ${LISTING_TITLE_MAX_LENGTH});
-        wireCounter('desc-input', 'desc-count', ${LISTING_DESC_MAX_LENGTH});
-
-        // Prefills the eyes/day estimate as category/size are filled in,
-        // using the same formula the server falls back to on submit
-        // (lib/format.js#estimateEyes via /api/estimate-eyes) — but stops
-        // touching the field the moment the seller types into it themselves.
-        var eyesInput = document.getElementById('eyes-input');
-        var eyesTouched = false;
-        if (eyesInput) eyesInput.addEventListener('input', function () { eyesTouched = true; });
-        var categorySelect = document.getElementById('category-select');
-        var sizeWInput = document.getElementById('sizeW');
-        var sizeHInput = document.getElementById('sizeH');
-        function refreshEyesEstimate() {
-          if (eyesTouched || !eyesInput) return;
-          var sizeW = parseInt(sizeWInput && sizeWInput.value, 10) || 0;
-          var sizeH = parseInt(sizeHInput && sizeHInput.value, 10) || 0;
-          if (!sizeW || !sizeH) return;
-          var category = categorySelect ? categorySelect.value : 'gym';
-          fetch('/api/estimate-eyes?category=' + encodeURIComponent(category) + '&sizeW=' + sizeW + '&sizeH=' + sizeH)
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
-              if (eyesTouched || !data || typeof data.eyes !== 'number') return;
-              eyesInput.value = data.eyes;
-            })
-            .catch(function () {});
-        }
-        if (categorySelect) categorySelect.addEventListener('change', refreshEyesEstimate);
-        if (sizeWInput) sizeWInput.addEventListener('input', refreshEyesEstimate);
-        if (sizeHInput) sizeHInput.addEventListener('input', refreshEyesEstimate);
-
-        // ---- Wizard step navigation ----
-        var steps = [].slice.call(document.querySelectorAll('.wizard-step'));
-        var totalSteps = steps.length;
-        var current = 1;
-        var segLabels = { 1: 'Space details', 2: 'Specifications & photos', 3: 'Pricing & publish' };
-        var backBtn = document.getElementById('wizard-back');
-        var nextBtn = document.getElementById('wizard-next');
-        var photosInput = document.getElementById('photos-input');
-        var photosError = document.getElementById('photos-error');
-
-        function stepEl(n) { return steps[n - 1]; }
-
-        function updateProgress() {
-          var activeSegment = parseInt(stepEl(current).getAttribute('data-segment'), 10);
-          [].forEach.call(document.querySelectorAll('.wizard-progress-seg'), function (seg) {
-            var segNum = parseInt(seg.getAttribute('data-segment'), 10);
-            seg.classList.remove('done', 'active');
-            if (segNum < activeSegment) seg.classList.add('done');
-            else if (segNum === activeSegment) seg.classList.add('active');
-          });
-          var label = document.getElementById('wizard-step-label');
-          if (label) label.textContent = segLabels[activeSegment] + ' · step ' + current + ' of ' + totalSteps;
-        }
-
-        function showStep(n) {
-          current = n;
-          steps.forEach(function (s, i) { s.hidden = (i + 1) !== n; });
-          backBtn.hidden = n === 1;
-          nextBtn.hidden = n === totalSteps;
-          updateProgress();
-          stepEl(n).scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }
-
-        // Validates only the fields on the currently visible step — native
-        // reportValidity() on a still-hidden step silently no-ops in some
-        // browsers, so this only ever runs against the step in view.
-        function validateStep(n) {
-          var el = stepEl(n);
-          var invalid = el.querySelector(':invalid');
-          if (invalid) { invalid.reportValidity(); return false; }
-          if (el.contains(photosInput) && photosInput.files.length < ${LISTING_MIN_PHOTOS}) {
-            photosError.style.display = 'block';
-            photosInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            return false;
-          }
-          return true;
-        }
-
-        nextBtn.addEventListener('click', function () {
-          if (!validateStep(current)) return;
-          if (current < totalSteps) showStep(current + 1);
-        });
-        backBtn.addEventListener('click', function () {
-          if (current > 1) showStep(current - 1);
-        });
-        if (photosInput && photosError) {
-          photosInput.addEventListener('change', function () { photosError.style.display = 'none'; });
-        }
-        // Final safety net — a hidden, unvalidated required field is exempt
-        // from native constraint validation on submit (per the HTML5 spec),
-        // so re-check the photos minimum specifically, since it's the one
-        // rule the per-step Next button can't fully guarantee if a step is
-        // ever reached out of order.
-        document.getElementById('new-listing-form').addEventListener('submit', function (e) {
-          if (photosInput.files.length < ${LISTING_MIN_PHOTOS}) {
-            e.preventDefault();
-            showStep(4);
-            photosError.style.display = 'block';
-          }
-        });
-
-        showStep(1);
-      })();
-    </script>
-  `;
-  send(res, 200, await layout({ title: "List your space", activeNav: "sell", user, body }));
+    ${notice(query.get("created") ? "Your listing is live." : query.get("deleted") ? "Listing deleted." : query.get("updated") ? "Changes saved." : "")}
+    ${listings.length ? `<div class="listing-rows">${rows}</div>` : `<div class="panel empty-state"><p class="muted">You haven't listed anything yet.</p><a href="/sell/new" class="btn btn-accent">List your space</a></div>`}
+    ${query.get("created") ? trackOnLoad("publish_listing", {}) : ""}`;
+  send(res, 200, await layout({ title: "My listings", activeNav: "sell", user, body, noindex: true }));
 }
 
-// ---------------- Edit an existing listing (owner only) ----------------
-export async function editListingPage(req, res, id, query) {
+// The single-page listing form, shared by create and edit. Submitted by
+// public/listing-form.js (photos managed client-side: previews, reorder,
+// in-browser resizing); validation errors come back as JSON and are shown
+// inline, so nothing the seller typed is lost.
+function listingFormMarkup({ listing = null, action, submitLabel, needsVerification }) {
+  const v = listing || {};
+  const mapsKey = browserMapsKey();
+  const existingPhotos = JSON.stringify(v.photos || []).replace(/</g, "\\u003c");
+  const fieldError = (name) => `<div class="field-error" data-error-for="${name}" hidden></div>`;
+  const ytValue = v.youtubeId ? youTubeWatchUrl(v.youtubeId) : "";
+  return `
+    ${needsVerification ? `<div class="notice notice-orange">Verify your email before publishing — check your inbox, or <a href="/account" class="link">resend the link</a>.</div>` : ""}
+    <form id="listing-form" class="listing-form" method="POST" action="${escapeHtml(action)}" enctype="multipart/form-data" novalidate
+      data-existing-photos='${escapeHtml(existingPhotos)}' data-max-photos="${LISTING_MAX_PHOTOS}">
+      <div class="form-error" id="form-error" role="alert" hidden></div>
+
+      <section class="form-section">
+        <h2>Photos</h2>
+        <p class="small muted">Up to ${LISTING_MAX_PHOTOS}. Drag to reorder — the first photo is the cover. Show the space itself and what people see from the street.</p>
+        <div id="photo-grid" class="photo-grid" aria-live="polite"></div>
+        <label class="photo-add" id="photo-add">
+          <input type="file" id="photo-input" name="photos" accept="image/*" multiple />
+          <span>+ Add photos</span>
+        </label>
+        ${fieldError("photos")}
+      </section>
+
+      <section class="form-section">
+        <div class="field">
+          <label for="lf-title">Title</label>
+          <input id="lf-title" name="title" required maxlength="${LISTING_TITLE_MAX_LENGTH}" value="${escapeHtml(v.title || "")}" placeholder="e.g. Street-facing brick wall on Pittwater Rd" data-counter="${LISTING_TITLE_MAX_LENGTH}" />
+          ${fieldError("title")}
+        </div>
+        <div class="form-row">
+          <div class="field">
+            <label for="lf-price">Price (AUD)</label>
+            <div class="input-prefix"><span>$</span><input id="lf-price" name="price" inputmode="decimal" value="${v.price > 0 ? escapeHtml(String(v.price)) : v.id ? "0" : ""}" placeholder="e.g. 250" /></div>
+            <div class="hint">Enter 0 for “price on request”.</div>
+            ${fieldError("price")}
+          </div>
+          <div class="field">
+            <label for="lf-price-note">Price details <span class="optional">(optional)</span></label>
+            <input id="lf-price-note" name="priceNote" maxlength="${LISTING_PRICE_NOTE_MAX_LENGTH}" value="${escapeHtml(v.priceNote || "")}" placeholder="e.g. per month, negotiable" list="price-note-examples" />
+            <datalist id="price-note-examples">${PRICE_NOTE_EXAMPLES.map((e) => `<option value="${escapeHtml(e)}"></option>`).join("")}</datalist>
+            ${fieldError("priceNote")}
+          </div>
+        </div>
+        <p class="small" style="margin:-4px 0 16px"><a href="/pricing-guide" target="_blank" class="link">Not sure what to charge? See the pricing guide →</a></p>
+        <div class="field">
+          <label for="lf-category">Type of space</label>
+          <select id="lf-category" name="category" required>
+            <option value="">Choose…</option>
+            ${CATEGORIES.map((c) => `<option value="${c}"${v.category === c ? " selected" : ""}>${categoryLabel(c)}</option>`).join("")}
+          </select>
+          ${fieldError("category")}
+        </div>
+        <div class="field">
+          <label for="lf-desc">Description</label>
+          <textarea id="lf-desc" name="description" rows="6" required maxlength="${LISTING_DESC_MAX_LENGTH}" data-counter="${LISTING_DESC_MAX_LENGTH}" placeholder="Where is it, who sees it (cars, pedestrians, members), how visible is it, is it lit at night, and what's included (printing, install)?">${escapeHtml(v.description || "")}</textarea>
+          ${fieldError("description")}
+        </div>
+      </section>
+
+      <section class="form-section">
+        <h2>Location</h2>
+        <div class="field address-field">
+          <label for="lf-address">Address of the space</label>
+          <input id="lf-address" name="address" required autocomplete="off" value="${escapeHtml(v.address || "")}" placeholder="Start typing the street address" aria-autocomplete="list" aria-controls="address-suggestions" />
+          <ul id="address-suggestions" class="address-suggestions" role="listbox" hidden></ul>
+          <input type="hidden" name="placeId" value="${escapeHtml(v.placeId || "")}" />
+          <input type="hidden" name="lat" value="${v.lat != null ? escapeHtml(String(v.lat)) : ""}" />
+          <input type="hidden" name="lng" value="${v.lng != null ? escapeHtml(String(v.lng)) : ""}" />
+          <input type="hidden" name="suburb" value="${escapeHtml(v.suburb || "")}" />
+          <input type="hidden" name="state" value="${escapeHtml(v.state || "")}" />
+          <input type="hidden" name="postcode" value="${escapeHtml(v.postcode || "")}" />
+          <input type="hidden" name="country" value="${escapeHtml(v.country || "")}" />
+          ${fieldError("address")}
+        </div>
+        <label class="consent-row"><input type="checkbox" name="showExactLocation" value="1"${v.showExactLocation ? " checked" : ""} />
+          <span><strong>Show the exact address and pin</strong><br/><span class="small muted">Leave this off and buyers only see the suburb and an approximate area until you share more in a message — recommended if it's your home.</span></span></label>
+      </section>
+
+      <section class="form-section">
+        <h2>More details <span class="optional">(optional)</span></h2>
+        <div class="form-row">
+          <div class="field"><label for="lf-w">Width (metres)</label><input id="lf-w" name="widthM" inputmode="decimal" value="${v.widthM ? escapeHtml(String(v.widthM)) : ""}" placeholder="e.g. 2.4" /></div>
+          <div class="field"><label for="lf-h">Height (metres)</label><input id="lf-h" name="heightM" inputmode="decimal" value="${v.heightM ? escapeHtml(String(v.heightM)) : ""}" placeholder="e.g. 1.2" /></div>
+        </div>
+        <div class="hint" style="margin-top:-8px;margin-bottom:12px">Up to ${LISTING_MAX_DIMENSION_M}m per side.</div>
+        ${fieldError("size")}
+        <div class="field">
+          <label for="lf-yt">YouTube video link</label>
+          <input id="lf-yt" name="youtubeUrl" inputmode="url" value="${escapeHtml(ytValue)}" placeholder="https://youtu.be/…" />
+          <div class="hint">A short walk-past or drive-by video helps advertisers picture it.</div>
+          <div id="yt-preview" class="yt-preview" hidden></div>
+          ${fieldError("youtubeUrl")}
+        </div>
+      </section>
+
+      <div class="form-submit">
+        <button class="btn btn-accent btn-lg" type="submit" id="listing-submit">${escapeHtml(submitLabel)}</button>
+        <span class="small muted" id="listing-progress" aria-live="polite"></span>
+      </div>
+      <p class="small muted">By publishing you confirm you control this space (or have permission to offer it) and agree to the <a href="/terms" target="_blank" class="link">Terms</a>.</p>
+    </form>
+    <script>window.FRONTAGE_PLACES = ${JSON.stringify({ key: mapsKey || null, countries: placesCountries() })};</script>
+    <script src="/listing-form.js" defer></script>`;
+}
+
+export async function newListingPage(req, res) {
+  const user = await requireUser(req, res, "/sell/new");
+  if (!user) return;
+  const body = `
+    <div class="form-page">
+      <a href="${(await db.getListingsByOwner(user.id)).length ? "/sell" : "/"}" class="small muted">← Back</a>
+      <h1 style="margin:8px 0 4px">List your space</h1>
+      <p class="muted" style="margin-bottom:24px">Free to list. Advertisers message you and you deal directly.</p>
+      ${listingFormMarkup({ action: "/api/listings", submitLabel: "Publish listing", needsVerification: isEmailConfigured() && !user.emailVerifiedAt })}
+    </div>`;
+  send(res, 200, await layout({ title: "List your space", activeNav: "sell", user, body, noindex: true }));
+}
+
+export async function editListingPage(req, res, id) {
   const user = await requireUser(req, res, `/sell/edit/${id}`);
   if (!user) return;
   const listing = await db.getListingById(id);
-  if (!listing || listing.ownerId !== user.id) {
-    return send(res, 404, await layout({ title: "Not found", user, body: "<p>Listing not found.</p>" }));
-  }
-
-  const updated = query.get("updated");
-  const err = query.get("err");
-  const photos = listing.photos || [];
-
-  const photoRows = photos
-    .map(
-      (p, i) => `<div class="row-between" style="margin-bottom:8px;gap:10px">
-        <img src="${escapeHtml(p)}" alt="" style="width:72px;height:54px;object-fit:cover;border-radius:6px;border:1px solid var(--border)" />
-        <div style="display:flex;gap:6px;flex:1;justify-content:flex-end;flex-wrap:wrap">
-          ${
-            i > 0
-              ? `<form method="POST" action="/api/listings/${id}/photos/${i}/move/up"><button class="btn btn-outline btn-sm" type="submit">↑ Move up</button></form>`
-              : ""
-          }
-          ${
-            i < photos.length - 1
-              ? `<form method="POST" action="/api/listings/${id}/photos/${i}/move/down"><button class="btn btn-outline btn-sm" type="submit">↓ Move down</button></form>`
-              : ""
-          }
-          <form method="POST" action="/api/listings/${id}/photos/${i}/remove"><button class="btn btn-outline btn-sm" type="submit">Remove</button></form>
-        </div>
-      </div>`
-    )
-    .join("");
-
+  if (!listing || listing.ownerId !== user.id || listing.status === "deleted") return notFoundPage(req, res);
   const body = `
-    <a href="/sell/new" class="small muted">← Back to your listings</a>
-    <h1 style="font-size:22px;margin:10px 0 6px">Edit listing</h1>
-    <p class="muted" style="margin-bottom:20px">${escapeHtml(listing.title)} · ${escapeHtml(listing.venue)}</p>
-    ${updated ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Listing updated.</div>` : ""}
-    ${err ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(err)}</div>` : ""}
-
-    <div class="panel" style="margin-bottom:24px">
-      <h2 style="font-size:15px;margin-bottom:12px">Photos</h2>
-      ${photos.length ? photoRows : `<p class="small muted" style="margin-bottom:12px">No photos yet.</p>`}
-      <form method="POST" action="/api/listings/${id}/photos" enctype="multipart/form-data" style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <input type="file" name="photos" accept="image/*" multiple />
-        <button class="btn btn-outline btn-sm" type="submit">Add photos</button>
-        <button type="button" id="ar-preview-btn" class="btn btn-outline btn-sm">📷 Mock up on your wall</button>
-      </form>
-      <div class="small muted" style="margin-top:8px">${photos.length}/8 photos used.</div>
-    </div>
-    <script src="/wall-visualizer.js"></script>
-
-    <div class="form-card form-card-wide" style="margin-bottom:24px">
-      <h2 style="font-size:16px;margin-bottom:14px">Space details</h2>
-      <form method="POST" action="/api/listings/${id}/update">
-        <div class="form-row">
-          <div class="field"><label>Business or venue name</label><input name="venue" required value="${escapeHtml(listing.venue)}" /></div>
-          <div class="field"><label>Listing title</label><input name="title" required value="${escapeHtml(listing.title)}" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Category</label>
-            <select name="category">
-              ${CATEGORIES.map((c) => `<option value="${c}"${c === listing.category ? " selected" : ""}>${CATEGORY_LABEL[c]}</option>`).join("")}
-            </select>
-          </div>
-          <div class="field"><label>Space type (optional)</label><input name="subtype" value="${escapeHtml(listing.subtype || "")}" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Suburb / City</label><input name="suburb" required value="${escapeHtml(listing.suburb)}" /></div>
-          <div class="field"><label>Premises address</label><input name="address" required value="${escapeHtml(listing.address)}" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Postcode (optional)</label><input name="postcode" value="${escapeHtml(listing.postcode || "")}" placeholder="2154" /></div>
-          <div class="field"><label>Country</label><input name="country" value="${escapeHtml(listing.country || "Australia")}" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Map latitude (optional)</label><input type="number" step="any" name="lat" value="${listing.lat != null ? listing.lat : ""}" /></div>
-          <div class="field"><label>Map longitude (optional)</label><input type="number" step="any" name="lng" value="${listing.lng != null ? listing.lng : ""}" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required min="1" max="${LISTING_MAX_DIMENSION_MM}" value="${listing.sizeW}" /></div>
-          <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required min="1" max="${LISTING_MAX_DIMENSION_MM}" value="${listing.sizeH}" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Monthly rate (AUD, excl. GST)</label><input type="number" name="price" required min="1" step="0.01" value="${listing.price}" /></div>
-          <div class="field"><label>Estimated daily eyes</label><input type="number" name="estimatedEyesPerDay" min="0" value="${listing.estimatedEyesPerDay || ""}" /></div>
-        </div>
-        <div class="field"><label>Description</label><textarea name="desc" rows="3">${escapeHtml(listing.desc || "")}</textarea></div>
-        <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Save changes</button>
-      </form>
-    </div>
-
-    <div class="panel" style="border-color:var(--red)">
-      <h2 style="font-size:15px;margin-bottom:8px;color:var(--red)">Delete this listing</h2>
-      <p class="small muted" style="margin-bottom:12px">Takes it off the marketplace immediately. Existing leases and their history are kept — this only affects new bookings.</p>
-      <form method="POST" action="/api/listings/${id}/delete" onsubmit="return confirm('Delete this listing? It will come off the marketplace immediately.');">
-        <button class="btn btn-outline btn-block" type="submit" style="color:var(--red);border-color:var(--red)">Delete listing</button>
-      </form>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Edit listing", activeNav: "sell", user, body }));
-}
-
-// ---------------- Seller listing insights ----------------
-export async function listingInsightsPage(req, res, id) {
-  const user = await requireUser(req, res, `/sell/insights/${id}`);
-  if (!user) return;
-  const listing = await db.getListingById(id);
-  if (!listing || listing.ownerId !== user.id) {
-    return send(res, 404, await layout({ title: "Not found", user, body: "<p>Listing not found.</p>" }));
-  }
-
-  const bookings = await db.getBookingsForListing(id);
-  const threads = (await db.getListingThreadsForSeller(user.id)).filter((t) => t.listingId === id);
-  const views = listing.viewCount || 0;
-  const conversionPct = views > 0 ? Math.round((bookings.length / views) * 1000) / 10 : 0;
-
-  const body = `
-    <a href="/sell/new" class="small muted">← Back to your listings</a>
-    <h1 style="font-size:22px;margin:10px 0 16px">Insights — ${escapeHtml(listing.title)}</h1>
-    <div class="panel-tint stat-grid-3" style="margin-bottom:18px">
-      <div><div class="mono" style="font-weight:700;font-size:20px">${views}</div><div class="small muted">Listing views</div></div>
-      <div><div class="mono" style="font-weight:700;font-size:20px">${threads.length}</div><div class="small muted">Buyer enquiries</div></div>
-      <div><div class="mono" style="font-weight:700;font-size:20px">${bookings.length}</div><div class="small muted">Bookings</div></div>
-    </div>
-    <div class="panel">
-      <div class="row-between small"><span class="muted">View → booking conversion</span><span class="mono">${conversionPct}%</span></div>
-      <div class="small muted" style="margin-top:8px">Views count visits from anyone other than you. Conversion is a rough guide, not a rate you should read too much into at low volume.</div>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Listing insights", activeNav: "sell", user, body }));
-}
-
-// ---------------- BDR: pre-built listings + claim link ----------------
-export async function bdrNewListingPage(req, res, query) {
-  const user = await requirePermission(req, res, "canCreateBdrListings", "/sell/bdr-new");
-  if (!user) return;
-
-  const created = query.get("created");
-  const claimUrl = query.get("claimUrl");
-
-  const body = `
-    ${adminSubnav(user, "bdr")}
-    <h1 style="font-size:22px;margin-bottom:6px">Create a BDR listing</h1>
-    <p class="muted" style="margin-bottom:20px">Pre-build a listing for a business that hasn't signed up yet. No owner or payout details are collected here — whoever opens the claim link and signs up becomes the owner.</p>
-    ${
-      created
-        ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">
-            Draft created. Claim link (share this with the business — anyone who opens it can claim the listing):<br/>
-            <span class="mono small">${escapeHtml(claimUrl || "")}</span>
-          </div>`
-        : ""
-    }
-    <div class="form-card form-card-wide">
-      <h2 style="font-size:16px;margin-bottom:14px">Space details</h2>
-      <form method="POST" action="/api/bdr/listings" enctype="multipart/form-data">
-        <div class="form-row">
-          <div class="field"><label>Business or venue name</label><input name="venue" required placeholder="Corner Press Café" /></div>
-          <div class="field"><label>Listing title</label><input name="title" required placeholder="Wall above the counter" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Category</label>
-            <select name="category">
-              ${CATEGORIES.map((c) => `<option value="${c}">${CATEGORY_LABEL[c]}</option>`).join("")}
-            </select>
-          </div>
-          <div class="field"><label>Space type (optional)</label><input name="subtype" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Suburb / City</label><input name="suburb" required /></div>
-          <div class="field"><label>Premises address</label><input name="address" required /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Postcode (optional)</label><input name="postcode" placeholder="2154" /></div>
-          <div class="field"><label>Country</label><input name="country" value="Australia" /></div>
-        </div>
-        <div class="form-row">
-          <div class="field"><label>Width (mm)</label><input type="number" name="sizeW" required min="1" placeholder="2000" /></div>
-          <div class="field"><label>Height (mm)</label><input type="number" name="sizeH" required min="1" placeholder="3000" /></div>
-        </div>
-        <div class="field"><label>Monthly rate (AUD, excl. GST)</label><input type="number" name="price" required min="1" step="0.01" placeholder="100" /></div>
-        <div class="field"><label>Description</label><textarea name="desc" rows="3"></textarea></div>
-        <div class="field"><label>Photos (up to 8)</label><input type="file" name="photos" accept="image/*" multiple /></div>
-        <div class="divider"></div>
-        <div class="field"><label>Business contact name (your reference only)</label><input name="bdrContactName" placeholder="Who you spoke to on-site" /></div>
-        <div class="field"><label>Business contact email (your reference only)</label><input type="email" name="bdrContactEmail" /></div>
-        <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Create draft &amp; get claim link</button>
-      </form>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Create BDR listing", activeNav: "bdr-new-listing", user, body }));
-}
-
-export async function claimListingPage(req, res, token) {
-  const listing = await db.getListingByClaimToken(token);
-  const user = await currentUser(req);
-  if (!listing || listing.status !== "unclaimed") {
-    return send(res, 404, await layout({ title: "Not found", user, body: `<div class="panel"><h2>Link not valid</h2><p class="muted">This claim link doesn't exist or has already been used.</p></div>` }));
-  }
-
-  const body = `
-    <div class="panel" style="max-width:520px;margin:0 auto">
-      <div class="badge badge-blue" style="margin-bottom:12px">Pre-built listing</div>
-      <h1 style="font-size:22px;margin-bottom:6px">${escapeHtml(listing.title)}</h1>
-      <div class="muted" style="margin-bottom:16px">${escapeHtml(listing.venue)} · ${escapeHtml(locationLine(listing))}</div>
-      <div class="panel-tint" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;text-align:center;margin-bottom:18px">
-        <div><div class="mono" style="font-weight:700">${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)}</div><div class="small muted">Space size</div></div>
-        <div><div class="mono" style="font-weight:700">${money(listing.price)}/mo</div><div class="small muted">Lease rate</div></div>
-      </div>
-      <p class="small muted" style="margin-bottom:18px">A Frontage team member built this listing for your space. Claim it to start earning passive income from it — no cost to list.</p>
-      ${
-        user
-          ? `<form method="POST" action="/api/claim/${token}"><button class="btn btn-primary btn-block" type="submit">Claim this listing as ${escapeHtml(user.fullName)}</button></form>`
-          : `<a href="/onboarding?next=${encodeURIComponent(`/claim/${token}`)}" class="btn btn-primary btn-block">Sign up or log in to claim this listing</a>`
-      }
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Claim your listing", user, body }));
-}
-
-// ---------------- Multi-site cart / media plan (Phase 6) ----------------
-// Separate from bookPage's single-listing flow below — an advertiser
-// buying several sites at once builds this up via "+ Add to media plan" on
-// each listing page, then checks out here in one action
-// (New Style Assets/03-AD-SPACE-TRANSLATION.md §5 §8).
-export async function cartPage(req, res) {
-  const user = await requireUser(req, res, "/plan");
-  if (!user) return;
-  const items = await db.getCartForBuyer(user.id);
-
-  if (items.length === 0) {
-    return send(
-      res,
-      200,
-      await layout({
-        title: "Your media plan",
-        activeNav: "browse",
-        user,
-        body: `<h1 style="font-size:22px;margin-bottom:8px">Your media plan</h1><p class="muted">No sites added yet — browse and use "+ Add to media plan" on a listing to start one.</p><a href="/" class="btn btn-primary" style="margin-top:12px;display:inline-block">Browse spaces →</a>`,
-      })
-    );
-  }
-
-  const rows = await Promise.all(
-    items.map(async (item) => {
-      const listing = await db.getListingById(item.listingId);
-      if (!listing) return "";
-      const subtotal = withGst(listing.price * item.term);
-      return `<div class="panel" style="margin-bottom:12px">
-        <div class="row-between">
-          <div>
-            <strong>${escapeHtml(listing.title)}</strong>
-            <div class="small muted">${escapeHtml(listing.venue)} · ${item.term} months from ${escapeHtml(item.campaignStartDate || "TBC")}</div>
-          </div>
-          <div style="text-align:right">
-            <div class="mono" style="font-weight:700">${money(subtotal)}</div>
-            <form method="POST" action="/api/cart/${item.id}/remove"><button class="btn btn-link" type="submit" style="color:var(--red)">Remove</button></form>
-          </div>
-        </div>
-      </div>`;
-    })
-  );
-  let combinedTotal = 0;
-  for (const item of items) {
-    const listing = await db.getListingById(item.listingId);
-    if (listing) combinedTotal += withGst(listing.price * item.term);
-  }
-  combinedTotal = Math.round(combinedTotal * 100) / 100;
-
-  const stripeConfigured = isStripeConfigured() && Boolean(process.env.STRIPE_PUBLISHABLE_KEY);
-  const needsCard = !user.cardLast4;
-
-  const body = `
-    <h1 style="font-size:22px;margin-bottom:16px">Your media plan</h1>
-    ${rows.join("")}
-    <div class="cost-total panel" style="margin:16px 0">
-      <span>Combined total (${items.length} site${items.length === 1 ? "" : "s"}, inc. GST)</span>
-      <span class="mono" id="cart-grand-total">${money(combinedTotal)}</span>
-    </div>
-
-    <form method="POST" action="/api/cart/checkout" id="cart-checkout-form" class="panel checkout-step">
-      <h2 class="checkout-step-title">Your details &amp; payment</h2>
-      <div class="form-row">
-        <div class="field"><label>Business name <span class="muted">(for your invoice)</span></label><input name="businessName" value="${escapeHtml(user.businessName || "")}" /></div>
-        <div class="field"><label>ABN <span class="muted">(optional)</span></label><input name="abn" value="${escapeHtml(user.abn || "")}" inputmode="numeric" /></div>
-      </div>
-      ${
-        stripeConfigured
-          ? `<div class="field"><label>Card details</label>
-        <div id="card-element" style="padding:11px 13px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--concrete)"></div>
-        <div id="card-errors" class="small" style="color:var(--red);margin-top:6px"></div>
-      </div>`
-          : needsCard
-          ? `<div class="field"><label>Card number</label><input name="cardNumber" required placeholder="4242 4242 4242 4242" maxlength="19" /></div>
-      <div style="display:flex;gap:10px">
-        <div class="field" style="flex:1"><label>Expiry</label><input name="expiry" required placeholder="MM/YY" /></div>
-        <div class="field" style="flex:1"><label>CVC</label><input name="cvc" required placeholder="123" /></div>
-      </div>`
-          : `<div class="small muted" style="margin-bottom:14px">Charging your card on file ending ${escapeHtml(user.cardLast4)}.</div>`
-      }
-      <div class="field"><label>Type your full name to sign each lease</label>
-        <input name="signature" required placeholder="${escapeHtml(user.fullName)}" />
-      </div>
-      <label class="small consent-row">
-        <input type="checkbox" name="agreeTerms" required />
-        <span>I have read and agree to the <a href="/terms/buyer" target="_blank" style="color:var(--orange)">Buyer Terms &amp; Conditions</a> and each lease agreement, and I authorise Frontage to charge the combined amount above.</span>
-      </label>
-      <label class="small consent-row">
-        <input type="checkbox" name="agreeContentPolicy" required />
-        <span>The content I display will be lawful and won't contain anything illegal, discriminatory, or otherwise restricted — each space owner reviews and can decline artwork before it's printed.</span>
-      </label>
-      <button class="btn btn-accent btn-block btn-lg" type="submit" id="cart-pay-btn">Pay ${money(combinedTotal)} &amp; confirm ${items.length} booking${items.length === 1 ? "" : "s"}</button>
-    </form>
-    ${stripeConfigured ? `<script src="https://js.stripe.com/v3/"></script>` : ""}
-    <script>
-      (function () {
-        ${
-          stripeConfigured
-            ? `
-        var stripe = Stripe(${JSON.stringify(process.env.STRIPE_PUBLISHABLE_KEY || "")});
-        var elements = stripe.elements();
-        var card = elements.create('card', { hidePostalCode: true });
-        card.mount('#card-element');
-        card.on('change', function (event) {
-          document.getElementById('card-errors').textContent = event.error ? event.error.message : '';
-        });
-        var form = document.getElementById('cart-checkout-form');
-        var btn = document.getElementById('cart-pay-btn');
-        form.addEventListener('submit', function (e) {
-          e.preventDefault();
-          btn.disabled = true;
-          btn.textContent = 'Processing payment...';
-          fetch('/api/cart/create-intent', { method: 'POST' })
-            .then(function (r) { return r.json().then(function (data) { if (!r.ok) throw new Error(data.error || 'Could not start payment.'); return data; }); })
-            .then(function (data) {
-              return stripe.confirmCardPayment(data.clientSecret, {
-                payment_method: { card: card, billing_details: { name: document.querySelector('input[name=signature]').value || ${JSON.stringify(user.fullName)} } },
-              });
-            })
-            .then(function (result) {
-              if (result.error) throw new Error(result.error.message);
-              var hidden = document.createElement('input');
-              hidden.type = 'hidden';
-              hidden.name = 'paymentIntentId';
-              hidden.value = result.paymentIntent.id;
-              form.appendChild(hidden);
-              form.submit();
-            })
-            .catch(function (err) {
-              document.getElementById('card-errors').textContent = err.message;
-              btn.disabled = false;
-              btn.textContent = 'Pay ${money(combinedTotal)} & confirm ${items.length} booking${items.length === 1 ? "" : "s"}';
-            });
-        });
-        `
-            : ""
-        }
-      })();
-    </script>
-  `;
-  send(res, 200, await layout({ title: "Your media plan", activeNav: "browse", user, body }));
-}
-
-export async function orderConfirmationPage(req, res, orderId) {
-  const user = await requireUser(req, res, `/order/${orderId}`);
-  if (!user) return;
-  const order = await db.getOrderById(orderId);
-  if (!order || order.buyerId !== user.id) return send(res, 404, await layout({ title: "Not found", user, body: "<p>Order not found.</p>" }));
-  const bookings = await db.getBookingsForOrder(orderId);
-  const rows = await Promise.all(
-    bookings.map(async (b) => {
-      const listing = await db.getListingById(b.listingId);
-      return `<div class="row-between small" style="padding:8px 0;border-bottom:1px solid var(--border)">
-        <span>${escapeHtml(listing ? listing.title : b.listingId)} · ${b.term}mo from ${escapeHtml(b.campaignStartDate || "")}</span>
-        <span class="mono">${money(withGst(b.monthlyRate * b.term))}</span>
-      </div>`;
-    })
-  );
-  const body = `
-    <div style="max-width:620px;margin:0 auto">
-      <div class="panel" style="text-align:center;margin-bottom:16px">
-        <div style="font-size:40px;line-height:1;margin-bottom:8px">✅</div>
-        <h1 style="font-size:22px;margin-bottom:4px">Your media plan is booked</h1>
-        <p class="muted" style="margin-bottom:0">${bookings.length} site${bookings.length === 1 ? "" : "s"} · Order ${escapeHtml(order.id)}</p>
-      </div>
-      <div class="panel" style="margin-bottom:16px">
-        ${rows.join("")}
-        <div class="row-between" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-weight:700">
-          <span>Total paid</span><span class="mono">${money(order.totalAmount)}</span>
-        </div>
-      </div>
-      <a href="/account/leases" class="btn btn-primary btn-block">Track these leases</a>
-      <a href="/" class="btn btn-outline btn-block" style="margin-top:10px">Back to browse</a>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Order confirmed", activeNav: "browse", user, body }));
-}
-
-// ---------------- Book / contract / payment ----------------
-export async function bookPage(req, res, listingId, query) {
-  const user = await requireUser(req, res, `/book/${listingId}`);
-  if (!user) return;
-  const listing = await db.getListingById(listingId);
-  if (!listing) return send(res, 404, await layout({ title: "Not found", user, body: "<p>Listing not found.</p>" }));
-
-  const confirmedBookingId = query.get("confirmed");
-  if (confirmedBookingId) {
-    const booking = await db.getBookingById(confirmedBookingId);
-    const jobOrder = booking ? (await db.getJobOrdersForSeller(booking.sellerId)).find((j) => j.bookingId === booking.id) : null;
-    const payment = booking ? await db.getPaymentByBookingId(booking.id) : null;
-    const subtotal = payment.subtotalAmount != null ? Number(payment.subtotalAmount) : Number(payment.totalAmount);
-    const gstAmount = payment.gstAmount != null ? Number(payment.gstAmount) : 0;
-    const body = `
-      <div style="max-width:620px;margin:0 auto">
-        <div class="panel" style="text-align:center;margin-bottom:16px">
-          <div style="font-size:40px;line-height:1;margin-bottom:8px">✅</div>
-          <h1 style="font-size:22px;margin-bottom:4px">You're booked in</h1>
-          <p class="muted" style="margin-bottom:0">${escapeHtml(listing.title)} — ${booking.term}-month lease at ${escapeHtml(listing.venue)}</p>
-        </div>
-
-        <div class="panel" style="margin-bottom:16px">
-          <div class="row-between" style="margin-bottom:10px">
-            <h2 style="font-size:15px;margin:0">Tax invoice</h2>
-            <span class="small muted mono">${escapeHtml(payment.id)}</span>
-          </div>
-          <div class="row-between small"><span class="muted">${booking.term} months × ${money(booking.monthlyRate)}/mo</span><span class="mono">${money(subtotal)}</span></div>
-          <div class="row-between small" style="margin-top:6px"><span class="muted">GST (10%)</span><span class="mono">${money(gstAmount)}</span></div>
-          <div class="row-between" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-weight:700">
-            <span>Total paid</span><span class="mono">${money(payment.totalAmount)}</span>
-          </div>
-          <div class="small muted" style="margin-top:10px">Paid by ${escapeHtml(user.businessName || user.fullName)}${user.abn ? ` · ABN ${escapeHtml(user.abn)}` : ""}. A copy of this invoice has been emailed to ${escapeHtml(user.email)}.</div>
-        </div>
-
-        <div class="panel" style="margin-bottom:16px">
-          <h2 style="font-size:15px;margin-bottom:10px">What happens next</h2>
-          <ol class="small" style="padding-left:18px;line-height:1.8;margin:0">
-            <li><strong>A contractor picks up the job</strong> (reference <span class="mono">${escapeHtml(jobOrder.id)}</span>, currently ${STAGE_LABELS[jobOrder.status]}).</li>
-            <li><strong>They quote you for printing, installation and removal.</strong> That's billed separately by the contractor and is not part of the amount above.</li>
-            <li><strong>The seller confirms site access</strong> and the contractor books an install date ahead of your campaign start.</li>
-            <li><strong>Your campaign runs ${escapeHtml(booking.campaignStartDate || "")} to ${escapeHtml(booking.campaignEndDate || "")}</strong> (${booking.term} months) — installation happens before that start date, with lead time for artwork approval and printing.</li>
-          </ol>
-        </div>
-
-        <a href="/account/leases" class="btn btn-primary btn-block">Track this lease</a>
-        <a href="/" class="btn btn-outline btn-block" style="margin-top:10px">Back to browse</a>
-      </div>
-    `;
-    return send(res, 200, await layout({ title: "Booking confirmed", activeNav: "browse", user, body }));
-  }
-
-  const needsCard = !user.cardLast4;
-  // Real Stripe wired up (STRIPE_SECRET_KEY set) → embedded Elements card
-  // field, charged via createPaymentIntent before the booking is created.
-  // Not configured yet → the original plaintext-card stub flow, so the app
-  // stays fully testable before real Stripe keys exist (see lib/payments.js).
-  const stripeConfigured = isStripeConfigured() && Boolean(process.env.STRIPE_PUBLISHABLE_KEY);
-  const installEstimate = estimateJobFee(listing.sizeW, listing.sizeH);
-  const heroPhoto = (listing.photos || [])[0];
-  // 3-phase flight calendar (lib/flightCalendar.js) — the earliest date this
-  // site could actually go live, given its lead time (production/approval,
-  // plus any access-specific delay). "Available" isn't the same as
-  // "bookable from" (New Style Assets/03-AD-SPACE-TRANSLATION.md §5 §1).
-  const earliestStart = earliestStartDate(listing).toISOString().slice(0, 10);
-  const leadDays = computeLeadTimeDays(listing);
-  const body = `
-    <a href="/listing/${listing.id}" class="small muted">← Back to listing</a>
-    <div class="checkout" style="margin-top:14px">
-      <form method="POST" action="/api/bookings" id="booking-form">
-        <input type="hidden" name="listingId" value="${listing.id}" />
-
-        <!-- 1. What you're booking -->
-        <div class="panel checkout-step">
-          <h2 class="checkout-step-title"><span class="step-num">1</span> What you're booking</h2>
-          <div style="display:flex;gap:14px;align-items:center">
-            ${heroPhoto ? `<img src="${escapeHtml(heroPhoto)}" alt="" style="width:88px;height:66px;object-fit:cover;border-radius:8px;flex-shrink:0" />` : ""}
-            <div style="min-width:0">
-              <div style="font-weight:700">${escapeHtml(listing.title)}</div>
-              <div class="small muted">${escapeHtml(listing.venue)} · ${escapeHtml(locationLine(listing))}</div>
-              <div class="small muted">${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)} advertising space</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 2. Lease term -->
-        <div class="panel checkout-step">
-          <h2 class="checkout-step-title"><span class="step-num">2</span> Choose your lease term</h2>
-          <div class="term-options">
-            <label class="term-option">
-              <input type="radio" name="term" value="6" />
-              <span><strong>6 months</strong><span class="small muted term-option-total" data-term="6"></span></span>
-            </label>
-            <label class="term-option">
-              <input type="radio" name="term" value="12" checked />
-              <span><strong>12 months</strong><span class="small muted term-option-total" data-term="12"></span></span>
-            </label>
-          </div>
-          <div class="field" style="margin-top:14px">
-            <label>Campaign start date</label>
-            <input type="date" name="campaignStartDate" id="campaign-start-input" required min="${earliestStart}" value="${earliestStart}" />
-            <div class="hint">Earliest possible: ${escapeHtml(earliestStart)} — this site needs ${leadDays} day${leadDays === 1 ? "" : "s"}' lead time for artwork approval, printing, and install before it can go live.</div>
-          </div>
-          <div style="display:flex;gap:20px;margin-top:16px;flex-wrap:wrap" id="flight-phases">
-            <div style="flex:1;min-width:140px">
-              <div class="small muted" style="font-weight:600">Production</div>
-              <div style="font-size:13.5px;font-weight:600;margin-top:3px" id="phase-production"></div>
-            </div>
-            <div style="flex:1;min-width:140px">
-              <div class="small muted" style="font-weight:600">Live / flight</div>
-              <div style="font-size:13.5px;font-weight:600;margin-top:3px" id="phase-live"></div>
-            </div>
-            <div style="flex:1;min-width:140px">
-              <div class="small muted" style="font-weight:600">Removal</div>
-              <div style="font-size:13.5px;font-weight:600;margin-top:3px" id="phase-removal"></div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 3. Costs -->
-        <div class="panel checkout-step">
-          <h2 class="checkout-step-title"><span class="step-num">3</span> What it costs</h2>
-
-          <div class="cost-block">
-            <div class="cost-block-head">
-              <span>Paid now to Frontage</span>
-              <span class="mono" id="grand-total">${money(withGst(listing.price * 12))}</span>
-            </div>
-            <div class="row-between small"><span class="muted"><span id="term-label">12 months</span> × ${money(listing.price)}/mo</span><span class="mono" id="term-subtotal">${money(listing.price * 12)}</span></div>
-            <div class="row-between small" style="margin-top:6px"><span class="muted">GST (10%)</span><span class="mono" id="term-gst">${money(gstOn(listing.price * 12))}</span></div>
-            <div class="small muted" style="margin-top:8px">Charged once, upfront, for the whole term — there is no monthly billing and no price difference for choosing a longer term.</div>
-          </div>
-
-          <div class="cost-block" style="margin-top:12px">
-            <div class="cost-block-head">
-              <span>Paid separately to your installer
-                <button type="button" class="info-btn" data-info="install-info" aria-label="More about installation costs">i</button>
-              </span>
-              <span class="mono">~${money(withGst(installEstimate))}</span>
-            </div>
-            <div class="small muted">Estimated cost of printing your artwork, putting it up, and taking it down at the end of the lease.</div>
-            <div class="info-pop" id="install-info" hidden>
-              <strong>About installation costs</strong>
-              <p class="small" style="margin:6px 0 0;line-height:1.6">
-                This is a <strong>one-off upfront cost covering both installation and removal</strong> — you are not charged again to take the ad down at the end of your lease.
-                It is billed by the independent contractor who takes your job, not by Frontage, so it is not included in the amount above.
-                The figure shown is an estimate based on your space's size; the contractor sends you a firm quote to approve before any work starts.
-              </p>
-            </div>
-          </div>
-
-          <div class="cost-total">
-            <span>Estimated total cost of this campaign</span>
-            <span class="mono" id="campaign-total">${money(withGst(listing.price * 12) + withGst(installEstimate))}</span>
-          </div>
-        </div>
-
-        <!-- 4. Details & authorisation -->
-        <div class="panel checkout-step">
-          <h2 class="checkout-step-title"><span class="step-num">4</span> Your details &amp; payment</h2>
-
-          <div class="form-row">
-            <div class="field"><label>Business name <span class="muted">(for your invoice)</span></label><input name="businessName" value="${escapeHtml(user.businessName || "")}" placeholder="OpenHouse Realty" /></div>
-            <div class="field"><label>ABN <span class="muted">(optional)</span></label><input name="abn" value="${escapeHtml(user.abn || "")}" placeholder="12 345 678 901" inputmode="numeric" /></div>
-          </div>
-          <p class="small muted" style="margin:-4px 0 14px">Used on the tax invoice we email you. Leave blank if you're booking as an individual.</p>
-
-          ${
-            stripeConfigured
-              ? `<div class="field"><label>Card details</label>
-            <div id="card-element" style="padding:11px 13px;border-radius:8px;border:1px solid var(--border);background:var(--concrete)"></div>
-            <div id="card-errors" class="small" style="color:var(--red);margin-top:6px"></div>
-          </div>`
-              : needsCard
-              ? `<div class="field"><label>Card number</label><input name="cardNumber" required placeholder="4242 4242 4242 4242" maxlength="19" /></div>
-          <div style="display:flex;gap:10px">
-            <div class="field" style="flex:1"><label>Expiry</label><input name="expiry" required placeholder="MM/YY" /></div>
-            <div class="field" style="flex:1"><label>CVC</label><input name="cvc" required placeholder="123" /></div>
-          </div>`
-              : `<div class="small muted" style="margin-bottom:14px">Charging your card on file ending ${escapeHtml(user.cardLast4)}.</div>`
-          }
-
-          <div class="field"><label>Type your full name to sign the lease</label>
-            <input name="signature" required placeholder="${escapeHtml(user.fullName)}" />
-            <div class="signature" id="sig-preview"></div>
-            <div class="hint">This is your electronic signature on the lease agreement between you and the space owner — it's what makes the agreement binding, and it's recorded on your copy of the contract.</div>
-          </div>
-
-          <label class="small consent-row">
-            <input type="checkbox" name="agreeTerms" required />
-            <span>I have read and agree to the <a href="/terms/buyer" target="_blank" style="color:var(--orange)">Buyer Terms &amp; Conditions</a> and the lease agreement, and I authorise Frontage to charge the amount shown above.</span>
-          </label>
-          <label class="small consent-row">
-            <input type="checkbox" name="agreeContentPolicy" required />
-            <span>The content I display will be lawful and won't contain anything illegal, discriminatory, or otherwise restricted — the space owner reviews and can decline artwork before it's printed.</span>
-          </label>
-
-          <button class="btn btn-accent btn-block btn-lg" type="submit" id="pay-btn">Pay ${money(withGst(listing.price * 12))} &amp; confirm booking</button>
-          <p class="small muted" style="text-align:center;margin:10px 0 0">You'll get a tax invoice by email straight away.</p>
-        </div>
-      </form>
-    </div>
-    ${stripeConfigured ? `<script src="https://js.stripe.com/v3/"></script>` : ""}
-    <script>
-      (function() {
-        var rate = ${listing.price};
-        var installIncGst = ${withGst(installEstimate)};
-        var GST = ${GST_RATE};
-        var btn = document.getElementById('pay-btn');
-        function fmt(n) { return '$' + n.toLocaleString('en-AU', {minimumFractionDigits:2, maximumFractionDigits:2}); }
-        function round2(n) { return Math.round(n * 100) / 100; }
-
-        function selectedTerm() {
-          var checked = document.querySelector('input[name=term]:checked');
-          return checked ? parseInt(checked.value, 10) : 12;
-        }
-
-        function update() {
-          var term = selectedTerm();
-          var sub = round2(rate * term);
-          var gst = round2(sub * GST);
-          var incGst = round2(sub + gst);
-          document.getElementById('term-subtotal').textContent = fmt(sub);
-          document.getElementById('term-gst').textContent = fmt(gst);
-          document.getElementById('grand-total').textContent = fmt(incGst);
-          document.getElementById('term-label').textContent = term + ' months';
-          document.getElementById('campaign-total').textContent = fmt(round2(incGst + installIncGst));
-          if (btn) btn.innerHTML = 'Pay ' + fmt(incGst) + ' &amp; confirm booking';
-        }
-
-        // Per-option "total" hints inside the 6/12-month radio labels.
-        [].forEach.call(document.querySelectorAll('.term-option-total'), function (el) {
-          var t = parseInt(el.getAttribute('data-term'), 10);
-          el.textContent = fmt(round2(rate * t * (1 + GST))) + ' inc. GST';
-        });
-        [].forEach.call(document.querySelectorAll('input[name=term]'), function (r) {
-          r.addEventListener('change', function () { update(); updatePhases(); });
-        });
-        update();
-
-        // 3-phase flight-calendar breakdown (lib/flightCalendar.js) — mirrors
-        // the server's own date math (production = start - leadDays, live
-        // runs the chosen term, removal = live end + 2 days) so what's shown
-        // here always matches what createBookingHandler actually validates
-        // and stores.
-        var LEAD_DAYS = ${leadDays};
-        var REMOVAL_DAYS = 2;
-        var startInput = document.getElementById('campaign-start-input');
-        function fmtDate(d) { return d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' }); }
-        function addDays(d, n) { var r = new Date(d); r.setDate(r.getDate() + n); return r; }
-        function addMonths(d, n) { var r = new Date(d); r.setMonth(r.getMonth() + n); return r; }
-        function updatePhases() {
-          if (!startInput || !startInput.value) return;
-          // new Date('YYYY-MM-DD') parses as UTC midnight — fine here since
-          // only the calendar date (not the time-of-day) is ever displayed.
-          var start = new Date(startInput.value + 'T00:00:00');
-          var term = selectedTerm();
-          var liveEnd = addMonths(start, term);
-          var removalEnd = addDays(liveEnd, REMOVAL_DAYS);
-          document.getElementById('phase-production').textContent = fmtDate(addDays(start, -LEAD_DAYS)) + ' → ' + fmtDate(start);
-          document.getElementById('phase-live').textContent = fmtDate(start) + ' → ' + fmtDate(liveEnd);
-          document.getElementById('phase-removal').textContent = fmtDate(liveEnd) + ' → ' + fmtDate(removalEnd);
-        }
-        if (startInput) startInput.addEventListener('change', updatePhases);
-        updatePhases();
-
-        // "i" buttons reveal their explanatory block in place.
-        [].forEach.call(document.querySelectorAll('.info-btn'), function (b) {
-          b.addEventListener('click', function () {
-            var pop = document.getElementById(b.getAttribute('data-info'));
-            if (pop) pop.hidden = !pop.hidden;
-          });
-        });
-
-        var sigInput = document.querySelector('input[name=signature]');
-        var sigPreview = document.getElementById('sig-preview');
-        sigInput.addEventListener('input', function() { sigPreview.textContent = sigInput.value; });
-
-        ${
-          stripeConfigured
-            ? `
-        // Embedded Stripe Elements flow: intercept submit, confirm the card
-        // payment in-page (no redirect off Frontage), then let the form post
-        // through normally with the confirmed paymentIntentId attached.
-        // createBookingHandler (routes/api.js) re-verifies the PaymentIntent
-        // server-side before ever creating the booking.
-        var stripe = Stripe(${JSON.stringify(process.env.STRIPE_PUBLISHABLE_KEY || "")});
-        var elements = stripe.elements();
-        var card = elements.create('card', { hidePostalCode: true });
-        card.mount('#card-element');
-        card.on('change', function (event) {
-          document.getElementById('card-errors').textContent = event.error ? event.error.message : '';
-        });
-        var form = document.getElementById('booking-form');
-        var listingId = ${JSON.stringify(listing.id)};
-        form.addEventListener('submit', function (e) {
-          e.preventDefault();
-          btn.disabled = true;
-          var originalHtml = btn.innerHTML;
-          btn.textContent = 'Processing payment...';
-          fetch('/api/bookings/create-intent', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ listingId: listingId, term: selectedTerm() }),
-          })
-            .then(function (r) { return r.json().then(function (data) { if (!r.ok) throw new Error(data.error || 'Could not start payment.'); return data; }); })
-            .then(function (data) {
-              return stripe.confirmCardPayment(data.clientSecret, {
-                payment_method: { card: card, billing_details: { name: sigInput.value || ${JSON.stringify(user.fullName)} } },
-              });
-            })
-            .then(function (result) {
-              if (result.error) throw new Error(result.error.message);
-              var hidden = document.createElement('input');
-              hidden.type = 'hidden';
-              hidden.name = 'paymentIntentId';
-              hidden.value = result.paymentIntent.id;
-              form.appendChild(hidden);
-              form.submit();
-            })
-            .catch(function (err) {
-              document.getElementById('card-errors').textContent = err.message;
-              btn.disabled = false;
-              btn.innerHTML = originalHtml;
-            });
-        });
-        `
-            : ""
-        }
-      })();
-    </script>
-  `;
-  send(res, 200, await layout({ title: "Book this space", activeNav: "browse", user, body }));
-}
-
-// ---------------- Chat (shared helpers) ----------------
-async function renderChatBubbles(messages, currentUserId) {
-  if (!messages.length) return `<div class="small muted">No messages yet.</div>`;
-  const bubbles = await Promise.all(
-    messages.map(async (m) => {
-      const sender = await db.getPersonById(m.senderId);
-      const mine = m.senderId === currentUserId;
-      return `<div class="chat-bubble${mine ? " mine" : ""}">
-        <div class="small" style="font-weight:600;margin-bottom:2px">${escapeHtml(sender ? sender.fullName.split(" ")[0] : "Unknown")}</div>
-        <div>${escapeHtml(m.body)}</div>
-        <div class="small muted" style="margin-top:2px">${formatDate(m.createdAt)}</div>
-      </div>`;
-    })
-  );
-  return bubbles.join("");
-}
-
-async function jobChatBlock(jobOrder, currentUserId, otherPartyLabel = "") {
-  const messages = await db.getMessagesForThread("job", jobOrder.id);
-  return `<details style="margin-top:10px">
-    <summary class="small" style="cursor:pointer;color:var(--orange);font-weight:600">💬 Chat${otherPartyLabel ? ` with the ${otherPartyLabel}` : ""} (${messages.length})</summary>
-    <div class="chat-thread" data-poll-url="/api/joborders/${jobOrder.id}/messages" data-current-user="${escapeHtml(currentUserId)}" style="margin-top:8px">
-      ${await renderChatBubbles(messages, currentUserId)}
-    </div>
-    <form method="POST" action="/api/joborders/${jobOrder.id}/messages" class="chat-form" style="margin-top:8px">
-      <input name="body" placeholder="Message about this job..." required />
-      <button class="btn btn-sm btn-dark" type="submit">Send</button>
-    </form>
-  </details>`;
-}
-
-// ---------------- Seller job orders ----------------
-export async function sellerJobsPage(req, res) {
-  const user = await requireUser(req, res, "/seller/jobs");
-  if (!user) return;
-  const jobOrders = await db.getJobOrdersForSeller(user.id);
-
-  if (jobOrders.length === 0) {
-    return send(
-      res,
-      200,
-      await layout({
-        title: "Job orders",
-        activeNav: "seller-jobs",
-        user,
-        body: `<h1 style="font-size:22px;margin-bottom:8px">Job orders</h1><p class="muted">No job orders yet — once someone books one of your listings, it'll show up here.</p>`,
-      })
-    );
-  }
-
-  const cards = (
-    await Promise.all(
-      jobOrders.map(async (j) => {
-        const listing = await db.getListingById(j.listingId);
-        const buyer = await db.getUserById(j.buyerId);
-        const idx = STAGES.indexOf(j.status);
-        const steps = STAGES.map((s, i) => {
-          const cls = i < idx ? "done" : i === idx ? "active" : "";
-          return `<div class="step"><div class="step-dot ${cls}"></div>${STAGE_LABELS[s]}</div>`;
-        }).join("");
-
-        const accessForm =
-          !j.sellerAccessConfirmed && j.status !== "broadcast"
-            ? `<form method="POST" action="/api/joborders/${j.id}/access" style="margin-top:12px">
-              <div class="field" style="max-width:260px"><label>Confirm install access window</label>
-                <select name="installWindow">
-                  <option>12–16 Aug</option><option>19–23 Aug</option><option>26–30 Aug</option>
-                </select>
-              </div>
-              <button class="btn btn-primary btn-sm" type="submit">Confirm access</button>
-            </form>`
-            : j.sellerAccessConfirmed
-            ? `<div class="small" style="color:var(--green);margin-top:10px">✓ Access confirmed for ${escapeHtml(j.installWindow)}</div>`
-            : `<div class="small muted" style="margin-top:10px">Waiting for a contractor to accept this job before scheduling access.</div>`;
-
-        const payment = await db.getPaymentByBookingId(j.bookingId);
-        const payoutLine = !payment
-          ? ""
-          : payment.payoutStatus === "released"
-          ? `<div class="small" style="color:var(--green)">✓ Payout released: <span class="mono">${money(payment.payoutAmount)}</span>/mo${payment.payoutBlockedReason ? ` — ${escapeHtml(payment.payoutBlockedReason)}` : ""}</div>`
-          : `<div class="small muted">Payout held by Frontage until install is confirmed: <span class="mono" style="color:var(--ink)">${money(payment.payoutAmount)}</span>/mo (after 15% fee)</div>`;
-
-        // Content-approval workflow (Phase 4) — the owner's review gate.
-        // jobOrderSchedule (routes/api.js) refuses to schedule an install
-        // until artworkStatus is 'approved', so this is the seller's only
-        // action item once a quote's been accepted.
-        const artworkReview =
-          j.artworkStatus === "pending_review"
-            ? `<div class="panel-tint" style="margin-top:10px">
-              <div class="small" style="margin-bottom:8px"><strong>Campaign artwork ready for your review</strong></div>
-              ${j.artworkUrl ? `<a href="${escapeHtml(j.artworkUrl)}" target="_blank" class="small" style="color:var(--orange);display:block;margin-bottom:8px">View uploaded file →</a>` : ""}
-              <div style="display:flex;gap:8px;flex-wrap:wrap">
-                <form method="POST" action="/api/joborders/${j.id}/artwork/approve"><button class="btn btn-primary btn-sm" type="submit">Approve</button></form>
-                <form method="POST" action="/api/joborders/${j.id}/artwork/reject" style="display:flex;gap:6px;align-items:center">
-                  <input name="reason" placeholder="Reason for the advertiser" required style="padding:8px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:12px" />
-                  <button class="btn btn-outline btn-sm" type="submit">Decline</button>
-                </form>
-              </div>
-            </div>`
-            : j.artworkStatus === "approved"
-            ? `<div class="small" style="color:var(--green);margin-top:10px">✓ Campaign artwork approved</div>`
-            : STAGES.indexOf(j.status) >= STAGES.indexOf("quote_accepted")
-            ? `<div class="small muted" style="margin-top:10px">Waiting on the advertiser to upload campaign artwork${j.artworkStatus === "rejected" ? " (you asked for changes)" : ""}.</div>`
-            : "";
-
-        return `<div class="panel" style="margin-bottom:16px">
-        <div class="row-between" style="margin-bottom:10px">
-          <div><strong>${escapeHtml(listing ? listing.title : j.listingId)}</strong><div class="small muted">Job ${j.id} · Booked by ${escapeHtml(buyer ? buyer.businessName || buyer.fullName : "—")}</div></div>
-          <span class="badge ${j.status === "installed" ? "badge-green" : j.status === "broadcast" ? "badge-orange" : "badge-blue"}">${STAGE_LABELS[j.status].toUpperCase()}</span>
-        </div>
-        <div class="steps" style="margin-bottom:10px">${steps}</div>
-        ${payoutLine}
-        ${accessForm}
-        ${artworkReview}
-        ${j.contractorId ? await jobChatBlock(j, user.id, "contractor") : ""}
-      </div>`;
-      })
-    )
-  ).join("");
-
-  const body = `<h1 style="font-size:22px;margin-bottom:16px">Job orders</h1>${cards}`;
-  send(res, 200, await layout({ title: "Job orders", activeNav: "seller-jobs", user, body }));
-}
-
-// ---------------- Contractor: ping / claim ----------------
-export async function contractorPingPage(req, res) {
-  const contractor = await requireContractor(req, res, "/contractor/ping");
-  if (!contractor) return;
-
-  if (!contractor.isApprovedContractor) {
-    const status = contractor.contractorApplicationStatus;
-    let body;
-    if (status === "pending") {
-      body = `
-      <div class="panel" style="max-width:480px;margin:0 auto;text-align:center">
-        <div class="badge badge-orange" style="margin:0 auto 12px">Application under review</div>
-        <h2 style="margin-bottom:8px">Thanks for applying</h2>
-        <p class="muted small" style="margin-bottom:12px">We're reviewing your business number, company registration, and insurance documents. You'll get job alerts as soon as you're approved.</p>
-        <a href="/contractor/support" class="small" style="color:var(--orange)">Questions about your application? Contact contractor support →</a>
-      </div>`;
-    } else if (status === "rejected") {
-      const apps = await db.getContractorApplicationsByContractor(contractor.id);
-      const app = apps.slice(-1)[0];
-      body = `
-      <div class="panel" style="max-width:480px;margin:0 auto;text-align:center">
-        <div class="badge badge-orange" style="margin:0 auto 12px">Application not approved</div>
-        <h2 style="margin-bottom:8px">Your application wasn't approved</h2>
-        <p class="muted small" style="margin-bottom:16px">${escapeHtml((app && app.rejectionReason) || "Please check your documentation and try again.")}</p>
-        <a href="/contractor/apply" class="btn btn-primary btn-block">Re-apply</a>
-        <a href="/contractor/support" class="small" style="color:var(--orange);display:block;margin-top:10px">Questions? Contact contractor support →</a>
-      </div>`;
-    } else {
-      body = `
-      <div class="panel" style="max-width:480px;margin:0 auto;text-align:center">
-        <h2 style="margin-bottom:8px">Become a contractor</h2>
-        <p class="muted small" style="margin-bottom:16px">Contractors are vetted before they can claim jobs — we need proof of insurance, your business number, and company registration details.</p>
-        <a href="/contractor/apply" class="btn btn-primary btn-block">Apply as a contractor</a>
-      </div>`;
-    }
-    return send(res, 200, await contractorLayout({ title: "Contractor", activeNav: "contractor-ping", contractor, body }));
-  }
-
-  const broadcasts = await db.getBroadcastJobOrders();
-  const rows = (
-    await Promise.all(
-      broadcasts.map(async (j) => {
-        const listing = await db.getListingById(j.listingId);
-        return `<div class="job-row">
-        <div class="row-between">
-          <div>
-            <div class="badge badge-orange" style="margin-bottom:6px">NEW JOB ORDER</div>
-            <strong>${escapeHtml(listing.title)}</strong>
-            <div class="small muted">${escapeHtml(listing.venue)} · ${escapeHtml(listing.suburb)} · ${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)}</div>
-          </div>
-          <div style="text-align:right">
-            <div class="mono" style="font-weight:700;color:var(--green)">${money(j.estimate)}</div>
-            <div class="small muted">est. payout</div>
-          </div>
-        </div>
-        <form method="POST" action="/api/joborders/${j.id}/claim" style="margin-top:10px">
-          <button class="btn btn-primary btn-sm" type="submit">Accept job</button>
+    <div class="form-page">
+      <a href="/sell" class="small muted">← My listings</a>
+      <div class="page-head" style="margin-top:8px"><h1>Edit listing</h1><a href="/listing/${escapeHtml(listing.id)}" class="btn btn-outline btn-sm">View listing</a></div>
+      ${listing.status === "removed" ? `<div class="notice notice-orange">Our moderators removed this listing${listing.removedReason ? `: ${escapeHtml(listing.removedReason)}` : ""}. Editing it won't put it back live — <a href="/contact" class="link">contact us</a> if you think this was a mistake.</div>` : ""}
+      ${listingFormMarkup({ listing, action: `/api/listings/${listing.id}/update`, submitLabel: "Save changes", needsVerification: false })}
+      <div class="panel danger-zone">
+        <h2>Delete this listing</h2>
+        <p class="small muted">Takes it off Frontage straight away. Your existing conversations stay in your inbox.</p>
+        <form method="POST" action="/api/listings/${escapeHtml(listing.id)}/delete" data-confirm="Delete this listing? This can't be undone.">
+          <button class="btn btn-danger" type="submit">Delete listing</button>
         </form>
-      </div>`;
-      })
-    )
-  ).join("");
-
-  const body = `
-    <div class="row-between" style="margin-bottom:16px">
-      <div>
-        <h1 style="font-size:22px">Job pings</h1>
-        <div class="badge badge-green">● Online — job alerts on</div>
       </div>
-      <a href="/contractor/board" class="btn btn-outline btn-sm">View job board →</a>
-    </div>
-    ${broadcasts.length === 0 ? `<div class="panel"><p class="muted">Listening for jobs — nothing waiting right now. New bookings appear here the moment a seller confirms.</p></div>` : `<div class="job-list">${rows}</div>`}
-  `;
-  send(res, 200, await contractorLayout({ title: "Job pings", activeNav: "contractor-ping", contractor, body }));
-}
-
-// ---------------- Contractor: job board ----------------
-export async function contractorBoardPage(req, res) {
-  const contractor = await requireContractor(req, res, "/contractor/board");
-  if (!contractor) return;
-  if (!contractor.isApprovedContractor) return redirect(res, "/contractor/ping");
-
-  const jobs = await db.getJobOrdersForContractor(contractor.id);
-
-  const cards = (
-    await Promise.all(
-      jobs.map(async (j) => {
-        const listing = await db.getListingById(j.listingId);
-        const idx = STAGES.indexOf(j.status);
-        const steps = STAGES.slice(1) // hide "broadcast" once claimed
-          .map((s, i2) => {
-            const i = i2 + 1;
-            const cls = i < idx ? "done" : i === idx ? "active" : "";
-            return `<div class="step"><div class="step-dot ${cls}"></div>${STAGE_LABELS[s]}</div>`;
-          })
-          .join("");
-
-        let actionBlock = "";
-        if (j.status === "new") {
-          actionBlock = `<form method="POST" action="/api/joborders/${j.id}/confirm-site"><button class="btn btn-primary btn-sm" type="submit">Confirm site details</button></form>`;
-        } else if (j.status === "site_confirmed") {
-          actionBlock = `<form method="POST" action="/api/joborders/${j.id}/quote">
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-            <div class="field" style="flex:1;min-width:100px;margin-bottom:0"><label>Print</label><input type="number" name="print" value="340" min="0" required /></div>
-            <div class="field" style="flex:1;min-width:100px;margin-bottom:0"><label>Install</label><input type="number" name="install" value="260" min="0" required /></div>
-            <div class="field" style="flex:1;min-width:100px;margin-bottom:0"><label>Uninstall</label><input type="number" name="uninstall" value="120" min="0" required /></div>
-          </div>
-          <button class="btn btn-primary btn-sm" type="submit">Send quote to buyer</button>
-        </form>`;
-        } else if (j.status === "quote_sent") {
-          const total = j.quote ? j.quote.print + j.quote.install + j.quote.uninstall : 0;
-          actionBlock = `<div class="small muted" style="margin-bottom:8px">Quote of ${money(total)} sent — waiting on buyer to accept.</div>
-          <form method="POST" action="/api/joborders/${j.id}/simulate-buyer-accept"><button class="btn btn-outline btn-sm" type="submit">Simulate buyer acceptance (demo)</button></form>`;
-        } else if (j.status === "quote_accepted") {
-          // Content-approval gate (Phase 4) — jobOrderSchedule refuses this
-          // until artworkStatus is 'approved', so don't even show the form
-          // until then; show what's actually blocking it instead.
-          actionBlock =
-            j.artworkStatus === "approved"
-              ? `<form method="POST" action="/api/joborders/${j.id}/schedule" style="display:flex;gap:8px;align-items:flex-end">
-          <div class="field" style="margin-bottom:0"><label>Install date</label><input type="date" name="installDate" required /></div>
-          <button class="btn btn-primary btn-sm" type="submit">Confirm date</button>
-        </form>`
-              : j.artworkStatus === "pending_review"
-              ? `<div class="small muted">Buyer has uploaded artwork — waiting on the space owner to approve it before this can be scheduled.</div>`
-              : `<div class="small muted">Can't schedule yet — waiting on the buyer to upload campaign artwork for the owner to approve.</div>`;
-        } else if (j.status === "scheduled") {
-          actionBlock = `<div class="small muted" style="margin-bottom:8px">Scheduled for ${formatDate(j.installDate)}.</div>
-          <form method="POST" action="/api/joborders/${j.id}/complete"><button class="btn btn-dark btn-sm" type="submit">Mark install complete</button></form>`;
-        } else if (j.status === "installed") {
-          const total = j.quote ? j.quote.print + j.quote.install + j.quote.uninstall : 0;
-          actionBlock = `<div class="small" style="color:var(--green)">✓ Installed — invoiced ${money(total)} directly to buyer (outside Frontage payouts). Lease is now active.</div>`;
-        }
-
-        return `<div class="panel" style="margin-bottom:16px">
-        <div class="row-between" style="margin-bottom:10px">
-          <div><strong>${escapeHtml(listing.title)}</strong><div class="small muted">${j.id} · ${escapeHtml(listing.venue)} · ${escapeHtml(listing.address)}</div></div>
-          <span class="badge ${j.status === "installed" ? "badge-green" : "badge-blue"}">${STAGE_LABELS[j.status].toUpperCase()}</span>
-        </div>
-        <div class="steps" style="margin-bottom:10px">${steps}</div>
-        ${j.sellerAccessConfirmed ? `<div class="small" style="color:var(--green);margin-bottom:8px">✓ Seller confirmed access: ${escapeHtml(j.installWindow)}</div>` : `<div class="small muted" style="margin-bottom:8px">Waiting on seller to confirm an access window — use the chat below to coordinate directly with them.</div>`}
-        ${actionBlock}
-        ${await jobChatBlock(j, contractor.id, "seller")}
-      </div>`;
-      })
-    )
-  ).join("");
-
-  const body = `
-    <div class="row-between" style="margin-bottom:16px">
-      <div>
-        <h1 style="font-size:22px">Job board</h1>
-        <div class="small muted">Jobs you've accepted — quote, schedule, and mark them installed here.</div>
-      </div>
-      <a href="/contractor/ping" class="btn btn-outline btn-sm">Check for new pings →</a>
-    </div>
-    ${jobs.length === 0 ? `<div class="panel"><p class="muted">No jobs accepted yet. <a href="/contractor/ping" style="color:var(--orange)">Go check for pings →</a></p></div>` : cards}
-  `;
-  send(res, 200, await contractorLayout({ title: "Job board", activeNav: "contractor-board", contractor, body }));
-}
-
-// ---------------- Contractor: apply / admin review ----------------
-export async function contractorApplyPage(req, res, query) {
-  const contractor = await requireContractor(req, res, "/contractor/apply");
-  if (!contractor) return;
-
-  if (contractor.isApprovedContractor) return redirect(res, "/contractor/ping");
-
-  const submitted = query.get("submitted");
-  const err = query.get("err");
-  const body = `
-    <h1 style="font-size:22px;margin-bottom:6px">Apply as a contractor</h1>
-    <p class="muted" style="margin-bottom:20px">Contractors are vetted before they can see or claim job orders — we ask for proof of insurance, your business number, and company registration.</p>
-    ${submitted ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Application submitted — we'll review it and let you know here.</div>` : ""}
-    ${err ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(err)}</div>` : ""}
-    <div class="form-card">
-      <form method="POST" action="/api/contractor/apply" enctype="multipart/form-data">
-        <div class="field"><label>Business number (ABN or equivalent)</label><input name="businessNumber" required placeholder="12 345 678 901" /></div>
-        <div class="field"><label>Company name</label><input name="companyName" required placeholder="${escapeHtml(contractor.businessName || "The Sign Depot")}" value="${escapeHtml(contractor.businessName || "")}" /></div>
-        <div class="field"><label>Company registration number (optional)</label><input name="companyRegistrationNumber" placeholder="ACN 123 456 789" /></div>
-        <div class="field"><label>Public liability insurance expiry</label><input type="date" name="insuranceExpiry" /></div>
-        <div class="field"><label>Proof of insurance (image or PDF)</label><input type="file" name="insuranceDoc" accept="image/*,application/pdf" required /></div>
-        <div class="field"><label>Company registration document (optional)</label><input type="file" name="companyRegoDoc" accept="image/*,application/pdf" /></div>
-        <button class="btn btn-primary btn-block" type="submit">Submit application</button>
-      </form>
-    </div>
-    <a href="/contractor/support" class="small" style="color:var(--orange);display:block;margin-top:14px">Questions before you apply? Contact contractor support →</a>
-  `;
-  send(res, 200, await contractorLayout({ title: "Apply as a contractor", activeNav: "contractor-apply", contractor, body }));
-}
-
-export async function adminContractorApplicationsPage(req, res) {
-  const user = await requirePermission(req, res, "canApproveContractors", "/admin/contractor-applications");
-  if (!user) return;
-
-  const pending = await db.getPendingContractorApplications();
-  const rows = (
-    await Promise.all(
-      pending.map(async (a) => {
-        const applicant = await db.getContractorById(a.contractorId);
-        return `<div class="job-row" style="margin-bottom:12px">
-        <div class="row-between" style="margin-bottom:8px">
-          <div><strong>${escapeHtml(a.companyName)}</strong><div class="small muted">${escapeHtml(applicant ? applicant.fullName : a.contractorId)} · ABN ${escapeHtml(a.businessNumber)}</div></div>
-          <span class="badge badge-orange">PENDING</span>
-        </div>
-        <div class="small muted" style="margin-bottom:10px">
-          Rego: ${escapeHtml(a.companyRegistrationNumber || "—")} · Insurance expiry: ${escapeHtml(a.insuranceExpiry || "—")}<br/>
-          <a href="/api/contractor-applications/${a.id}/doc/insuranceDoc" style="color:var(--orange)">View insurance doc →</a>
-          ${a.companyRegoDocPath ? ` · <a href="/api/contractor-applications/${a.id}/doc/companyRegoDoc" style="color:var(--orange)">View rego doc →</a>` : ""}
-        </div>
-        <div style="display:flex;gap:8px">
-          <form method="POST" action="/api/admin/contractor-applications/${a.id}/approve"><button class="btn btn-dark btn-sm" type="submit">Approve</button></form>
-          <form method="POST" action="/api/admin/contractor-applications/${a.id}/reject" style="display:flex;gap:6px">
-            <input name="reason" placeholder="Rejection reason" class="mono" style="font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--border)" />
-            <button class="btn btn-outline btn-sm" type="submit">Reject</button>
-          </form>
-        </div>
-      </div>`;
-      })
-    )
-  ).join("");
-
-  const supportMessages = (await db.getContactMessages("contractor")).slice(0, 10);
-  const supportRows = supportMessages
-    .map(
-      (m) => `<div class="job-row" style="margin-bottom:8px">
-        <div class="row-between"><strong>${escapeHtml(m.name)}</strong><span class="small muted">${formatDate(m.createdAt)}</span></div>
-        <div class="small muted">${escapeHtml(m.email)}</div>
-        <div class="small" style="margin-top:6px">${escapeHtml(m.message)}</div>
-      </div>`
-    )
-    .join("");
-
-  const body = `
-    ${adminSubnav(user, "contractor-apps")}
-    <h1 style="font-size:22px;margin-bottom:6px">Contractor department</h1>
-    <p class="muted small" style="margin-bottom:16px">Application review and contractor-support messages — general customer-service messages live under Customer service instead.</p>
-    <h2 style="font-size:16px;margin-bottom:10px">Pending applications</h2>
-    ${pending.length === 0 ? `<div class="panel" style="margin-bottom:20px"><p class="muted">No pending applications.</p></div>` : `<div style="margin-bottom:20px">${rows}</div>`}
-    <h2 style="font-size:16px;margin-bottom:10px">Contractor support inbox</h2>
-    ${supportMessages.length === 0 ? `<div class="panel"><p class="muted">No messages yet.</p></div>` : supportRows}
-  `;
-  send(res, 200, await layout({ title: "Contractor department", activeNav: "admin-contractor-apps", user, body }));
-}
-
-// ---------------- Contractor auth (separate identity space) ----------------
-export async function contractorLoginPage(req, res, query) {
-  // Always render the login form itself — never silently redirect past it
-  // into a remembered session, even if a 30-day contractor session cookie
-  // is still active. That auto-login was surprising when switching accounts.
-  const contractor = await currentContractor(req);
-  const next = query.get("next") || "/contractor/ping";
-  const err = query.get("err");
-  const body = `
-    <div class="form-card" style="max-width:420px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:6px">Contractor log in</h1>
-      <p class="small muted" style="margin-bottom:16px">Separate from buyer/seller accounts — this is the contractor portal.</p>
-      ${
-        contractor
-          ? `<div class="panel-tint" style="margin-bottom:16px">
-              <div class="small">You're already logged in as <strong>${escapeHtml(contractor.fullName)}</strong>.</div>
-              <div style="display:flex;gap:8px;margin-top:10px">
-                <a href="${escapeHtml(next)}" class="btn btn-primary btn-sm">Continue to portal</a>
-                <form method="POST" action="/api/contractor-auth/logout"><button class="btn btn-outline btn-sm" type="submit">Log out</button></form>
-              </div>
-            </div>
-            <p class="small muted" style="margin-bottom:10px">Or log in as a different contractor below:</p>`
-          : ""
-      }
-      ${err ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(err)}</div>` : ""}
-      <form method="POST" action="/api/contractor-auth/login">
-        <input type="hidden" name="next" value="${escapeHtml(next)}" />
-        <div class="field"><label>Email</label><input type="email" name="email" required /></div>
-        <div class="field"><label>Password</label><input type="password" name="password" required /></div>
-        <button class="btn btn-primary btn-block" type="submit">Log in</button>
-      </form>
-      <div class="divider"></div>
-      <p class="small muted">New contractor? <a href="/contractor/signup?next=${encodeURIComponent(next)}" style="color:var(--orange)">Create an account →</a></p>
-      <p class="small muted" style="margin-top:10px">Demo account: alex@thesigndepot.com.au / password123</p>
-    </div>
-  `;
-  send(res, 200, await contractorLayout({ title: "Contractor log in", body }));
-}
-
-export async function contractorSignupPage(req, res, query) {
-  const contractor = await currentContractor(req);
-  const next = query.get("next") || "/contractor/apply";
-  if (contractor) return redirect(res, next);
-  const err = query.get("err");
-  const body = `
-    <div class="form-card" style="max-width:420px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:6px">Create a contractor account</h1>
-      <p class="small muted" style="margin-bottom:16px">Separate from buyer/seller sign-up — you'll apply for approval next.</p>
-      ${err ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(err)}</div>` : ""}
-      <form method="POST" action="/api/contractor-auth/signup">
-        <input type="hidden" name="next" value="${escapeHtml(next)}" />
-        <div class="field"><label>Full name</label><input name="fullName" required /></div>
-        <div class="field"><label>Email</label><input type="email" name="email" required /></div>
-        ${mobileFieldMarkup({ idPrefix: "csignup-mobile" })}
-        ${passwordFieldsMarkup({ idPrefix: "csignup-pw" })}
-        <button class="btn btn-primary btn-block" type="submit">Create account</button>
-      </form>
-      <div class="divider"></div>
-      <p class="small muted">Already have an account? <a href="/contractor/login?next=${encodeURIComponent(next)}" style="color:var(--orange)">Log in →</a></p>
-    </div>
-  `;
-  send(res, 200, await contractorLayout({ title: "Contractor sign up", body }));
-}
-
-export async function contractorAccountPage(req, res, query) {
-  const contractor = await requireContractor(req, res, "/contractor/account");
-  if (!contractor) return;
-  const updated = query.get("updated");
-  const body = `
-    <h1 style="font-size:22px;margin-bottom:16px">Contractor account</h1>
-    ${updated ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(updated)} updated.</div>` : ""}
-    <div class="panel" style="max-width:480px">
-      <div class="stack">
-        <div class="row-between"><span class="muted small">Name</span><strong>${escapeHtml(contractor.fullName)}</strong></div>
-        <div class="row-between"><span class="muted small">Email</span><span>${escapeHtml(contractor.email)}</span></div>
-        <div class="row-between"><span class="muted small">Mobile</span><span>${escapeHtml(contractor.mobile)}</span></div>
-        <div class="row-between"><span class="muted small">Business</span><span>${escapeHtml(contractor.businessName || "—")}</span></div>
-        <div class="row-between"><span class="muted small">Status</span><span>${
-          contractor.isApprovedContractor ? `Approved (★ ${contractor.contractorRating})` : contractor.contractorApplicationStatus || "Not applied"
-        }</span></div>
-      </div>
-    </div>
-  `;
-  send(res, 200, await contractorLayout({ title: "Contractor account", activeNav: "contractor-account", contractor, body }));
-}
-
-export async function contractorMessagesPage(req, res) {
-  const contractor = await requireContractor(req, res, "/contractor/messages");
-  if (!contractor) return;
-  await db.markMessagesSeen(contractor.id);
-  const threads = await db.getJobThreadsForUser(contractor.id);
-  const rows = (
-    await Promise.all(
-      threads.map(async (t) => {
-        const listing = await db.getListingById(t.listingId);
-        return `<a class="job-row" href="/job/${t.jobOrderId}/chat" style="display:block">
-        <div class="row-between">
-          <div><strong>${escapeHtml(listing ? listing.title : t.listingId)}</strong><div class="small muted">Job ${t.jobOrderId}</div></div>
-          <div class="small muted">${formatDate(t.lastAt)}</div>
-        </div>
-        <div class="small muted" style="margin-top:6px">${t.lastMessage ? escapeHtml(t.lastMessage) : "No messages yet"}</div>
-      </a>`;
-      })
-    )
-  ).join("");
-  const body = `
-    <h1 style="font-size:22px;margin-bottom:16px">Messages</h1>
-    ${threads.length === 0 ? `<div class="panel"><p class="muted">No job chats yet.</p></div>` : `<div class="job-list">${rows}</div>`}
-  `;
-  send(res, 200, await contractorLayout({ title: "Messages", activeNav: "contractor-messages", contractor, body }));
-}
-
-// ---------------- Admin: staff & permissions ----------------
-export async function adminStaffPage(req, res, query) {
-  const user = await requireSuperAdmin(req, res, "/admin/staff");
-  if (!user) return;
-
-  const created = query.get("created");
-  const users = await db.getAllUsers();
-
-  const rows = users
-    .map((u) => {
-      const checkboxes = PERMISSIONS.map(
-        (p) => `<label class="small" style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-          <input type="checkbox" name="${p.key}" value="1" ${u[p.key] ? "checked" : ""} />
-          ${escapeHtml(p.label)}
-        </label>`
-      ).join("");
-      return `<div class="job-row" style="margin-bottom:12px">
-        <div class="row-between" style="margin-bottom:8px">
-          <div><strong>${escapeHtml(u.fullName)}</strong><div class="small muted">${escapeHtml(u.email)}</div></div>
-          ${u.isAdmin ? `<span class="badge badge-blue">SUPER-ADMIN</span>` : ""}
-        </div>
-        ${
-          u.isAdmin
-            ? `<div class="small muted">Super-admins automatically have every permission below.</div>`
-            : `<form method="POST" action="/api/admin/users/${u.id}/permissions">${checkboxes}<button class="btn btn-outline btn-sm" type="submit">Save</button></form>`
-        }
-      </div>`;
-    })
-    .join("");
-
-  const body = `
-    ${adminSubnav(user, "staff")}
-    <h1 style="font-size:22px;margin-bottom:6px">Manage staff</h1>
-    <p class="muted small" style="margin-bottom:16px">Toggle department access per account. This is a lightweight stand-in for a real roles system — flags only, no audit trail.</p>
-    ${created ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Staff account created.</div>` : ""}
-
-    <div class="form-card" style="margin-bottom:24px">
-      <h2 style="font-size:16px;margin-bottom:14px">Create staff account</h2>
-      <form method="POST" action="/api/admin/staff">
-        <div class="field"><label>Full name</label><input name="fullName" required /></div>
-        <div class="field"><label>Email</label><input type="email" name="email" required /></div>
-        <div class="field"><label>Mobile</label><input name="mobile" required /></div>
-        <div class="field"><label>Temporary password</label><input type="password" name="password" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" minlength="10" placeholder="At least 10 characters" /></div>
-        <div class="small muted" style="margin-top:-8px;margin-bottom:14px">${escapeHtml(PASSWORD_HINT)}</div>
-        ${PERMISSIONS.map(
-          (p) => `<label class="small" style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
-            <input type="checkbox" name="${p.key}" value="1" /> ${escapeHtml(p.label)}
-          </label>`
-        ).join("")}
-        <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Create account</button>
-      </form>
-    </div>
-
-    <h2 style="font-size:16px;margin-bottom:10px">All accounts</h2>
-    ${rows}
-  `;
-  send(res, 200, await layout({ title: "Manage staff", activeNav: "admin-staff", user, body }));
+    </div>`;
+  send(res, 200, await layout({ title: "Edit listing", activeNav: "sell", user, body, noindex: true }));
 }
 
 // ---------------- Account ----------------
@@ -2617,662 +795,319 @@ export async function accountPage(req, res, query) {
   const user = await requireUser(req, res, "/account");
   if (!user) return;
   const updated = query.get("updated");
-  const err = query.get("err");
-  const connect = query.get("connect");
-  const stripeConfigured = isStripeConfigured();
-
   const notices = `
-    ${updated ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(updated)} updated.</div>` : ""}
-    ${err ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">${escapeHtml(err)}</div>` : ""}
-    ${connect === "done" ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Stripe onboarding updated — check your payout status below.</div>` : ""}
-    ${query.get("verified") ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Email verified — you're all set.</div>` : ""}
+    ${updated ? notice(`${updated} updated.`) : ""}
+    ${notice(query.get("err"), "orange")}
+    ${query.get("verified") ? notice("Email verified — you're all set.") : ""}
     ${
       isEmailConfigured() && !user.emailVerifiedAt
-        ? `<div class="badge badge-orange" style="margin-bottom:16px;display:block;padding:10px">
-            Your email isn't verified yet — listing a space and booking are locked until it is. Check your inbox for the link.
-            <form method="POST" action="/api/account/resend-verification" style="display:inline;margin-left:8px"><button class="btn-link" style="color:var(--orange);text-decoration:underline">Resend email</button></form>
-          </div>`
+        ? `<div class="notice notice-orange">Your email isn't verified yet, so messaging and listing are locked. Check your inbox for the link.
+            <form method="POST" action="/api/account/resend-verification" style="display:inline;margin-left:6px"><button class="btn-link link">Resend email</button></form></div>`
         : ""
     }`;
-
-  // Airbnb-style settings shell (02-DESIGN-SYSTEM.md §3) — sidebar sections
-  // instead of one long stacked page. Client-side toggle, same pattern as
-  // the listing wizard's steps and the auth card's tabs.
   const body = `
-    <h1 style="font-size:24px;font-weight:700;letter-spacing:-0.01em;margin-bottom:28px">Account</h1>
+    <h1 style="margin-bottom:24px">Account</h1>
     ${notices}
     <div class="settings-shell">
       <nav class="settings-nav">
-        <a href="#" data-section="profile" class="is-active">Personal info</a>
-        <a href="#" data-section="security">Login &amp; security</a>
-        <a href="#" data-section="payouts">Payouts</a>
+        <a href="#profile" data-section="profile" class="is-active">Personal info</a>
+        <a href="#security" data-section="security">Login &amp; security</a>
+        <a href="#notifications" data-section="notifications">Notifications</a>
       </nav>
       <div class="settings-content">
         <section class="settings-section" data-section="profile">
           <h2>Personal info</h2>
-          <p class="section-hint">Your name and contact details, used on invoices and payouts.</p>
+          <p class="section-hint">Other members see your first name (or business name) on your listings. Your email and mobile stay private.</p>
           <form method="POST" action="/api/account/profile">
-            <div class="field"><label>Full name</label><input name="fullName" required value="${escapeHtml(user.fullName)}" /></div>
-            <div class="field"><label>Email</label><input type="email" name="email" required value="${escapeHtml(user.email)}" /></div>
-            <div class="field"><label>Mobile</label><input name="mobile" required value="${escapeHtml(user.mobile)}" /></div>
-            <div class="field"><label>Address</label><input name="address" value="${escapeHtml(user.address || "")}" /></div>
-            <div class="form-row">
-              <div class="field"><label>Business name (optional)</label><input name="businessName" value="${escapeHtml(user.businessName || "")}" placeholder="OpenHouse Realty" /></div>
-              <div class="field"><label>ABN (optional)</label><input name="abn" value="${escapeHtml(user.abn || "")}" placeholder="12 345 678 901" inputmode="numeric" /></div>
-            </div>
-            <div class="small muted" style="margin:-4px 0 14px">Shown on the tax invoices for spaces you book and the payouts you receive.</div>
-            <div class="field"><label>Google Business Profile URL (optional)</label><input name="googleBusinessUrl" value="${escapeHtml(user.googleBusinessUrl || "")}" placeholder="https://g.page/your-business" /></div>
+            <div class="field"><label for="ac-name">Full name</label><input id="ac-name" name="fullName" required maxlength="80" value="${escapeHtml(user.fullName)}" /></div>
+            <div class="field"><label for="ac-email">Email</label><input id="ac-email" type="email" name="email" required maxlength="200" value="${escapeHtml(user.email)}" />
+              <div class="hint">Changing it means verifying the new address.</div></div>
+            <div class="field"><label for="ac-mobile">Mobile <span class="optional">(optional)</span></label><input id="ac-mobile" type="tel" name="mobile" maxlength="30" value="${escapeHtml(user.mobile || "")}" /></div>
+            <div class="field"><label for="ac-biz">Business name <span class="optional">(optional)</span></label><input id="ac-biz" name="businessName" maxlength="100" value="${escapeHtml(user.businessName || "")}" />
+              <div class="hint">Shown as the seller name on your listings instead of your first name.</div></div>
+            <div class="field"><label for="ac-gbp">Google Business profile link <span class="optional">(optional)</span></label><input id="ac-gbp" type="url" name="googleBusinessUrl" maxlength="300" value="${escapeHtml(user.googleBusinessUrl || "")}" placeholder="https://g.page/your-business" /></div>
             <button class="btn btn-primary" type="submit">Save</button>
           </form>
         </section>
-
         <section class="settings-section" data-section="security" hidden>
           <h2>Login &amp; security</h2>
-          <p class="section-hint">Update the password you use to log in.</p>
+          <p class="section-hint">Changing your password logs you out on other devices.</p>
           <form method="POST" action="/api/account/password">
-            <div class="field"><label>Current password</label><input type="password" name="currentPassword" required /></div>
-            <div class="field"><label>New password</label><input type="password" name="newPassword" id="acct-pw-new" required pattern="${PASSWORD_PATTERN}" title="${escapeHtml(PASSWORD_HINT)}" minlength="10" /></div>
-            <div class="small muted" style="margin-top:-8px;margin-bottom:14px">${escapeHtml(PASSWORD_HINT)}</div>
-            <div class="field"><label>Confirm new password</label><input type="password" name="confirmPassword" id="acct-pw-confirm" required /></div>
-            <div class="small" id="acct-pw-hint" style="margin-top:-8px;margin-bottom:14px"></div>
+            <div class="field"><label for="ac-cur">Current password</label><input id="ac-cur" type="password" name="currentPassword" required autocomplete="current-password" /></div>
+            ${passwordFieldsMarkup({ idPrefix: "ac", name: "newPassword", label: "New password" })}
             <button class="btn btn-primary" type="submit">Update password</button>
           </form>
         </section>
-
-        <section class="settings-section" data-section="payouts" hidden>
-          <h2>Payouts</h2>
-          <p class="section-hint">Where your lease payouts are sent, minus Frontage's 15% fee.</p>
-          ${
-            stripeConfigured
-              ? user.stripeConnectAccountId
-                ? `<div class="small" style="color:var(--green);margin-bottom:10px">✓ Payout account connected via Stripe.</div>
-               <p class="small muted" style="margin-bottom:10px">Update your bank details or finish any outstanding Stripe requirements.</p>
-               <form method="POST" action="/api/account/connect-payouts"><button class="btn btn-outline" type="submit">Manage payout account</button></form>`
-                : `<p class="small muted" style="margin-bottom:10px">Connect a Stripe payout account so we can send your lease payouts. Stripe collects your bank details directly during onboarding.</p>
-               <form method="POST" action="/api/account/connect-payouts"><button class="btn btn-primary" type="submit">Connect payout account</button></form>`
-              : `<form method="POST" action="/api/account/banking">
-               <div class="field"><label>BSB</label><input name="bankBsb" value="${escapeHtml(user.bankBsb || "")}" placeholder="062-000" /></div>
-               <div class="field"><label>Account number</label><input name="bankAccount" value="${escapeHtml(user.bankAccount || "")}" placeholder="12345678" /></div>
-               <div class="field"><label>Account name</label><input name="bankAccountName" value="${escapeHtml(user.bankAccountName || "")}" /></div>
-               <button class="btn btn-outline" type="submit">Save banking details</button>
-             </form>`
-          }
+        <section class="settings-section" data-section="notifications" hidden>
+          <h2>Notifications</h2>
+          <p class="section-hint">We email you when someone messages you — at most one email until you've read the conversation.</p>
+          <form method="POST" action="/api/account/notifications">
+            <label class="consent-row"><input type="checkbox" name="notifyMessages" value="1"${user.notifyMessages ? " checked" : ""} /> <span>Email me about new messages</span></label>
+            <button class="btn btn-primary" type="submit">Save</button>
+          </form>
         </section>
       </div>
-    </div>
-    <script>
-      (function () {
-        var links = [].slice.call(document.querySelectorAll('.settings-nav a'));
-        var sections = [].slice.call(document.querySelectorAll('.settings-section'));
-        function show(name) {
-          links.forEach(function (l) { l.classList.toggle('is-active', l.getAttribute('data-section') === name); });
-          sections.forEach(function (s) { s.hidden = s.getAttribute('data-section') !== name; });
-        }
-        links.forEach(function (l) {
-          l.addEventListener('click', function (e) { e.preventDefault(); show(l.getAttribute('data-section')); });
-        });
-      })();
-    </script>
-  `;
-  send(res, 200, await layout({ title: "Account", activeNav: "account", user, body }));
+    </div>`;
+  send(res, 200, await layout({ title: "Account", activeNav: "account", user, body, noindex: true }));
 }
 
-// ---------------- My leases ----------------
-export async function myLeasesPage(req, res) {
-  const user = await requireUser(req, res, "/account/leases");
-  if (!user) return;
-  const bookings = await db.getBookingsForUser(user.id);
-
-  const badgeClass = { signed: "badge-blue", active: "badge-green", ending: "badge-orange", ended: "badge-steel" };
-
-  const cards = (
-    await Promise.all(
-      bookings.map(async (b) => {
-        const listing = await db.getListingById(b.listingId);
-        const isBuyer = b.buyerId === user.id;
-        const contract = await db.getContractByBookingId(b.id);
-        const payment = await db.getPaymentByBookingId(b.id);
-        const jobOrder = await db.getJobOrderByBookingId(b.id);
-        const endIso = leaseEndIso(b.leaseStartDate, b.term);
-        const remaining = endIso ? daysUntil(endIso) : null;
-        const withinRenewalWindow = remaining !== null && remaining <= 30 && b.status === "active";
-
-        const timeBlock = !b.leaseStartDate
-          ? `Not started — awaiting install${jobOrder ? ` (job ${jobOrder.id}: ${STAGE_LABELS[jobOrder.status]})` : ""}`
-          : remaining >= 0
-          ? `${remaining} days remaining (ends ${formatDate(endIso)})`
-          : `Term ended ${formatDate(endIso)}`;
-
-        const paymentBlock = isBuyer
-          ? payment
-            ? `Paid ${money(payment.totalAmount)} total`
-            : "—"
-          : payment
-          ? `Payout ${money(payment.payoutAmount)} (after 15% fee) — ${payment.payoutStatus === "released" ? "released" : "held until install confirmed"}`
-          : "—";
-
-        // Tiered cancellation & make-good (Phase 5) — preview the fee this
-        // cancellation would incur *before* the buyer submits it, using the
-        // same tier/fee logic endLeaseHandler applies server-side.
-        const cancellations = await db.getCancellationsForBooking(b.id);
-        const latestCancellation = cancellations[0];
-        const previewTier = determineCancellationTier({ jobOrder, booking: b });
-        const previewFee = computeCancellationFee({ tier: previewTier, booking: b });
-
-        const actions =
-          isBuyer && withinRenewalWindow
-            ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-              <form method="POST" action="/api/bookings/${b.id}/renew"><input type="hidden" name="extraMonths" value="12" /><button class="btn btn-primary btn-sm" type="submit">Renew 12 months</button></form>
-              <form method="POST" action="/api/bookings/${b.id}/end-lease" style="display:flex;gap:6px;align-items:center">
-                <input name="reason" placeholder="Reason (optional)" style="padding:8px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:12px" />
-                <button class="btn btn-outline btn-sm" type="submit">End at term end</button>
-              </form>
-            </div>
-            <div class="small muted" style="margin-top:6px">${
-              previewFee > 0
-                ? `Ending now falls under "${CANCELLATION_TIER_LABEL[previewTier]}" — a ${money(previewFee)} cancellation fee would apply.`
-                : `Ending now falls under "${CANCELLATION_TIER_LABEL[previewTier]}" — no cancellation fee applies since nothing's been produced yet.`
-            }</div>`
-            : isBuyer && b.autoRenew === false
-            ? `<div class="small muted" style="margin-top:8px">Set to end at term end — won't auto-renew.${
-                latestCancellation
-                  ? ` Recorded ${CANCELLATION_TIER_LABEL[latestCancellation.tier].toLowerCase()} — ${
-                      Number(latestCancellation.feeAmount) > 0 ? `${money(latestCancellation.feeAmount)} fee` : "no fee"
-                    }.`
-                  : ""
-              }</div>`
-            : "";
-
-        // Content-approval workflow (Phase 4) — only relevant to the buyer,
-        // and only once a quote's been accepted (see jobOrderUploadArtwork's
-        // own STAGES check in routes/api.js, mirrored here for the UI).
-        const artworkBlock =
-          isBuyer && jobOrder && STAGES.indexOf(jobOrder.status) >= STAGES.indexOf("quote_accepted")
-            ? `<div class="divider"></div>
-          <div class="small" style="margin-bottom:6px"><strong>Campaign artwork</strong></div>
-          ${
-            jobOrder.artworkStatus === "approved"
-              ? `<div class="badge badge-green" style="margin-bottom:6px">Approved</div>`
-              : jobOrder.artworkStatus === "pending_review"
-              ? `<div class="badge badge-blue" style="margin-bottom:6px">Awaiting owner review</div>`
-              : jobOrder.artworkStatus === "rejected"
-              ? `<div class="badge badge-orange" style="margin-bottom:6px;display:block;padding:8px">Owner asked for changes: ${escapeHtml(jobOrder.artworkRejectedReason || "")}</div>`
-              : `<div class="small muted" style="margin-bottom:6px">Not uploaded yet — the space owner can't approve your campaign until you do.</div>`
-          }
-          ${
-            jobOrder.artworkStatus !== "pending_review" && jobOrder.artworkStatus !== "approved"
-              ? `<form method="POST" action="/api/joborders/${jobOrder.id}/artwork" enctype="multipart/form-data" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <input type="file" name="artwork" accept="image/*,application/pdf" required />
-              <button class="btn btn-outline btn-sm" type="submit">${jobOrder.artworkStatus === "rejected" ? "Upload revised artwork" : "Upload artwork"}</button>
-            </form>`
-              : jobOrder.artworkUrl
-              ? `<a href="${escapeHtml(jobOrder.artworkUrl)}" target="_blank" class="small" style="color:var(--orange)">View uploaded file →</a>`
-              : ""
-          }`
-            : "";
-
-        return `<div class="panel" style="margin-bottom:16px">
-        <div class="row-between" style="margin-bottom:8px">
-          <div><strong>${escapeHtml(listing ? listing.title : b.listingId)}</strong><div class="small muted">${isBuyer ? "You're the buyer" : "You're the seller"} · ${b.term}mo term · ${money(b.monthlyRate)}/mo</div></div>
-          <span class="badge ${badgeClass[b.status] || "badge-blue"}">${b.status.toUpperCase()}</span>
-        </div>
-        <div class="small" style="margin-bottom:6px">${timeBlock}</div>
-        <div class="small muted" style="margin-bottom:6px">Signed by ${contract ? escapeHtml(contract.signedName) : "—"} on ${contract ? formatDate(contract.signedAt) : "—"} · <a href="/contract/${b.id}" style="color:var(--orange)">View signed contract →</a></div>
-        <div class="small muted">${paymentBlock}</div>
-        ${actions}
-        ${artworkBlock}
-      </div>`;
-      })
-    )
-  ).join("");
-
-  const body = `<h1 style="font-size:22px;margin-bottom:16px">My leases</h1>${bookings.length === 0 ? `<div class="panel"><p class="muted">No leases yet — book a space or list one to see it here.</p></div>` : cards}`;
-  send(res, 200, await layout({ title: "My leases", activeNav: "account-leases", user, body }));
+// ---------------- Content pages ----------------
+function contentPage(inner) {
+  return `<article class="content-page">${inner}</article>`;
 }
 
-function leaseTermsBlock(booking, listing) {
-  return `<p style="line-height:1.6">
-    <strong>1. Space.</strong> ${listing ? `${formatMm(listing.sizeW)} × ${formatMm(listing.sizeH)} at ${escapeHtml(listing.venue)}` : "—"}, as listed.<br/>
-    <strong>2. Term.</strong> ${booking.term} months, ${booking.campaignStartDate ? `campaign starting ${escapeHtml(booking.campaignStartDate)}` : booking.leaseStartDate ? `commencing ${formatDate(booking.leaseStartDate)}` : "start date not yet set"}. ${booking.autoRenew ? "Auto-renews monthly unless cancelled with 30 days' notice." : "Set to end at term expiry — will not auto-renew."}<br/>
-    <strong>3. Rate.</strong> ${money(booking.monthlyRate)} per month.<br/>
-    <strong>4. Install &amp; removal.</strong> Engaged and paid to a Frontage-network contractor directly, separate from this lease.<br/>
-    <strong>5. Platform fee.</strong> Frontage deducts 15% from the seller's payout on each payment.<br/>
-    <strong>6. Early termination.</strong> ${CANCELLATION_CLAUSE_BUYER}<br/>
-    <strong>7. Content &amp; conduct.</strong> Advertising content must be lawful and meet the standards in the <a href="/terms" style="color:var(--orange)">Terms &amp; Conditions</a>, which both parties accepted at signing. The seller warrants authority over the listed space.<br/>
-    <strong>8. Breach &amp; liability.</strong> A party in breach is liable for the other party's resulting losses. Frontage facilitates this marketplace and is not a party to the lease; each party indemnifies Frontage against claims arising from their own breach.
-  </p>`;
-}
-
-export async function contractViewPage(req, res, id) {
-  const user = await requireUser(req, res, `/contract/${id}`);
-  if (!user) return;
-  const booking = await db.getBookingById(id);
-  if (!booking || (booking.buyerId !== user.id && booking.sellerId !== user.id)) {
-    return send(res, 404, await layout({ title: "Not found", user, body: "<p>Contract not found.</p>" }));
-  }
-  const listing = await db.getListingById(booking.listingId);
-  const contract = await db.getContractByBookingId(booking.id);
-  const body = `
-    <a href="/account/leases" class="small muted">← Back to my leases</a>
-    <div class="panel" style="margin-top:14px;max-width:640px">
-      <h1 style="font-size:20px;margin-bottom:4px">Lease agreement — ${escapeHtml(listing ? listing.title : booking.listingId)}</h1>
-      <div class="small muted" style="margin-bottom:16px">Booking ${booking.id} · Signed by ${escapeHtml(contract ? contract.signedName : "—")} on ${formatDate(contract ? contract.signedAt : null)}</div>
-      ${leaseTermsBlock(booking, listing)}
-      <div class="signature" style="margin-top:12px">${escapeHtml(contract ? contract.signedName : "")}</div>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Lease contract", activeNav: "account-leases", user, body }));
-}
-
-// ---------------- Admin: customer service ----------------
-export async function adminDealsPage(req, res) {
-  const user = await requirePermission(req, res, "canAccessSupport", "/admin/deals");
-  if (!user) return;
-
-  const bookings = await db.getAllBookingsAdmin();
-  const rows = (
-    await Promise.all(
-      bookings.map(async (b) => {
-        const listing = await db.getListingById(b.listingId);
-        const buyer = await db.getUserById(b.buyerId);
-        const seller = await db.getUserById(b.sellerId);
-        const payment = await db.getPaymentByBookingId(b.id);
-        return `<a class="job-row" href="/admin/deals/${b.id}" style="display:block">
-        <div class="row-between">
-          <div><strong>${escapeHtml(listing ? listing.title : b.listingId)}</strong><div class="small muted">${escapeHtml(buyer ? buyer.fullName : b.buyerId)} → ${escapeHtml(seller ? seller.fullName : b.sellerId)}</div></div>
-          <span class="badge badge-blue">${b.status.toUpperCase()}</span>
-        </div>
-        <div class="small muted" style="margin-top:6px">${payment ? `${money(payment.totalAmount)} · payout ${payment.payoutStatus}` : "—"} · ${formatDate(b.createdAt)}</div>
-      </a>`;
-      })
-    )
-  ).join("");
-
-  const contactMessages = (await db.getContactMessages("general")).slice(0, 10);
-  const contactRows = contactMessages
-    .map(
-      (m) => `<div class="job-row" style="margin-bottom:8px">
-        <div class="row-between"><strong>${escapeHtml(m.name)}</strong><span class="small muted">${formatDate(m.createdAt)}</span></div>
-        <div class="small muted">${escapeHtml(m.email)}</div>
-        <div class="small" style="margin-top:6px">${escapeHtml(m.message)}</div>
-      </div>`
-    )
-    .join("");
-
-  const body = `
-    ${adminSubnav(user, "deals")}
-    <h1 style="font-size:22px;margin-bottom:6px">Customer service — all deals</h1>
-    <p class="muted small" style="margin-bottom:16px">Every booking on the platform, with its contract, payment/payout status, job order stage, and both parties' chat history.</p>
-    <h2 style="font-size:16px;margin-bottom:10px">All deals</h2>
-    ${bookings.length === 0 ? `<div class="panel" style="margin-bottom:20px"><p class="muted">No bookings yet.</p></div>` : `<div class="job-list" style="margin-bottom:24px">${rows}</div>`}
-    <h2 style="font-size:16px;margin-bottom:10px">General contact messages</h2>
-    ${contactMessages.length === 0 ? `<div class="panel"><p class="muted">No messages yet.</p></div>` : contactRows}
-  `;
-  send(res, 200, await layout({ title: "Deals — customer service", activeNav: "admin-deals", user, body }));
-}
-
-export async function adminListingsPage(req, res) {
-  const user = await requirePermission(req, res, "canAccessSupport", "/admin/listings");
-  if (!user) return;
-
-  const listings = await db.getAllListingsAdmin();
-  const rows = (
-    await Promise.all(
-      listings.map(async (l) => {
-        const owner = l.ownerId ? await db.getUserById(l.ownerId) : null;
-        const statusBadge =
-          l.status === "removed"
-            ? `<span class="badge badge-orange">REMOVED</span>`
-            : l.status === "unclaimed"
-            ? `<span class="badge badge-blue">UNCLAIMED</span>`
-            : l.status === "leased"
-            ? `<span class="badge badge-blue">LEASED</span>`
-            : `<span class="badge badge-green">LIVE</span>`;
-        let action = "";
-        if (l.status === "live") {
-          action = `<form method="POST" action="/api/admin/listings/${l.id}/remove" style="display:flex;gap:6px;margin-top:8px">
-          <input name="reason" placeholder="Reason for removal" required class="mono" style="font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--border);flex:1" />
-          <button class="btn btn-outline btn-sm" type="submit">Remove</button>
-        </form>`;
-        } else if (l.status === "removed") {
-          action = `<div class="small muted" style="margin-top:6px">Removed ${formatDate(l.removedAt)}: "${escapeHtml(l.removedReason || "")}"</div>
-          <form method="POST" action="/api/admin/listings/${l.id}/restore" style="margin-top:6px"><button class="btn btn-dark btn-sm" type="submit">Restore</button></form>`;
-        }
-        return `<div class="job-row" style="margin-bottom:12px">
-        <div class="row-between">
-          <div><strong>${escapeHtml(l.title)}</strong><div class="small muted">${escapeHtml(l.venue)} · ${escapeHtml(owner ? owner.fullName : l.status === "unclaimed" ? "not yet claimed" : "owner not found")} · <a href="/listing/${l.id}" style="color:var(--orange)">view →</a></div></div>
-          ${statusBadge}
-        </div>
-        ${action}
-      </div>`;
-      })
-    )
-  ).join("");
-
-  const body = `
-    ${adminSubnav(user, "listings")}
-    <h1 style="font-size:22px;margin-bottom:6px">Listings moderation</h1>
-    <p class="muted small" style="margin-bottom:16px">Every listing on the platform. Removing one with a reason takes it off browse and its direct URL immediately.</p>
-    ${listings.length === 0 ? `<div class="panel"><p class="muted">No listings yet.</p></div>` : rows}
-  `;
-  send(res, 200, await layout({ title: "Listings moderation", activeNav: "admin-listings", user, body }));
-}
-
-export async function adminDealDetailPage(req, res, id) {
-  const user = await requirePermission(req, res, "canAccessSupport", `/admin/deals/${id}`);
-  if (!user) return;
-
-  const booking = await db.getBookingById(id);
-  if (!booking) return send(res, 404, await layout({ title: "Not found", user, body: "<p>Booking not found.</p>" }));
-
-  const listing = await db.getListingById(booking.listingId);
-  const buyer = await db.getUserById(booking.buyerId);
-  const seller = await db.getUserById(booking.sellerId);
-  const contract = await db.getContractByBookingId(booking.id);
-  const payment = await db.getPaymentByBookingId(booking.id);
-  const jobOrder = await db.getJobOrderByBookingId(booking.id);
-
-  const jobMessages = jobOrder ? await db.getMessagesForThread("job", jobOrder.id) : [];
-  const listingMessages = await db.getMessagesForThread("listing", `${booking.listingId}:${booking.buyerId}`);
-  const jobOrderContractor = jobOrder && jobOrder.contractorId ? await db.getUserById(jobOrder.contractorId) : null;
-
-  const body = `
-    <a href="/admin/deals" class="small muted">← Back to all deals</a>
-    <h1 style="font-size:22px;margin:10px 0 4px">${escapeHtml(listing ? listing.title : booking.listingId)}</h1>
-    <div class="small muted" style="margin-bottom:16px">Booking ${booking.id} · Buyer: ${escapeHtml(buyer ? `${buyer.fullName} (${buyer.email})` : booking.buyerId)} · Seller: ${escapeHtml(seller ? `${seller.fullName} (${seller.email})` : booking.sellerId)}</div>
-
-    <div class="panel" style="margin-bottom:16px">
-      <h2 style="font-size:15px;margin-bottom:8px">Contract</h2>
-      <div class="small muted" style="margin-bottom:8px">Signed by ${escapeHtml(contract ? contract.signedName : "—")} on ${formatDate(contract ? contract.signedAt : null)}</div>
-      ${leaseTermsBlock(booking, listing)}
-    </div>
-
-    <div class="panel" style="margin-bottom:16px">
-      <h2 style="font-size:15px;margin-bottom:8px">Payment &amp; payout</h2>
-      ${
-        payment
-          ? `<div class="row-between small"><span class="muted">Total charged</span><span class="mono">${money(payment.totalAmount)}</span></div>
-             <div class="row-between small" style="margin-top:6px"><span class="muted">Platform fee (15%)</span><span class="mono">${money(payment.feeAmount)}</span></div>
-             <div class="row-between small" style="margin-top:6px"><span class="muted">Seller payout</span><span class="mono">${money(payment.payoutAmount)} — ${payment.payoutStatus}${payment.payoutReleasedAt ? ` (${formatDate(payment.payoutReleasedAt)})` : ""}</span></div>
-             ${payment.payoutBlockedReason ? `<div class="small" style="color:var(--orange);margin-top:8px">⚠ ${escapeHtml(payment.payoutBlockedReason)}</div>` : ""}`
-          : `<p class="muted small">No payment on file.</p>`
-      }
-    </div>
-
-    <div class="panel" style="margin-bottom:16px">
-      <h2 style="font-size:15px;margin-bottom:8px">Job order</h2>
-      ${
-        jobOrder
-          ? `<div class="small muted">Job ${jobOrder.id} · Status: ${STAGE_LABELS[jobOrder.status]}${jobOrder.contractorId ? ` · Contractor: ${escapeHtml((jobOrderContractor || {}).fullName || jobOrder.contractorId)}` : ""}</div>`
-          : `<p class="muted small">No job order on file.</p>`
-      }
-    </div>
-
-    <div class="panel" style="margin-bottom:16px">
-      <h2 style="font-size:15px;margin-bottom:8px">Job order chat — read-only</h2>
-      <div class="chat-thread">${await renderChatBubbles(jobMessages, "")}</div>
-    </div>
-
-    <div class="panel">
-      <h2 style="font-size:15px;margin-bottom:8px">Listing enquiry chat — read-only</h2>
-      <div class="chat-thread">${await renderChatBubbles(listingMessages, "")}</div>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Deal detail — customer service", activeNav: "admin-deals", user, body }));
-}
-
-// ---------------- Marketing pages ----------------
 export async function aboutPage(req, res) {
   const user = await currentUser(req);
-  const body = `
-    <div class="panel" style="max-width:640px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:10px">About Frontage</h1>
-      <p style="margin-bottom:12px">Frontage connects businesses with spare wall, window, or fence space to advertisers who want to lease it — and to a network of vetted contractors who print, install, and remove the ads.</p>
-      <p style="margin-bottom:12px">Sellers list a space in minutes. Buyers browse, sign a lease, and pay online. A contractor picks up the print/install job and keeps everyone updated until it's live on the wall.</p>
-      <p class="small muted">This is a working demo build — see the footer for what's real today and what's still on the roadmap.</p>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "About", activeNav: "about", user, body }));
+  const body = contentPage(`
+    <h1>About Frontage</h1>
+    <p class="lead">Frontage is a marketplace for advertising space — the walls, fences, windows, screens and vehicles that people walk and drive past every day.</p>
+    <p>Most of that space sits idle, while local businesses find traditional outdoor advertising expensive and hard to buy. Frontage puts the two together: owners list their space for free, and advertisers message them directly.</p>
+    <p>Like any classifieds site, Frontage doesn't take part in the deal. You agree the price, the term and the details between yourselves, and payment goes straight to the owner — we don't take a cut.</p>
+    <p><a href="/how-it-works" class="link">How it works →</a></p>`);
+  send(res, 200, await layout({ title: "About", user, body, canonicalPath: "/about" }));
 }
 
 export async function howItWorksPage(req, res) {
   const user = await currentUser(req);
-  const body = `
-    <div class="panel" style="max-width:640px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:14px">How it works</h1>
-      <h3 style="font-size:14px;margin-bottom:6px">For sellers</h3>
-      <p class="small muted" style="margin-bottom:14px">List a wall, window, or fence space with its size and a monthly rate. Once a buyer books it, you confirm an access window for the contractor and get paid monthly, minus a 15% platform fee.</p>
-      <h3 style="font-size:14px;margin-bottom:6px">For buyers</h3>
-      <p class="small muted" style="margin-bottom:14px">Browse spaces by category or suburb, sign a lease online, and pay for the term up front. A Frontage-network contractor handles print, install, and eventual removal — billed to you separately with an estimate shown before you pay.</p>
-      <h3 style="font-size:14px;margin-bottom:6px">For contractors</h3>
-      <p class="small muted">Apply with your business number, company registration, and proof of insurance. Once approved, claim broadcast job orders, send a quote, schedule the install, and mark it complete — the lease clock starts the moment you do.</p>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "How it works", activeNav: "how-it-works", user, body }));
+  const body = contentPage(`
+    <h1>How it works</h1>
+    <h2>If you have space</h2>
+    <ol>
+      <li><strong>List it free.</strong> Add photos, a price and a description. Buyers see only the suburb unless you choose to show the exact address.</li>
+      <li><strong>Answer messages.</strong> Advertisers message you on Frontage, and we email you when they do.</li>
+      <li><strong>Deal directly.</strong> Agree the price, dates, and who prints and installs the ad. Payment goes straight to you.</li>
+    </ol>
+    <h2>If you want to advertise</h2>
+    <ol>
+      <li><strong>Browse spaces</strong> by type, suburb or on the map.</li>
+      <li><strong>Message the owner</strong> with your questions — availability, visibility, size, permits.</li>
+      <li><strong>Agree the details</strong> with the owner. We recommend seeing the space first and putting the deal in writing.</li>
+    </ol>
+    <div class="panel-tint"><strong>Frontage never handles payments.</strong> If anyone asks you to pay “through Frontage”, it's a scam — please <a href="/contact" class="link">tell us</a>. Read our <a href="/safety" class="link">safety tips</a>.</div>`);
+  send(res, 200, await layout({ title: "How it works", user, body, canonicalPath: "/how-it-works" }));
 }
 
-// Terms come in three flavours sharing one set of clauses: a general version
-// (/terms, linked in the footer), and buyer- and seller-specific versions
-// linked from checkout and the listing form. A buyer signing a lease
-// shouldn't have to read the seller's payout obligations to find the two
-// clauses that bind them, and vice versa.
-export async function buyerTermsPage(req, res) {
+export async function pricingGuidePage(req, res) {
   const user = await currentUser(req);
-  const body = `
-    <div class="panel" style="max-width:720px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:4px">Buyer Terms &amp; Conditions</h1>
-      <p class="small muted" style="margin-bottom:18px">These terms apply when you lease advertising space through Frontage. Listing a space instead? See the <a href="/terms/seller" style="color:var(--orange)">Seller Terms</a>.</p>
-
-      ${termsSection("b1", "1. What Frontage is", TERMS_CLAUSES.whatFrontageIs)}
-      ${termsSection("b2", "2. Your account", TERMS_CLAUSES.accounts)}
-      ${termsSection(
-        "b3",
-        "3. What you're paying for",
-        `Booking a space charges you the full lease term up front, in one payment — there is no monthly billing, and the rate does not change with term length. The amount covers rent for the space only. Booking several spaces together through your media plan charges one combined total, but creates a separate lease for each space.`
-      )}
-      ${termsSection("b4", "4. Prices and GST", TERMS_CLAUSES.gst)}
-      ${termsSection(
-        "b5",
-        "5. Installation and removal",
-        `Printing your artwork, installing it, and removing it at the end of the lease are carried out by an independent contractor, not by Frontage or the space owner. The contractor quotes you directly and you pay them directly — this cost is separate from, and not included in, the amount Frontage charges you. <strong>It is a single upfront cost covering both installation and removal;</strong> you are not billed again to take the advertising down. Estimates shown before booking are indicative only, based on the size of the space — the assigned contractor issues a firm quote for your approval before any work begins.`
-      )}
-      ${termsSection("b6", "6. Your campaign dates", TERMS_CLAUSES.campaignDates)}
-      ${termsSection(
-        "b7",
-        "7. Your advertising content",
-        `You are responsible for the advertising you display: it must be lawful, accurate, not misleading, and must not be offensive. You warrant you hold the rights to any artwork, trade marks, or imagery you supply. Frontage may require removal of content that breaches this clause, at your cost.`
-      )}
-      ${termsSection("b8", "8. Content approval", TERMS_CLAUSES.contentApproval)}
-      ${termsSection("b9", "9. Permits", TERMS_CLAUSES.permits)}
-      ${termsSection("b10", "10. Ending your lease early", CANCELLATION_CLAUSE_BUYER)}
-      ${termsSection("b11", "11. Prohibited conduct", TERMS_CLAUSES.prohibited)}
-      ${termsSection("b12", "12. Consequences of breach", TERMS_CLAUSES.breach)}
-      ${termsSection("b13", "13. Liability &amp; indemnity", TERMS_CLAUSES.liability)}
-      ${termsSection("b14", "14. Changes", TERMS_CLAUSES.changes)}
-      <h3 style="font-size:14px;margin-bottom:6px">15. Governing law</h3>
-      <p class="small muted">${TERMS_CLAUSES.governingLaw}</p>
+  const body = contentPage(`
+    <h1>Pricing guide</h1>
+    <p class="lead">You can set any price you like. Here's how to work out a fair one.</p>
+    <p>Look at similar spaces near you on Frontage, then use the examples below as a rough starting point. Enter <strong>0</strong> if you'd rather say “price on request” and negotiate each enquiry. Use the <em>price details</em> field to say what the price covers — e.g. “per month, min 3 months” or “includes install”.</p>
+    <p class="small muted">These ranges are illustrative, in AUD, to help you gauge a price — they aren't a valuation or a guarantee of what a space will earn.</p>
+    <h2>Example situations</h2>
+    <div class="scenario-grid">
+      ${PRICING_SCENARIOS.map(
+        (s) => `<div class="scenario">
+          <div class="small muted">${escapeHtml(categoryLabel(s.category))}</div>
+          <h3>${escapeHtml(s.title)}</h3>
+          <div class="scenario-range">${escapeHtml(s.range)}</div>
+          <div class="small"><strong>Seen by:</strong> ${escapeHtml(s.seenBy)}</div>
+          <p class="small muted">${escapeHtml(s.notes)}</p>
+        </div>`
+      ).join("")}
     </div>
-  `;
-  send(res, 200, await layout({ title: "Buyer Terms & Conditions", activeNav: "terms", user, body }));
+    <h2>What moves the price</h2>
+    <dl class="factor-list">
+      ${PRICING_FACTORS.map((f) => `<div><dt>${escapeHtml(f.title)}</dt><dd>${escapeHtml(f.body)}</dd></div>`).join("")}
+    </dl>
+    <h2>Tips</h2>
+    <ul>
+      <li>Start in the middle of the range, and adjust if you get lots of enquiries (too cheap) or none (too dear).</li>
+      <li>Photos taken from where people actually see the space make a bigger difference than size.</li>
+      <li>If you know traffic or visitor numbers, put them in the description.</li>
+    </ul>
+    <p><a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent">List your space</a></p>`);
+  send(res, 200, await layout({ title: "Pricing guide for advertising space", user, body, canonicalPath: "/pricing-guide", description: "How to price a wall, fence, window, billboard or screen for advertising — example situations, typical ranges and what moves the price." }));
 }
 
-export async function sellerTermsPage(req, res) {
+export async function safetyPage(req, res) {
   const user = await currentUser(req);
-  const body = `
-    <div class="panel" style="max-width:720px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:4px">Seller Terms &amp; Conditions</h1>
-      <p class="small muted" style="margin-bottom:18px">These terms apply when you list advertising space on Frontage. Leasing a space instead? See the <a href="/terms/buyer" style="color:var(--orange)">Buyer Terms</a>.</p>
-
-      ${termsSection("s1", "1. What Frontage is", TERMS_CLAUSES.whatFrontageIs)}
-      ${termsSection("s2", "2. Your account", TERMS_CLAUSES.accounts)}
-      ${termsSection(
-        "s3",
-        "3. Listing a space",
-        `By listing a space you warrant that you own it or hold clear authority to lease it for advertising, that the details you provide (size, location, exposure, photographs, and any surface/access/audience specifications) are accurate and current, and that displaying advertising there breaches no law, lease, strata by-law, or council requirement. Misrepresented listings may be removed and any held payouts withheld.`
-      )}
-      ${termsSection("s4", "4. Prices and GST", `${TERMS_CLAUSES.gst} Set your monthly rate exclusive of GST. If you are registered for GST, you are responsible for accounting for it on your payouts.`)}
-      ${termsSection(
-        "s5",
-        "5. Platform fee",
-        `Frontage deducts a <strong>15% platform fee</strong> from your payout on each booking, calculated on the GST-exclusive lease amount. The fee covers marketplace listing, buyer acquisition, contracting, and payment handling.`
-      )}
-      ${termsSection(
-        "s6",
-        "6. Getting paid",
-        `The buyer pays the full term up front. Frontage holds your payout until the contractor confirms installation is complete, then releases it (less the platform fee) to your connected payout account. Payouts are made through Stripe, which applies its own processing fees and settlement timing — funds typically reach your bank a few business days after release, though first payouts can take longer while Stripe verifies your account. You must complete payout onboarding before any funds can be released.`
-      )}
-      ${termsSection(
-        "s7",
-        "7. Access for installation",
-        `You must provide the assigned contractor reasonable access to the space within the agreed window, and must not obscure, damage, alter, or remove installed advertising for the duration of the lease. Denying access or interfering with installed advertising is a breach and may make you liable for the buyer's resulting losses.`
-      )}
-      ${termsSection(
-        "s8",
-        "8. Reviewing buyer content",
-        `Before a job can be scheduled, you'll be asked to approve or decline the buyer's uploaded artwork. You may decline content for a legitimate reason — it's unlawful, unsafe, conflicts with an existing tenancy or lease restriction on your property, or breaches Frontage's <a href="/terms/non-discrimination" style="color:var(--orange)">Non-Discrimination Policy</a> yourself by declining on a prohibited basis. You may not decline content arbitrarily after a lease is signed and paid for without a legitimate reason, and repeated unreasonable refusals may be treated as a breach of these terms.`
-      )}
-      ${termsSection("s9", "9. Permits", TERMS_CLAUSES.permits)}
-      ${termsSection("s10", "10. Prohibited conduct", TERMS_CLAUSES.prohibited)}
-      ${termsSection("s11", "11. Consequences of breach", TERMS_CLAUSES.breach)}
-      ${termsSection("s12", "12. Liability &amp; indemnity", TERMS_CLAUSES.liability)}
-      ${termsSection("s13", "13. Changes", TERMS_CLAUSES.changes)}
-      <h3 style="font-size:14px;margin-bottom:6px">14. Governing law</h3>
-      <p class="small muted">${TERMS_CLAUSES.governingLaw}</p>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Seller Terms & Conditions", activeNav: "terms", user, body }));
+  const body = contentPage(`
+    <h1>Staying safe on Frontage</h1>
+    <p class="lead">Most people on Frontage are genuine. These habits keep it that way.</p>
+    <div class="tip-list">${SAFETY_TIPS.map((t) => `<div class="tip"><h3>${escapeHtml(t.title)}</h3><p>${escapeHtml(t.body)}</p></div>`).join("")}</div>
+    <h2>Something not right?</h2>
+    <p>Use the <strong>Report</strong> link on the listing or conversation — it goes straight to our moderators. If you've lost money, contact your bank straight away and report it to <a href="https://www.scamwatch.gov.au" target="_blank" rel="noopener" class="link">Scamwatch</a>.</p>`);
+  send(res, 200, await layout({ title: "Safety tips", user, body, canonicalPath: "/safety" }));
 }
 
 export async function termsPage(req, res) {
   const user = await currentUser(req);
-  const body = `
-    <div class="panel" style="max-width:720px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:4px">Terms &amp; Conditions</h1>
-      <p class="small muted" style="margin-bottom:14px">These terms govern every account, listing, lease, and job order on Frontage. By using the platform you agree to them.</p>
-      <div class="panel-tint" style="margin-bottom:18px">
-        <div class="small" style="font-weight:600;margin-bottom:6px">Looking for the terms that apply to you?</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <a href="/terms/buyer" class="btn btn-outline btn-sm">Buyer Terms</a>
-          <a href="/terms/seller" class="btn btn-outline btn-sm">Seller Terms</a>
-          <a href="/terms/non-discrimination" class="btn btn-outline btn-sm">Non-Discrimination Policy</a>
-        </div>
-      </div>
-
-      ${termsSection("g1", "1. What Frontage is", TERMS_CLAUSES.whatFrontageIs)}
-      ${termsSection("g2", "2. Accounts", TERMS_CLAUSES.accounts)}
-      ${termsSection(
-        "g3",
-        "3. Listings",
-        `By listing a space, the seller warrants that they own the space or hold clear authority to lease it for advertising, that the listing details (size, location, exposure, specifications) are accurate, and that displaying advertising there does not breach any law, lease, strata rule, or council requirement. Misrepresented listings may be removed and any held payouts withheld.`
-      )}
-      ${termsSection(
-        "g4",
-        "4. Leases &amp; campaign dates",
-        `A lease runs for a fixed term of 6 or 12 months from the buyer's chosen campaign start date (see clause 6a below), and auto-renews monthly thereafter unless cancelled with 30 days' notice. The buyer pays the full term up front. Frontage holds the seller's payout until installation is confirmed, then releases it minus the 15% platform fee.`
-      )}
-      ${termsSection("g4a", "4a. Prices and GST", TERMS_CLAUSES.gst)}
-      ${termsSection("g4b", "4b. Campaign dates", TERMS_CLAUSES.campaignDates)}
-      ${termsSection("g4c", "4c. Ending a lease early", CANCELLATION_CLAUSE_BUYER)}
-      ${termsSection(
-        "g5",
-        "5. Contractors",
-        `Contractors are vetted before accessing job orders but act as independent businesses, not employees or agents of Frontage. Print, install, and removal work is quoted, agreed, and paid between the buyer and the contractor directly.`
-      )}
-      ${termsSection("g6", "6. Content approval", TERMS_CLAUSES.contentApproval)}
-      ${termsSection("g7", "7. Permits", TERMS_CLAUSES.permits)}
-      ${termsSection("g8", "8. Prohibited conduct", TERMS_CLAUSES.prohibited)}
-      ${termsSection("g9", "9. Consequences of breach", TERMS_CLAUSES.breach)}
-      ${termsSection("g10", "10. Liability &amp; indemnity", TERMS_CLAUSES.liability)}
-      ${termsSection("g11", "11. Changes", TERMS_CLAUSES.changes)}
-      <h3 style="font-size:14px;margin-bottom:6px">12. Governing law</h3>
-      <p class="small muted">${TERMS_CLAUSES.governingLaw}</p>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Terms & Conditions", activeNav: "terms", user, body }));
+  const body = contentPage(`<h1>Terms of Use</h1><p class="small muted">Last updated ${LEGAL_UPDATED}</p>${termsHtml()}`);
+  send(res, 200, await layout({ title: "Terms of Use", user, body, canonicalPath: "/terms" }));
 }
 
-// Anti-discrimination is directly load-bearing now that owners can decline
-// buyer-uploaded content (Phase 4's content-approval workflow) — this
-// constrains *why* a refusal is legitimate, the same role clause s8 above
-// points back to.
-export async function nonDiscriminationPage(req, res) {
+export async function privacyPage(req, res) {
   const user = await currentUser(req);
-  const body = `
-    <div class="panel" style="max-width:720px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:4px">Non-Discrimination Policy</h1>
-      <p class="small muted" style="margin-bottom:18px">This policy applies to every decision made on Frontage about who can use the platform, book a space, or have their content displayed.</p>
-
-      ${termsSection(
-        "nd1",
-        "1. What this covers",
-        `Frontage does not tolerate discrimination on the basis of race, colour, ethnicity or national origin, religion, sex, gender identity, sexual orientation, disability, or age, by any user against any other user. This applies to sellers deciding who may book their space, to how a seller reviews and approves or declines a buyer's advertising content (see the Content Approval clause in the Terms & Conditions), and to any other interaction between users on the platform.`
-      )}
-      ${termsSection(
-        "nd2",
-        "2. Declining content or a booking",
-        `A seller may decline a buyer's advertising content, or decline to make a space available to a particular buyer, only for a legitimate reason unrelated to a protected attribute listed above — for example, that the content is unlawful, unsafe to install, conflicts with an existing tenancy or contractual restriction on the property, or is a category of content (such as alcohol, gambling, or political advertising) the seller has reasonably chosen not to host at that property. A decision that is pretextual — where a protected attribute is the real reason, dressed up as one of these — is a breach of this policy regardless of the reason given.`
-      )}
-      ${termsSection(
-        "nd3",
-        "3. Reporting a concern",
-        `If you believe you've experienced discrimination on Frontage, contact <a href="mailto:${escapeHtml(process.env.CONTACT_EMAIL || "hello@frontage.world")}" style="color:var(--orange)">${escapeHtml(process.env.CONTACT_EMAIL || "hello@frontage.world")}</a> with details. Frontage will investigate and may suspend or terminate the account of a user found to have breached this policy, in addition to any other consequence available under the <a href="/terms" style="color:var(--orange)">Terms &amp; Conditions</a>.`
-      )}
-      ${termsSection("nd4", "4. Changes", TERMS_CLAUSES.changes)}
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Non-Discrimination Policy", activeNav: "terms", user, body }));
-}
-
-export async function investorsPage(req, res) {
-  const user = await currentUser(req);
-  const body = `
-    <div class="panel" style="max-width:640px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:10px">Investors</h1>
-      <p style="margin-bottom:12px">Frontage is building the marketplace for physical advertising space — turning idle walls, windows, and fences at gyms, cafés, offices, and homes into measurable, bookable ad inventory.</p>
-      <p style="margin-bottom:12px">The platform handles the full transaction end to end: listing and discovery, lease contracts and payment, a vetted contractor network for print and installation, and escrow-style payouts that release only once an ad is confirmed live on the wall.</p>
-      <p style="margin-bottom:18px">We're currently raising and would love to talk. Reach out for a deck and a walkthrough of the live product.</p>
-      <a href="mailto:teeyaam@gmail.com?subject=Frontage%20investor%20enquiry" class="btn btn-primary">Contact us — teeyaam@gmail.com</a>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Investors", activeNav: "investors", user, body }));
+  const body = contentPage(`<h1>Privacy Policy</h1><p class="small muted">Last updated ${LEGAL_UPDATED}</p>${privacyHtml()}`);
+  send(res, 200, await layout({ title: "Privacy Policy", user, body, canonicalPath: "/privacy" }));
 }
 
 export async function contactPage(req, res, query) {
   const user = await currentUser(req);
-  const sent = query.get("sent");
   const body = `
-    <div class="form-card" style="max-width:560px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:10px">Contact us</h1>
-      ${sent ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Thanks — we'll get back to you.</div>` : ""}
-      <form method="POST" action="/api/contact">
-        <div class="field"><label>Name</label><input name="name" required value="${escapeHtml(user ? user.fullName : "")}" /></div>
-        <div class="field"><label>Email</label><input type="email" name="email" required value="${escapeHtml(user ? user.email : "")}" /></div>
-        <div class="field"><label>Message</label><textarea name="message" rows="4" required></textarea></div>
+    <div class="form-card narrow-card">
+      <h1>Contact us</h1>
+      <p class="small muted">Questions, feedback or a problem with a listing? We usually reply within two business days. To report a specific listing or conversation, use its Report link.</p>
+      ${query.get("sent") ? notice("Thanks — we'll get back to you.") : ""}
+      ${notice(query.get("err"), "orange")}
+      <form method="POST" action="/api/contact" data-single-submit>
+        <div class="field"><label for="ct-name">Name</label><input id="ct-name" name="name" required maxlength="80" value="${escapeHtml(user ? user.fullName : "")}" /></div>
+        <div class="field"><label for="ct-email">Email</label><input id="ct-email" type="email" name="email" required maxlength="200" value="${escapeHtml(user ? user.email : "")}" /></div>
+        <div class="field"><label for="ct-msg">Message</label><textarea id="ct-msg" name="message" rows="5" required maxlength="4000"></textarea></div>
+        <div class="hp-field" aria-hidden="true"><label>Leave this empty<input name="website" tabindex="-1" autocomplete="off" /></label></div>
         <button class="btn btn-primary btn-block" type="submit">Send message</button>
       </form>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Contact", activeNav: "contact", user, body }));
+    </div>`;
+  send(res, 200, await layout({ title: "Contact", user, body, canonicalPath: "/contact" }));
 }
 
-export async function contractorSupportPage(req, res, query) {
-  const user = await currentUser(req);
-  const sent = query.get("sent");
-  const body = `
-    <div class="form-card" style="max-width:560px;margin:0 auto">
-      <h1 style="font-size:22px;margin-bottom:6px">Contractor support</h1>
-      <p class="small muted" style="margin-bottom:14px">Questions about your application, onboarding, or the contractor side of Frontage go here — separate from general customer support.</p>
-      ${sent ? `<div class="badge badge-green" style="margin-bottom:16px;display:block;padding:10px">Thanks — the contractor team will get back to you.</div>` : ""}
-      <form method="POST" action="/api/contact">
-        <input type="hidden" name="topic" value="contractor" />
-        <div class="field"><label>Name</label><input name="name" required value="${escapeHtml(user ? user.fullName : "")}" /></div>
-        <div class="field"><label>Email</label><input type="email" name="email" required value="${escapeHtml(user ? user.email : "")}" /></div>
-        <div class="field"><label>Message</label><textarea name="message" rows="4" required placeholder="e.g. a question about my application status, insurance requirements, onboarding..."></textarea></div>
-        <button class="btn btn-primary btn-block" type="submit">Send to contractor support</button>
-      </form>
-    </div>
-  `;
-  send(res, 200, await layout({ title: "Contractor support", activeNav: "contractor-support", user, body }));
+// ---------------- Admin ----------------
+export async function adminReportsPage(req, res, query) {
+  const user = await requirePermission(req, res, "canAccessSupport", "/admin/reports");
+  if (!user) return;
+  const status = ["open", "actioned", "dismissed", "all"].includes(query.get("status")) ? query.get("status") : "open";
+  const reports = await db.getReports(status === "all" ? null : status);
+  const reasonLabel = Object.fromEntries(REPORT_REASONS);
+  const rows = reports
+    .map((r) => {
+      const target =
+        r.targetType === "listing"
+          ? `Listing <a href="/listing/${escapeHtml(r.listingId)}" class="link">${escapeHtml(r.listingTitle || r.listingId)}</a> ${r.listingStatus && r.listingStatus !== "live" ? `<span class="badge badge-steel">${escapeHtml(r.listingStatus)}</span>` : ""}`
+          : `Conversation <a href="/admin/conversations/${escapeHtml(r.conversationId)}" class="link">${escapeHtml(r.conversationId)}</a>${r.listingTitle ? ` about “${escapeHtml(r.listingTitle)}”` : ""}`;
+      const actions =
+        r.status === "open"
+          ? `<form method="POST" action="/api/admin/reports/${escapeHtml(r.id)}/resolve" class="admin-actions">
+              <input name="note" placeholder="Note / reason (shown to the seller if you remove a listing)" maxlength="500" />
+              ${r.listingId && r.listingStatus === "live" ? `<button class="btn btn-outline btn-sm" name="action" value="remove_listing">Remove listing</button>` : ""}
+              ${r.reportedUserId && !r.reportedUserSuspendedAt && r.reportedUserId !== user.id ? `<button class="btn btn-outline btn-sm" name="action" value="suspend_user" data-confirm="Suspend ${escapeHtml(r.reportedUserName || "this user")}? They'll be logged out and their listings hidden.">Suspend user</button>` : ""}
+              <button class="btn btn-outline btn-sm" name="action" value="actioned">Mark actioned</button>
+              <button class="btn btn-outline btn-sm" name="action" value="dismiss">Dismiss</button>
+            </form>`
+          : `<div class="small muted">${escapeHtml(r.status)} ${escapeHtml(timeAgo(r.resolvedAt))}${r.resolutionNote ? ` — ${escapeHtml(r.resolutionNote)}` : ""}</div>`;
+      return `<div class="job-row">
+        <div class="row-between"><strong>${escapeHtml(reasonLabel[r.reason] || r.reason)}</strong><span class="small muted">${escapeHtml(timeAgo(r.createdAt))} · ${escapeHtml(r.id)}</span></div>
+        <div class="small">${target}</div>
+        <div class="small muted">Reported user: ${r.reportedUserId ? `<a href="/admin/users?q=${encodeURIComponent(r.reportedUserId)}" class="link">${escapeHtml(r.reportedUserName || r.reportedUserId)}</a>${r.reportedUserSuspendedAt ? ` <span class="badge badge-orange">suspended</span>` : ""}` : "—"} · by ${escapeHtml(r.reporterName)}</div>
+        ${r.details ? `<p class="small prewrap report-details">${escapeHtml(r.details)}</p>` : ""}
+        ${actions}
+      </div>`;
+    })
+    .join("");
+  const tabs = ["open", "actioned", "dismissed", "all"].map((s) => `<a href="/admin/reports?status=${s}" class="chip-pill${s === status ? " is-active" : ""}">${s[0].toUpperCase() + s.slice(1)}</a>`).join("");
+  const body = `${adminSubnav(user, "reports")}
+    <h1>Reports</h1>
+    ${notice(query.get("done") ? "Report updated." : "")}
+    <div class="chip-row">${tabs}</div>
+    ${reports.length ? `<div class="job-list">${rows}</div>` : `<div class="panel empty-state"><p class="muted">No ${status === "all" ? "" : status} reports.</p></div>`}`;
+  send(res, 200, await layout({ title: "Reports", activeNav: "admin-reports", user, body, noindex: true }));
 }
 
-export { send, redirect, requireUser };
+export async function adminConversationPage(req, res, id) {
+  const user = await requirePermission(req, res, "canAccessSupport", `/admin/conversations/${id}`);
+  if (!user) return;
+  const convo = await db.getConversationById(id);
+  if (!convo) return notFoundPage(req, res);
+  const messages = await db.getMessagesForConversation(id);
+  const names = { [convo.buyerId]: `${convo.buyerName} (buyer)`, [convo.sellerId]: `${convo.sellerName} (seller)` };
+  const body = `${adminSubnav(user, "reports")}
+    <a href="/admin/reports" class="small muted">← Reports</a>
+    <h1 style="margin-top:8px">Conversation ${escapeHtml(convo.id)}</h1>
+    <p class="small muted">About <a href="/listing/${escapeHtml(convo.listingId)}" class="link">${escapeHtml(convo.listingTitle)}</a> · buyer ${escapeHtml(convo.buyerName)} (${escapeHtml(convo.buyerId)}) · seller ${escapeHtml(convo.sellerName)} (${escapeHtml(convo.sellerId)}). Visible to moderators only because it was reported.</p>
+    <div class="panel">${messages
+      .map((m) => `<div class="admin-msg"><div class="small muted">${escapeHtml(names[m.senderId] || m.senderId)} · ${escapeHtml(new Date(m.createdAt).toLocaleString("en-AU"))}</div><div class="prewrap">${escapeHtml(m.body)}</div></div>`)
+      .join("") || `<p class="muted">No messages.</p>`}</div>`;
+  send(res, 200, await layout({ title: "Conversation", activeNav: "admin-reports", user, body, noindex: true }));
+}
+
+export async function adminListingsPage(req, res, query) {
+  const user = await requirePermission(req, res, "canAccessSupport", "/admin/listings");
+  if (!user) return;
+  const listings = await db.getAllListingsAdmin();
+  const badge = (s) => ({ live: "badge-green", removed: "badge-orange" }[s] || "badge-steel");
+  const rows = listings
+    .map((l) => {
+      let action = "";
+      if (l.status === "live") {
+        action = `<form method="POST" action="/api/admin/listings/${escapeHtml(l.id)}/remove" class="admin-actions">
+          <input name="reason" placeholder="Reason (emailed to the seller)" required maxlength="500" />
+          <button class="btn btn-outline btn-sm" type="submit">Remove</button></form>`;
+      } else if (l.status === "removed") {
+        action = `<div class="small muted">Removed ${escapeHtml(formatDate(l.removedAt))}: “${escapeHtml(l.removedReason || "")}”</div>
+          <form method="POST" action="/api/admin/listings/${escapeHtml(l.id)}/restore" style="margin-top:6px"><button class="btn btn-outline btn-sm" type="submit">Restore</button></form>`;
+      }
+      return `<div class="job-row">
+        <div class="row-between"><div><a href="/listing/${escapeHtml(l.id)}" class="link"><strong>${escapeHtml(l.title)}</strong></a>
+          <div class="small muted">${escapeHtml(l.id)} · ${escapeHtml(l.ownerName)} (${escapeHtml(l.ownerId)})${l.ownerSuspendedAt ? " · owner suspended" : ""} · ${escapeHtml(priceLabel(l))} · ${escapeHtml(timeAgo(l.createdAt))}</div></div>
+          <span class="badge ${badge(l.status)}">${escapeHtml(l.status)}</span></div>
+        ${action}
+      </div>`;
+    })
+    .join("");
+  const body = `${adminSubnav(user, "listings")}
+    <h1>Listings</h1>
+    ${notice(query.get("done") ? "Listing updated." : "")}
+    <p class="muted small">Every listing, newest first. Removing one takes it off Frontage immediately and emails the seller the reason. Seller-deleted listings can't be restored.</p>
+    ${listings.length ? `<div class="job-list">${rows}</div>` : `<div class="panel empty-state"><p class="muted">No listings yet.</p></div>`}`;
+  send(res, 200, await layout({ title: "Listings", activeNav: "admin-listings", user, body, noindex: true }));
+}
+
+export async function adminUsersPage(req, res, query) {
+  const user = await requirePermission(req, res, "canAccessSupport", "/admin/users");
+  if (!user) return;
+  const q = (query.get("q") || "").slice(0, 100);
+  const users = await db.searchUsers(q);
+  const rows = users
+    .map(
+      (u) => `<div class="job-row">
+        <div class="row-between"><div><strong>${escapeHtml(u.fullName)}</strong> <span class="small muted">${escapeHtml(u.id)}</span>
+          <div class="small muted">${escapeHtml(u.email)}${u.mobile ? ` · ${escapeHtml(u.mobile)}` : ""} · joined ${escapeHtml(formatDate(u.createdAt))} · ${u.liveListingCount} live listing${u.liveListingCount === 1 ? "" : "s"} · ${u.emailVerifiedAt ? "verified" : "unverified"}</div></div>
+          ${u.suspendedAt ? `<span class="badge badge-orange">Suspended</span>` : u.isAdmin ? `<span class="badge badge-blue">Admin</span>` : ""}</div>
+        ${u.suspendedAt ? `<div class="small muted">Suspended ${escapeHtml(formatDate(u.suspendedAt))}${u.suspendedReason ? `: ${escapeHtml(u.suspendedReason)}` : ""}</div>` : ""}
+        ${
+          u.isAdmin || u.id === user.id
+            ? ""
+            : u.suspendedAt
+            ? `<form method="POST" action="/api/admin/users/${escapeHtml(u.id)}/unsuspend" class="admin-actions"><button class="btn btn-outline btn-sm" type="submit">Lift suspension</button></form>`
+            : `<form method="POST" action="/api/admin/users/${escapeHtml(u.id)}/suspend" class="admin-actions" data-confirm="Suspend ${escapeHtml(u.fullName)}? They'll be logged out and their listings hidden.">
+                 <input name="reason" placeholder="Reason (internal)" maxlength="500" /><button class="btn btn-outline btn-sm" type="submit">Suspend</button></form>`
+        }
+      </div>`
+    )
+    .join("");
+  const body = `${adminSubnav(user, "users")}
+    <h1>Users</h1>
+    ${notice(query.get("done") ? "User updated." : "")}
+    <form method="GET" action="/admin/users" class="field-pill" style="max-width:420px;margin-bottom:18px"><input type="search" name="q" value="${escapeHtml(q)}" placeholder="Search name, email or ID" aria-label="Search users" /></form>
+    ${users.length ? `<div class="job-list">${rows}</div>` : `<div class="panel empty-state"><p class="muted">No users found.</p></div>`}`;
+  send(res, 200, await layout({ title: "Users", activeNav: "admin-users", user, body, noindex: true }));
+}
+
+export async function adminStaffPage(req, res, query) {
+  const user = await requireSuperAdmin(req, res, "/admin/staff");
+  if (!user) return;
+  const staff = (await db.searchUsers("", 500)).filter((u) => u.isAdmin || PERMISSIONS.some((p) => u[p.key]));
+  const rows = staff
+    .map((u) => {
+      const checkboxes = PERMISSIONS.map(
+        (p) => `<label class="small consent-row"><input type="checkbox" name="${p.key}" value="1" ${u[p.key] ? "checked" : ""} /> ${escapeHtml(p.label)}</label>`
+      ).join("");
+      return `<div class="job-row">
+        <div class="row-between"><div><strong>${escapeHtml(u.fullName)}</strong><div class="small muted">${escapeHtml(u.email)}</div></div>${u.isAdmin ? `<span class="badge badge-blue">Super-admin</span>` : ""}</div>
+        ${u.isAdmin ? `<div class="small muted">Super-admins have every permission.</div>` : `<form method="POST" action="/api/admin/users/${escapeHtml(u.id)}/permissions">${checkboxes}<button class="btn btn-outline btn-sm" type="submit">Save</button></form>`}
+      </div>`;
+    })
+    .join("");
+  const body = `${adminSubnav(user, "staff")}
+    <h1>Staff access</h1>
+    ${notice(query.get("done") ? "Permissions saved." : "")}
+    ${notice(query.get("err"), "orange")}
+    <p class="muted small">Give an existing account moderation access by email. They must sign up first.</p>
+    <form method="POST" action="/api/admin/staff" class="admin-actions" style="margin-bottom:22px">
+      <input type="email" name="email" required placeholder="their@email.com" />
+      ${PERMISSIONS.map((p) => `<input type="hidden" name="${p.key}" value="1" />`).join("")}
+      <button class="btn btn-primary btn-sm" type="submit">Grant moderation access</button>
+    </form>
+    <div class="job-list">${rows}</div>`;
+  send(res, 200, await layout({ title: "Staff access", activeNav: "admin-staff", user, body, noindex: true }));
+}
