@@ -489,7 +489,7 @@ function mobileFieldMarkup({ idPrefix, iso = "AU", number = "" }) {
       <select name="mobileCountry" id="${idPrefix}-country" aria-label="Country calling code">${options}</select>
       <input type="tel" name="mobileNumber" id="${idPrefix}-number" required inputmode="tel" autocomplete="tel-national" maxlength="20" placeholder="412 345 678" value="${escapeHtml(number)}" />
     </div>
-    <div class="hint">So the other person can reach you once you've agreed a deal. Not shown publicly.</div>
+    <div class="hint">Kept private — never shown on your listings or to other members. Share it in a message when you're ready to.</div>
   </div>`;
 }
 
