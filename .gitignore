@@ -10,3 +10,4 @@ public/uploads/
 # kept out of git history to avoid permanent binary bloat.
 New Style Assets/
 .env.backup*
+render-env.txt
