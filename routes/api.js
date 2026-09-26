@@ -9,6 +9,7 @@ import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { formLimit } from "../lib/rateLimit.js";
 import { isEmailConfigured, trySend, verificationEmail, passwordResetEmail, contactForwardEmail, listingRemovedEmail, reportAlertEmail } from "../lib/email.js";
 import { REPORT_REASONS } from "./pages.js";
+import { parseMobile } from "../lib/countries.js";
 
 function redirect(res, location, cookie) {
   const headers = { Location: location };
@@ -47,27 +48,31 @@ export async function signup(req, res) {
   const next = safeNext(b.next);
   const fullName = clean(b.fullName, 80);
   const email = clean(b.email, 200).toLowerCase();
-  const mobile = clean(b.mobile, 30) || null;
+  const mobileCountry = clean(b.mobileCountry, 4);
+  const mobileNumber = clean(b.mobileNumber, 20);
 
   // Rejections carry the non-secret fields back so the form refills.
   const reject = (msg) => {
     const params = new URLSearchParams({ next, err: msg });
     if (fullName) params.set("fullName", fullName);
     if (email) params.set("email", email);
-    if (mobile) params.set("mobile", mobile);
+    if (mobileCountry) params.set("mobileCountry", mobileCountry);
+    if (mobileNumber) params.set("mobileNumber", mobileNumber);
     return redirect(res, `/onboarding?${params}`);
   };
 
   if (!formLimit(req, "signup").allowed) return reject("Too many sign-ups from your connection — please try again later.");
   if (!fullName || !email || !b.password) return reject("Please fill in your name, email and a password.");
   if (!EMAIL_RE.test(email)) return reject("That email address doesn't look right.");
+  const mobile = parseMobile(mobileCountry, mobileNumber);
+  if (mobile.error) return reject(mobile.error);
   if (!isStrongPassword(b.password)) return reject(`Password too weak — ${PASSWORD_HINT}`);
   if (b.password !== b.confirmPassword) return reject("Password and confirmation don't match.");
   if (!b.agreeTerms) return reject("Please agree to the Terms and Privacy Policy.");
   if (await db.getUserByEmail(email)) return reject("An account with that email already exists — try logging in instead.");
 
   const { hash, salt } = hashPassword(b.password);
-  const user = await db.createUser({ fullName, email, mobile, passwordHash: hash, passwordSalt: salt });
+  const user = await db.createUser({ fullName, email, mobile: mobile.value, passwordHash: hash, passwordSalt: salt });
   let sentVerification = false;
   if (isEmailConfigured()) {
     await startVerification(user);
@@ -256,13 +261,15 @@ export async function updateAccountProfile(req, res) {
     } catch {}
     if (!ok) return back("The Google Business link must start with https://");
   }
+  const mobile = parseMobile(clean(b.mobileCountry, 4), clean(b.mobileNumber, 20));
+  if (mobile.error) return back(mobile.error);
   const existing = await db.getUserByEmail(email);
   if (existing && existing.id !== user.id) return back("Another account already uses that email.");
   const emailChanged = email !== String(user.email).toLowerCase();
   await db.updateUser(user.id, {
     fullName,
     email,
-    mobile: clean(b.mobile, 30) || null,
+    mobile: mobile.value,
     businessName: clean(b.businessName, 100) || null,
     googleBusinessUrl,
     ...(emailChanged ? { emailVerifiedAt: isEmailConfigured() ? null : new Date().toISOString() } : {}),

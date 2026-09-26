@@ -83,15 +83,23 @@
     renderPhotos();
   }
 
-  // Re-encode to JPEG (max 2000px). GIFs and anything the browser can't
-  // decode (e.g. HEIC outside Safari) are uploaded as-is.
+  // Re-encode to WebP (JPEG where the browser can't write WebP, e.g. older
+  // Safari), max 1600px on the long side — sharp on any screen, and usually
+  // 150–350KB instead of a 3–8MB phone photo. GIFs and anything the browser
+  // can't decode (e.g. HEIC outside Safari) are uploaded as-is.
+  function encode(canvas, done) {
+    canvas.toBlob(function (webp) {
+      if (webp && webp.type === "image/webp" && webp.size) return done(webp);
+      canvas.toBlob(done, "image/jpeg", 0.82);
+    }, "image/webp", 0.8);
+  }
   function prepare(file) {
     return new Promise(function (resolve) {
       if (!/^image\//.test(file.type) || file.type === "image/gif") return resolve(file);
       var url = URL.createObjectURL(file);
       var img = new Image();
       img.onload = function () {
-        var maxSide = 2000;
+        var maxSide = 1600;
         var scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
         var w = Math.round(img.naturalWidth * scale);
         var h = Math.round(img.naturalHeight * scale);
@@ -103,7 +111,8 @@
         ctx.fillRect(0, 0, w, h);
         ctx.drawImage(img, 0, 0, w, h);
         URL.revokeObjectURL(url);
-        canvas.toBlob(function (blob) { resolve(blob && blob.size ? blob : file); }, "image/jpeg", 0.85);
+        // Always the re-encoded copy, even if larger: it has no EXIF/GPS.
+        encode(canvas, function (blob) { resolve(blob && blob.size ? blob : file); });
       };
       img.onerror = function () { URL.revokeObjectURL(url); resolve(file); };
       img.src = url;
@@ -353,8 +362,8 @@
     photos.forEach(function (p) {
       if (p.kind === "e") order.push("e:" + p.idx);
       else {
-        var name = (p.file.name || "photo").replace(/\.[^.]+$/, "") + (p.file.type === "image/jpeg" ? ".jpg" : "");
-        fd.append("photos", p.file, name || "photo.jpg");
+        var ext = { "image/jpeg": ".jpg", "image/webp": ".webp", "image/png": ".png" }[p.file.type] || "";
+        fd.append("photos", p.file, "photo" + ext);
         order.push("n:" + n++);
       }
     });

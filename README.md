@@ -67,7 +67,8 @@ npm run dev             # http://localhost:3000
 | `scripts/smoke.mjs` | Read-only smoke test of a running site (`BASE_URL=...`) |
 | `scripts/check-storage.mjs` | Uploads, fetches and deletes a test file in R2 |
 | `scripts/bootstrap-owner.mjs` | Copies one account from the v1 DB into a v2 DB as super-admin (dry run unless `--apply`) |
-| `scripts/purge-nonowner-data.mjs` | Deletes all test data except the owner's account (dry run unless `--apply`) |
+| `scripts/purge-nonowner-data.mjs` | Deletes all test data except admin accounts (dry run unless `--apply`) |
+| `scripts/grant-admin.mjs` | Makes an existing account a super-admin (dry run unless `--apply`) |
 | `scripts/reset-dev-db.mjs` | Wipes a **dev** DB and applies the schema (needs `CONFIRM_RESET_DB_HOST`) |
 
 ## Layout

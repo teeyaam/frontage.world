@@ -18,6 +18,7 @@ import { approximateCoords, distanceKm, publicCoords, publicLocationLine, places
 import { browserMapsKey, mapsEmbedUrl } from "../lib/maps.js";
 import { youTubeThumbnail, youTubeEmbedUrl, youTubeWatchUrl } from "../lib/youtube.js";
 import { trackOnLoad } from "../lib/analytics.js";
+import { COUNTRIES, splitMobile } from "../lib/countries.js";
 import { PRICING_SCENARIOS, PRICING_FACTORS, PRICE_NOTE_EXAMPLES } from "../lib/pricingGuide.js";
 import { termsHtml, privacyHtml, SAFETY_TIPS, LEGAL_UPDATED } from "../lib/legal.js";
 
@@ -478,6 +479,20 @@ export function reportFormMarkup({ heading, subject, action, hidden, backHref, s
 }
 
 // ---------------- Auth pages ----------------
+// Country calling-code select + local number. The server combines them
+// (lib/countries.js#parseMobile) — no script needed.
+function mobileFieldMarkup({ idPrefix, iso = "AU", number = "" }) {
+  const options = COUNTRIES.map((c) => `<option value="${c.iso}"${c.iso === iso ? " selected" : ""}>${c.dial} ${escapeHtml(c.name)}</option>`).join("");
+  return `<div class="field">
+    <label for="${idPrefix}-number">Mobile</label>
+    <div class="mobile-row">
+      <select name="mobileCountry" id="${idPrefix}-country" aria-label="Country calling code">${options}</select>
+      <input type="tel" name="mobileNumber" id="${idPrefix}-number" required inputmode="tel" autocomplete="tel-national" maxlength="20" placeholder="412 345 678" value="${escapeHtml(number)}" />
+    </div>
+    <div class="hint">So the other person can reach you once you've agreed a deal. Not shown publicly.</div>
+  </div>`;
+}
+
 function passwordFieldsMarkup({ idPrefix = "pw", name = "password", label = "Password" } = {}) {
   return `
     <div class="field">
@@ -519,7 +534,7 @@ export async function onboardingPage(req, res, query) {
           <input type="hidden" name="next" value="${escapeHtml(next)}" />
           <div class="field"><label for="su-name">Full name</label><input id="su-name" name="fullName" required maxlength="80" autocomplete="name" value="${escapeHtml(query.get("fullName") || "")}" /></div>
           <div class="field"><label for="su-email">Email</label><input id="su-email" type="email" name="email" required maxlength="200" autocomplete="email" value="${escapeHtml(query.get("email") || "")}" /></div>
-          <div class="field"><label for="su-mobile">Mobile <span class="optional">(optional)</span></label><input id="su-mobile" type="tel" name="mobile" maxlength="30" autocomplete="tel" value="${escapeHtml(query.get("mobile") || "")}" /></div>
+          ${mobileFieldMarkup({ idPrefix: "su-mobile", iso: query.get("mobileCountry") || "AU", number: query.get("mobileNumber") || "" })}
           ${passwordFieldsMarkup({ idPrefix: "su" })}
           <label class="consent-row small"><input type="checkbox" name="agreeTerms" value="1" required /> <span>I agree to the <a href="/terms" target="_blank" class="link">Terms</a> and <a href="/privacy" target="_blank" class="link">Privacy Policy</a>.</span></label>
           <button class="btn btn-accent btn-block" type="submit">Create free account</button>
@@ -737,9 +752,9 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
         <div class="hint" style="margin-top:-8px;margin-bottom:12px">Up to ${LISTING_MAX_DIMENSION_M}m per side.</div>
         ${fieldError("size")}
         <div class="field">
-          <label for="lf-yt">YouTube video link</label>
+          <label for="lf-yt">Video presentation <span class="optional">(YouTube link)</span></label>
           <input id="lf-yt" name="youtubeUrl" inputmode="url" value="${escapeHtml(ytValue)}" placeholder="https://youtu.be/…" />
-          <div class="hint">A short walk-past or drive-by video helps advertisers picture it.</div>
+          <div class="hint">A short video where you present the listing — walk the advertiser through the space, where it is, who passes it and how visible it is. Talk to camera or add voice-over; plain background footage on its own doesn't sell the space.</div>
           <div id="yt-preview" class="yt-preview" hidden></div>
           ${fieldError("youtubeUrl")}
         </div>
@@ -822,7 +837,7 @@ export async function accountPage(req, res, query) {
             <div class="field"><label for="ac-name">Full name</label><input id="ac-name" name="fullName" required maxlength="80" value="${escapeHtml(user.fullName)}" /></div>
             <div class="field"><label for="ac-email">Email</label><input id="ac-email" type="email" name="email" required maxlength="200" value="${escapeHtml(user.email)}" />
               <div class="hint">Changing it means verifying the new address.</div></div>
-            <div class="field"><label for="ac-mobile">Mobile <span class="optional">(optional)</span></label><input id="ac-mobile" type="tel" name="mobile" maxlength="30" value="${escapeHtml(user.mobile || "")}" /></div>
+            ${mobileFieldMarkup({ idPrefix: "ac-mobile", ...splitMobile(user.mobile) })}
             <div class="field"><label for="ac-biz">Business name <span class="optional">(optional)</span></label><input id="ac-biz" name="businessName" maxlength="100" value="${escapeHtml(user.businessName || "")}" />
               <div class="hint">Shown as the seller name on your listings instead of your first name.</div></div>
             <div class="field"><label for="ac-gbp">Google Business profile link <span class="optional">(optional)</span></label><input id="ac-gbp" type="url" name="googleBusinessUrl" maxlength="300" value="${escapeHtml(user.googleBusinessUrl || "")}" placeholder="https://g.page/your-business" /></div>
