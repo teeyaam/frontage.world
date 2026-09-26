@@ -13,6 +13,22 @@ from `archive/`.
 
 One account type: any user can both list space and message sellers.
 
+## Production (live since 27 September 2026)
+
+- https://frontage.world (www redirects) → Render web service `frontage-v2`
+  (Singapore, Starter plan), deploying from **`main`** on every push.
+  `npm start` applies `scripts/schema.sql` before starting.
+- Database: Render Postgres `frontage-db` (Singapore). Local `.env` holds
+  its external URL as `PRODUCTION_DATABASE_URL`; target it explicitly
+  (`DATABASE_URL=$PRODUCTION_DATABASE_URL node scripts/...`) — never by
+  default.
+- Photos: Cloudflare R2 bucket `frontage-media`, served at
+  https://media.frontage.world. DNS for frontage.world is on Cloudflare
+  (CNAMEs to `frontage-v2.onrender.com`, DNS only).
+- Admins: teeyaam@gmail.com (U-1009) and frontage.world@gmail.com (U-1011).
+- The old v1 service (`frontage.world` in Virginia) has no domain and
+  auto-deploy is off; the v1 data stays in Neon (`production` branch).
+
 ## Working rules from the owner
 
 - Work in `C:\dev\frontage-app` (the OneDrive copy is not the repo).
