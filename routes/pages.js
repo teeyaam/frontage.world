@@ -180,8 +180,8 @@ export async function browsePage(req, res, query) {
   const body = `
     <section class="hero-row">
       <div>
-        <h1 class="hero-headline">Advertising space, direct from the owner.</h1>
-        <p class="hero-sub">${escapeHtml(SITE_TAGLINE)} Message the owner and deal directly — listing is free.</p>
+        <h1 class="hero-headline">Every wall is a billboard.</h1>
+        <p class="hero-sub">${escapeHtml(SITE_TAGLINE)}</p>
       </div>
       <a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent btn-lg">List your space — free</a>
     </section>
@@ -234,11 +234,12 @@ export async function browsePage(req, res, query) {
     res,
     200,
     await layout({
-      title: cat ? `${categoryLabel(cat)} advertising space` : "Advertising space for rent",
+      title: cat ? `${categoryLabel(cat)} advertising space` : "Every wall is a billboard",
       activeNav: "browse",
       user,
       body,
       canonicalPath: cat ? `/?category=${cat}` : "/",
+      hideTagline: true,
     })
   );
 }
