@@ -56,6 +56,13 @@ invariant.
 - Location privacy: the public sees `publicCoords()` / `publicLocationLine()`
   unless the seller ticked "show exact location". Never send raw lat/lng of
   a non-exact listing to the browser.
+- International: `lib/countries.js` is the market list. Currency always
+  follows the listing's country (`currencyFor`); sizes are stored in metres;
+  pass the viewer's currency (`viewerContext(req, user)`) to `priceLabel`
+  / `money` so foreign prices show NZ$/US$ rather than a bare $.
+- Public listing queries must exclude expired listings (`PUBLIC_WHERE` in
+  `lib/db.js`). Scheduled emails live in `lib/jobs.js` (hourly, in-process,
+  claim-then-send); set `JOBS_ENABLED=0` for a local copy that must not email.
 - Message bodies are rendered with `textContent` in `public/chat.js`; every
   server-rendered value goes through `escapeHtml`.
 

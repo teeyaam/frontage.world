@@ -15,6 +15,7 @@ CREATE SEQUENCE IF NOT EXISTS conversations_seq;
 CREATE SEQUENCE IF NOT EXISTS messages_seq;
 CREATE SEQUENCE IF NOT EXISTS reports_seq;
 CREATE SEQUENCE IF NOT EXISTS contact_messages_seq;
+CREATE SEQUENCE IF NOT EXISTS deals_seq;
 
 -- ---------- users (one account both buys and sells) ----------
 CREATE TABLE IF NOT EXISTS users (
@@ -34,6 +35,8 @@ CREATE TABLE IF NOT EXISTS users (
   password_reset_token_hash TEXT, -- sha256 of the emailed token, never the token itself
   password_reset_expires_at TIMESTAMPTZ,
   notify_messages BOOLEAN NOT NULL DEFAULT TRUE, -- new-message email alerts
+  country TEXT NOT NULL DEFAULT 'AU', -- one of lib/countries.js MARKETS: default browse + new-listing country
+  units TEXT NOT NULL DEFAULT 'm', -- size units shown to this user: m | ft
   suspended_at TIMESTAMPTZ,
   suspended_reason TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -75,11 +78,18 @@ CREATE TABLE IF NOT EXISTS listings (
   lat NUMERIC,
   lng NUMERIC,
   show_exact_location BOOLEAN NOT NULL DEFAULT FALSE,
+  country_code TEXT NOT NULL DEFAULT 'AU', -- market ISO code; the address must be in this country
+  currency TEXT NOT NULL DEFAULT 'AUD', -- always the country's currency (lib/countries.js currencyFor)
 
   width_m NUMERIC, -- optional
   height_m NUMERIC, -- optional
 
-  status TEXT NOT NULL DEFAULT 'live', -- live | removed (by moderation) | deleted (by the seller)
+  status TEXT NOT NULL DEFAULT 'live', -- live | rented (seller marked it taken) | removed (by moderation) | deleted (by the seller)
+  expires_at TIMESTAMPTZ, -- a live listing drops out of browse after this until renewed (60 days)
+  renewed_at TIMESTAMPTZ, -- last time the seller confirmed it's still available
+  rented_at TIMESTAMPTZ,
+  expiry_reminder_sent_at TIMESTAMPTZ,
+  expired_notice_sent_at TIMESTAMPTZ,
   removed_reason TEXT,
   removed_at TIMESTAMPTZ,
   removed_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
@@ -106,6 +116,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   seller_last_read_at TIMESTAMPTZ,
   buyer_last_notified_at TIMESTAMPTZ,
   seller_last_notified_at TIMESTAMPTZ,
+  buyer_followup_token TEXT, -- one-click "did it work out?" email links (3 weeks after first message)
+  buyer_followup_sent_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (listing_id, buyer_id)
 );
@@ -152,3 +164,38 @@ CREATE TABLE IF NOT EXISTS contact_messages (
   topic TEXT NOT NULL DEFAULT 'general',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ---------- deals (reported by sellers and buyers; Frontage never sees payments) ----------
+CREATE TABLE IF NOT EXISTS deals (
+  id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL,
+  listing_id TEXT REFERENCES listings(id) ON DELETE SET NULL,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+  reported_by TEXT NOT NULL, -- seller | buyer
+  reporter_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  via_frontage TEXT NOT NULL, -- yes | no | unsure
+  deal_value NUMERIC, -- optional, private
+  currency TEXT,
+  term_months INTEGER, -- optional, private
+  ok_to_feature BOOLEAN NOT NULL DEFAULT FALSE, -- consent to a success story (never the price)
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_deals_listing ON deals(listing_id);
+
+-- ---------- upgrades for databases created before these columns existed ----------
+-- Idempotent: safe to run on every deploy.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT 'AU';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS units TEXT NOT NULL DEFAULT 'm';
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS country_code TEXT NOT NULL DEFAULT 'AU';
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'AUD';
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS renewed_at TIMESTAMPTZ;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS rented_at TIMESTAMPTZ;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS expiry_reminder_sent_at TIMESTAMPTZ;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS expired_notice_sent_at TIMESTAMPTZ;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS buyer_followup_token TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS buyer_followup_sent_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_listings_expires ON listings(expires_at);
+CREATE INDEX IF NOT EXISTS idx_conversations_followup ON conversations(buyer_followup_token);
+-- Live listings from before expiry existed get 60 days from when they were listed.
+UPDATE listings SET expires_at = created_at + interval '60 days' WHERE expires_at IS NULL AND status = 'live';

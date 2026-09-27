@@ -9,7 +9,7 @@ import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { formLimit } from "../lib/rateLimit.js";
 import { isEmailConfigured, trySend, verificationEmail, passwordResetEmail, contactForwardEmail, listingRemovedEmail, reportAlertEmail } from "../lib/email.js";
 import { REPORT_REASONS } from "./pages.js";
-import { parseMobile } from "../lib/countries.js";
+import { parseMobile, isMarket, marketOrDefault, defaultUnitsFor, currencyFor } from "../lib/countries.js";
 
 function redirect(res, location, cookie) {
   const headers = { Location: location };
@@ -73,6 +73,9 @@ export async function signup(req, res) {
 
   const { hash, salt } = hashPassword(b.password);
   const user = await db.createUser({ fullName, email, mobile: mobile.value, passwordHash: hash, passwordSalt: salt });
+  // Region comes from the mobile's country (Australia if it isn't a market yet).
+  const region = marketOrDefault(mobileCountry);
+  await db.updateUser(user.id, { country: region, units: defaultUnitsFor(region) });
   let sentVerification = false;
   if (isEmailConfigured()) {
     await startVerification(user);
@@ -188,7 +191,7 @@ async function saveListing(req, res, { user, existing }) {
   const uploadError = await runUpload(req, res, uploadListingPhotos);
   if (uploadError) return fail(400, uploadError, { photos: uploadError });
 
-  const { values, fieldErrors } = await parseListingInput(req.body, { existing });
+  const { values, fieldErrors } = await parseListingInput(req.body, { existing, defaultCountry: marketOrDefault(user.country) });
   const photos = assemblePhotos(existing ? existing.photos || [] : [], req.files, (req.body || {}).photoOrder);
   if (photos.length < LISTING_MIN_PHOTOS) fieldErrors.photos = "Add at least one photo of the space.";
   if (photos.length > LISTING_MAX_PHOTOS) fieldErrors.photos = `You can add up to ${LISTING_MAX_PHOTOS} photos.`;
@@ -196,7 +199,7 @@ async function saveListing(req, res, { user, existing }) {
 
   let listing;
   if (existing) {
-    listing = await db.updateListing(existing.id, { ...values, photos });
+    listing = await db.updateListingBySeller(existing, { ...values, photos });
   } else {
     listing = await db.createListing({ ownerId: user.id, ...values, photos });
   }
@@ -236,6 +239,51 @@ export async function updateListingHandler(req, res, id) {
 }
 
 // Status "deleted" (not "removed"), so moderators can't restore it.
+// Renew (live or expired) or relist (rented): another 60 days in browse.
+export async function renewListingHandler(req, res, id) {
+  const { listing } = await requireOwnedListing(req, res, id);
+  if (!listing) return;
+  await db.renewListing(listing.id);
+  redirect(res, "/sell?renewed=1");
+}
+
+// "Mark as rented": off browse, plus the seller's optional deal report.
+export async function markRentedHandler(req, res, id) {
+  const { user, listing } = await requireOwnedListing(req, res, id);
+  if (!listing) return;
+  const b = await readBody(req);
+  if (listing.status === "live") {
+    await db.markListingRented(listing.id);
+    const deal = parseDealAnswers(b, listing.currency);
+    const buyerConvo = clean(b.conversationId, 40) || null;
+    const convoOk = buyerConvo ? (await db.getListingConversationBuyers(listing.id)).some((c) => c.id === buyerConvo) : false;
+    await db.createDeal({ listingId: listing.id, conversationId: convoOk ? buyerConvo : null, reportedBy: "seller", reporterId: user.id, ...deal });
+  }
+  redirect(res, "/sell?rented=1");
+}
+
+function parseDealAnswers(b, currency) {
+  const value = Number(String(b.dealValue || "").replace(/[^\d.]/g, ""));
+  const term = parseInt(String(b.termMonths || "").replace(/\D/g, ""), 10);
+  return {
+    viaFrontage: ["yes", "no", "unsure"].includes(b.via) ? b.via : "unsure",
+    dealValue: value > 0 && value < 100000000 ? Math.round(value * 100) / 100 : null,
+    currency: currency || null,
+    termMonths: term > 0 && term <= 240 ? term : null,
+    okToFeature: b.okToFeature === "1",
+  };
+}
+
+// Buyer check-in details (from the emailed link — the token is the key).
+export async function dealCheckSubmit(req, res, token) {
+  const convo = await db.getConversationByFollowupToken(token);
+  if (!convo) return redirect(res, "/");
+  const b = await readBody(req);
+  const listing = await db.getListingById(convo.listingId);
+  await db.upsertBuyerDeal(convo, parseDealAnswers({ ...b, via: "yes" }, listing && listing.currency));
+  redirect(res, `/deal-check/${encodeURIComponent(token)}?details=1&saved=1`);
+}
+
 export async function deleteListingHandler(req, res, id) {
   const { listing } = await requireOwnedListing(req, res, id);
   if (!listing) return;
@@ -295,6 +343,15 @@ export async function updateAccountPassword(req, res) {
   await db.destroySessionsForUser(user.id);
   const session = await db.createSession(user.id);
   redirect(res, "/account?updated=Password", sessionCookieHeader(session.token));
+}
+
+export async function updateAccountRegion(req, res) {
+  const user = await currentUser(req);
+  if (!user) return redirect(res, "/onboarding?next=/account");
+  const b = await readBody(req);
+  if (!isMarket(b.country)) return redirect(res, withParam("/account#region", "err", "Frontage isn't available in that country yet."));
+  await db.updateUser(user.id, { country: b.country, units: b.units === "ft" ? "ft" : "m" });
+  redirect(res, "/account?updated=Region and units#region");
 }
 
 export async function updateAccountNotifications(req, res) {
@@ -414,6 +471,14 @@ export async function removeListingHandler(req, res, id) {
   const reason = clean(b.reason, 500);
   if (!reason) return redirect(res, "/admin/listings");
   await removeListingAndNotify(id, reason, admin);
+  redirect(res, "/admin/listings?done=1");
+}
+
+export async function fixListingCurrencyHandler(req, res, id) {
+  const admin = await requireModerator(req, res);
+  if (!admin) return;
+  const listing = await db.getListingById(id);
+  if (listing) await db.fixListingCurrency(id, currencyFor(listing.countryCode || "AU"));
   redirect(res, "/admin/listings?done=1");
 }
 

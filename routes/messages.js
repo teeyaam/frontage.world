@@ -9,7 +9,7 @@ import { readBody } from "../lib/body.js";
 import { priceLabel, timeAgo } from "../lib/format.js";
 import { checkMessageAllowed, MESSAGE_MAX_LENGTH } from "../lib/rateLimit.js";
 import { trySend, newMessageEmail } from "../lib/email.js";
-import { send, redirect, requireUser, notFoundPage, coverPhoto, reportFormMarkup } from "./pages.js";
+import { send, redirect, requireUser, notFoundPage, coverPhoto, reportFormMarkup, viewerContext } from "./pages.js";
 
 function wantsJson(req) {
   return String(req.headers.accept || "").includes("application/json");
@@ -88,7 +88,7 @@ export async function conversationPage(req, res, id) {
         <a href="/listing/${escapeHtml(conversation.listingId)}" class="chat-listing">
           <span class="inbox-thumb">${photo ? `<img src="${escapeHtml(photo)}" alt="" />` : ""}</span>
           <span><strong>${escapeHtml(conversation.listingTitle)}</strong><br/><span class="small muted">${escapeHtml(
-    priceLabel({ price: conversation.listingPrice, priceNote: conversation.listingPriceNote })
+    priceLabel({ price: conversation.listingPrice, priceNote: conversation.listingPriceNote, currency: conversation.listingCurrency }, { viewerCurrency: viewerContext(req, user).currency })
   )}</span></span>
         </a>
         <div class="small muted">Chatting with <strong>${escapeHtml(firstName(otherName))}</strong>${role === "seller" ? " about your listing" : " (the seller)"}</div>

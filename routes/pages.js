@@ -1,7 +1,7 @@
 import { layout, escapeHtml, SITE_TAGLINE } from "../lib/layout.js";
 import { currentUser, safeNext, PASSWORD_PATTERN, PASSWORD_HINT } from "../lib/auth.js";
 import * as db from "../lib/db.js";
-import { priceLabel, sizeLabel, formatDate, timeAgo, listedAgo } from "../lib/format.js";
+import { priceLabel, sizeLabel, sizeForInput, formatDate, timeAgo, listedAgo, daysUntil, money } from "../lib/format.js";
 import {
   CATEGORIES,
   CATEGORY_LABEL,
@@ -14,11 +14,21 @@ import {
 import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { isEmailConfigured } from "../lib/email.js";
 import { filterListings } from "../lib/listingFilters.js";
-import { approximateCoords, distanceKm, publicCoords, publicLocationLine, placesCountries } from "../lib/geo.js";
+import { approximateCoords, distanceKm, publicCoords, publicLocationLine } from "../lib/geo.js";
 import { browserMapsKey, mapsEmbedUrl } from "../lib/maps.js";
 import { youTubeThumbnail, youTubeEmbedUrl, youTubeWatchUrl } from "../lib/youtube.js";
 import { trackOnLoad } from "../lib/analytics.js";
-import { COUNTRIES, splitMobile } from "../lib/countries.js";
+import {
+  COUNTRIES,
+  MARKETS,
+  DEFAULT_COUNTRY,
+  splitMobile,
+  isMarket,
+  currencyFor,
+  countryName,
+  defaultUnitsFor,
+  countryFromAcceptLanguage,
+} from "../lib/countries.js";
 import { PRICING_SCENARIOS, PRICING_FACTORS, PRICE_NOTE_EXAMPLES } from "../lib/pricingGuide.js";
 import { termsHtml, privacyHtml, SAFETY_TIPS, LEGAL_UPDATED } from "../lib/legal.js";
 
@@ -83,10 +93,34 @@ function categoryLabel(c) {
   return CATEGORY_LABEL[c] || "Other";
 }
 
+// Who's looking: their country (account setting, else a guess from their
+// browser language, else Australia), its currency, and their size units.
+export function viewerContext(req, user) {
+  const country = user && isMarket(user.country) ? user.country : countryFromAcceptLanguage(req.headers["accept-language"]) || DEFAULT_COUNTRY;
+  return { country, currency: currencyFor(country), units: (user && user.units) || defaultUnitsFor(country) };
+}
+
+// "Manly" for a viewer in the same country; "Auckland, New Zealand" otherwise.
+function placeLine(l, viewer) {
+  const place = l.suburb || l.state || "";
+  const cc = l.countryCode || DEFAULT_COUNTRY;
+  if (viewer && cc === viewer.country) return place;
+  return [place, countryName(cc)].filter(Boolean).join(", ");
+}
+
+function marketOptions(selected) {
+  return MARKETS.map((c) => `<option value="${c.iso}"${c.iso === selected ? " selected" : ""}>${escapeHtml(c.name)}</option>`).join("");
+}
+
 function adminSubnav(user, activeKey) {
   const items = [];
   if (hasPermission(user, "canAccessSupport")) {
-    items.push({ key: "reports", href: "/admin/reports", label: "Reports" }, { key: "listings", href: "/admin/listings", label: "Listings" }, { key: "users", href: "/admin/users", label: "Users" });
+    items.push(
+      { key: "reports", href: "/admin/reports", label: "Reports" },
+      { key: "listings", href: "/admin/listings", label: "Listings" },
+      { key: "users", href: "/admin/users", label: "Users" },
+      { key: "deals", href: "/admin/deals", label: "Deals" }
+    );
   }
   if (user.isAdmin) items.push({ key: "staff", href: "/admin/staff", label: "Staff access" });
   if (items.length <= 1) return "";
@@ -94,29 +128,43 @@ function adminSubnav(user, activeKey) {
 }
 
 // ---------------- Browse ----------------
+const freshness = (l) => new Date(l.renewedAt || l.createdAt || 0).getTime();
 const SORT_OPTIONS = {
-  newest: { label: "Newest", cmp: (a, b) => (b.__seq || 0) - (a.__seq || 0) },
+  newest: { label: "Recently updated", cmp: (a, b) => freshness(b) - freshness(a) },
   price_asc: { label: "Price: low to high", cmp: (a, b) => (a.price > 0 ? a.price : Infinity) - (b.price > 0 ? b.price : Infinity) },
   price_desc: { label: "Price: high to low", cmp: (a, b) => (b.price || 0) - (a.price || 0) },
 };
 // Every param that should survive a category-chip click or a filter submit.
-const FILTER_PARAM_KEYS = ["q", "where", "minPrice", "maxPrice", "sort", "view"];
+const FILTER_PARAM_KEYS = ["country", "q", "where", "minPrice", "maxPrice", "sort", "view"];
 
-export function listingCard(l) {
+export function listingCard(l, viewer) {
   const photo = coverPhoto(l);
+  const place = placeLine(l, viewer);
   return `<a class="card" href="/listing/${escapeHtml(l.id)}">
       <div class="card-diagram">${photo ? `<img src="${escapeHtml(photo)}" alt="" loading="lazy" />` : `<span class="muted small">No photo</span>`}</div>
       <div class="card-body">
-        <div class="card-price">${escapeHtml(priceLabel(l, { withNote: false }))}${l.priceNote && l.price > 0 ? ` <span class="muted card-price-note">${escapeHtml(l.priceNote)}</span>` : ""}</div>
+        <div class="card-price">${escapeHtml(priceLabel(l, { withNote: false, viewerCurrency: viewer && viewer.currency }))}${l.priceNote && l.price > 0 ? ` <span class="muted card-price-note">${escapeHtml(l.priceNote)}</span>` : ""}</div>
         <h3 class="card-title">${escapeHtml(l.title)}</h3>
-        <div class="muted small">${escapeHtml(categoryLabel(l.category))}${l.suburb ? ` · ${escapeHtml(l.suburb)}` : ""}</div>
+        <div class="muted small">${escapeHtml(categoryLabel(l.category))}${place ? ` · ${escapeHtml(place)}` : ""}</div>
       </div>
     </a>`;
 }
 
+// The browse country: ?country=XX (a market) or ?country=all, else the
+// viewer's own country.
+function browseCountry(query, viewer) {
+  const q = String(query.get("country") || "").toUpperCase();
+  if (q === "ALL") return "all";
+  return isMarket(q) ? q : viewer.country;
+}
+
 export async function browsePage(req, res, query) {
   const user = await currentUser(req);
+  const viewer = viewerContext(req, user);
+  const country = browseCountry(query, viewer);
+  const priceCurrency = country === "all" ? null : currencyFor(country);
   const allListings = await db.getListings();
+  const inCountry = country === "all" ? allListings : allListings.filter((l) => (l.countryCode || DEFAULT_COUNTRY) === country);
   const cat = CATEGORIES.includes(query.get("category")) ? query.get("category") : null;
   const clampNonNegative = (n) => (Number.isFinite(n) && n >= 0 ? n : NaN);
   const minPrice = clampNonNegative(parseFloat(query.get("minPrice")));
@@ -124,7 +172,7 @@ export async function browsePage(req, res, query) {
   const sortKey = SORT_OPTIONS[query.get("sort")] ? query.get("sort") : "newest";
   const mapView = query.get("view") === "map";
 
-  let listings = filterListings(allListings, query).slice().sort(SORT_OPTIONS[sortKey].cmp);
+  let listings = filterListings(allListings, query, { country }).slice().sort(SORT_OPTIONS[sortKey].cmp);
 
   // Zero results for a place search: suggest the nearest suburbs that do
   // have matching listings, instead of a dead end.
@@ -134,8 +182,8 @@ export async function browsePage(req, res, query) {
     const params = new URLSearchParams(query);
     params.delete("q");
     params.delete("where");
-    const candidates = filterListings(allListings, params);
-    const target = candidates.length ? await approximateCoords(locationTerm) : null;
+    const candidates = filterListings(allListings, params, { country });
+    const target = candidates.length ? await approximateCoords(locationTerm, country === "all" ? viewer.country : country) : null;
     if (target) {
       const bySuburb = new Map();
       for (const l of candidates) {
@@ -163,8 +211,8 @@ export async function browsePage(req, res, query) {
   const noResultsHtml = nearby.length
     ? `<div class="panel empty-state"><p class="muted">No spaces match “${escapeHtml(locationTerm)}” yet. Nearby suburbs with spaces:</p>
          <div class="chip-row">${nearby.map((s) => `<a href="${withParams({ q: "", where: s.suburb })}" class="chip-pill">${escapeHtml(s.suburb)} (${s.count})</a>`).join("")}</div></div>`
-    : allListings.length === 0
-    ? `<div class="panel empty-state"><h2>Be the first to list a space</h2><p class="muted">Got a wall, fence, window or screen people can see? List it free in a couple of minutes.</p><a href="/sell/welcome" class="btn btn-accent">List your space</a></div>`
+    : inCountry.length === 0
+    ? `<div class="panel empty-state"><h2>Be the first to list a space${country === "all" ? "" : ` in ${escapeHtml(countryName(country))}`}</h2><p class="muted">Got a wall, fence, window or screen people can see? List it free in a couple of minutes.</p><a href="/sell/welcome" class="btn btn-accent">List your space</a></div>`
     : `<div class="panel empty-state"><p class="muted">No spaces match that search.</p><a href="/" class="btn btn-outline btn-sm">Clear search</a></div>`;
 
   const categoryChips = ["all", ...CATEGORIES]
@@ -174,7 +222,7 @@ export async function browsePage(req, res, query) {
     })
     .join("");
 
-  const activeFilterCount = [minPrice, maxPrice].filter(Number.isFinite).length + (query.get("where") ? 1 : 0) + (sortKey !== "newest" ? 1 : 0);
+  const activeFilterCount = (priceCurrency ? [minPrice, maxPrice].filter(Number.isFinite).length : 0) + (query.get("where") ? 1 : 0) + (sortKey !== "newest" ? 1 : 0);
   const googleKey = browserMapsKey();
 
   const body = `
@@ -187,6 +235,17 @@ export async function browsePage(req, res, query) {
     </section>
 
     <div class="browse-toolbar">
+      <form method="GET" action="/" class="country-switch" data-autosubmit>
+        ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
+        ${query.get("q") ? `<input type="hidden" name="q" value="${escapeHtml(query.get("q"))}" />` : ""}
+        ${mapView ? `<input type="hidden" name="view" value="map" />` : ""}
+        <label for="browse-country" class="visually-hidden">Country</label>
+        <select id="browse-country" name="country" class="btn-pill btn">
+          <option value="all"${country === "all" ? " selected" : ""}>All countries</option>
+          ${marketOptions(country)}
+        </select>
+        <noscript><button class="btn btn-outline btn-sm" type="submit">Go</button></noscript>
+      </form>
       <form method="GET" action="/" class="field-pill" role="search">
         ${cat ? `<input type="hidden" name="category" value="${escapeHtml(cat)}" />` : ""}
         ${FILTER_PARAM_KEYS.filter((k) => k !== "q")
@@ -204,10 +263,15 @@ export async function browsePage(req, res, query) {
             ${query.get("q") ? `<input type="hidden" name="q" value="${escapeHtml(query.get("q"))}" />` : ""}
             ${mapView ? `<input type="hidden" name="view" value="map" />` : ""}
             <div class="field"><label for="f-where">Suburb, state or postcode</label><input id="f-where" name="where" value="${escapeHtml(query.get("where") || "")}" placeholder="Any" /></div>
-            <div class="form-row">
-              <div class="field"><label for="f-min">Min price</label><input id="f-min" type="number" name="minPrice" min="0" value="${Number.isFinite(minPrice) ? minPrice : ""}" placeholder="$0" /></div>
-              <div class="field"><label for="f-max">Max price</label><input id="f-max" type="number" name="maxPrice" min="0" value="${Number.isFinite(maxPrice) ? maxPrice : ""}" placeholder="Any" /></div>
-            </div>
+            ${query.get("country") ? `<input type="hidden" name="country" value="${escapeHtml(query.get("country"))}" />` : ""}
+            ${
+              priceCurrency
+                ? `<div class="form-row">
+              <div class="field"><label for="f-min">Min price (${priceCurrency})</label><input id="f-min" type="number" name="minPrice" min="0" value="${Number.isFinite(minPrice) ? minPrice : ""}" placeholder="0" /></div>
+              <div class="field"><label for="f-max">Max price (${priceCurrency})</label><input id="f-max" type="number" name="maxPrice" min="0" value="${Number.isFinite(maxPrice) ? maxPrice : ""}" placeholder="Any" /></div>
+            </div>`
+                : `<p class="small muted">Choose a country to filter by price — prices are in each country's own currency.</p>`
+            }
             <div class="field"><label for="f-sort">Sort by</label><select id="f-sort" name="sort">${Object.entries(SORT_OPTIONS)
               .map(([key, opt]) => `<option value="${key}"${key === sortKey ? " selected" : ""}>${opt.label}</option>`)
               .join("")}</select></div>
@@ -222,10 +286,10 @@ export async function browsePage(req, res, query) {
     </div>
     <div id="category-chips" class="chip-row">${categoryChips}</div>
     <div id="browse-map" class="browse-map"${mapView ? "" : " hidden"}></div>
-    <h2 class="results-heading">${listings.length} space${listings.length === 1 ? "" : "s"}${cat ? ` · ${escapeHtml(categoryLabel(cat))}` : ""}</h2>
-    <div id="browse-results"${mapView ? " hidden" : ""}>${listings.length === 0 ? noResultsHtml : `<div class="grid">${listings.map(listingCard).join("")}</div>`}</div>
+    <h2 class="results-heading">${listings.length} space${listings.length === 1 ? "" : "s"} ${country === "all" ? "worldwide" : `in ${escapeHtml(countryName(country))}`}${cat ? ` · ${escapeHtml(categoryLabel(cat))}` : ""}</h2>
+    <div id="browse-results"${mapView ? " hidden" : ""}>${listings.length === 0 ? noResultsHtml : `<div class="grid">${listings.map((l) => listingCard(l, viewer)).join("")}</div>`}</div>
     <script>
-      window.FRONTAGE_MAP = ${JSON.stringify({ target: "browse-map", engine: googleKey ? "google" : "leaflet", key: googleKey || null, startInMap: mapView })};
+      window.FRONTAGE_MAP = ${JSON.stringify({ target: "browse-map", engine: googleKey ? "google" : "leaflet", key: googleKey || null, startInMap: mapView, country, mapQuery: mapQueryString(query, country) })};
     </script>
     <script src="/browse.js" defer></script>
   `;
@@ -244,15 +308,23 @@ export async function browsePage(req, res, query) {
   );
 }
 
+function mapQueryString(query, country) {
+  const params = new URLSearchParams(query);
+  params.set("country", country === "all" ? "all" : country);
+  params.delete("view");
+  return `?${params}`;
+}
+
 // JSON for the browse map. Coordinates are the public (possibly
 // approximate) ones — the exact pin never leaves the server unless the
 // seller chose to show it.
 export async function listingsMapJson(req, res, query) {
-  const listings = filterListings(await db.getListings(), query)
+  const viewer = viewerContext(req, await currentUser(req));
+  const listings = filterListings(await db.getListings(), query, { country: browseCountry(query, viewer) })
     .map((l) => {
       const c = publicCoords(l);
       if (!c) return null;
-      return { id: l.id, title: l.title, price: priceLabel(l, { withNote: false }), suburb: l.suburb || "", category: categoryLabel(l.category), photo: coverPhoto(l), lat: c.lat, lng: c.lng, exact: c.exact };
+      return { id: l.id, title: l.title, price: priceLabel(l, { withNote: false, viewerCurrency: viewer.currency }), suburb: placeLine(l, viewer), category: categoryLabel(l.category), photo: coverPhoto(l), lat: c.lat, lng: c.lng, exact: c.exact };
     })
     .filter(Boolean);
   res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -286,16 +358,44 @@ export async function listingDetailPage(req, res, id) {
   return renderListing(req, res, user, listing);
 }
 
+// What the owner sees about where their listing stands.
+function ownerStatusNotice(l) {
+  if (l.status === "removed") return `<div class="notice notice-orange">Removed by moderators${l.removedReason ? `: ${escapeHtml(l.removedReason)}` : ""}.</div>`;
+  if (l.status === "rented") return `<div class="notice notice-blue">Marked as rented ${escapeHtml(timeAgo(l.rentedAt))} — hidden from browse. Relist it when the space is free again.</div>`;
+  if (db.isExpired(l)) return `<div class="notice notice-orange"><strong>Expired</strong> — hidden from browse since ${escapeHtml(formatDate(l.expiresAt))}. Renew it to put it back.</div>`;
+  const left = daysUntil(l.expiresAt);
+  return `<div class="notice notice-blue">This is your listing${left != null ? ` — live for ${left} more day${left === 1 ? "" : "s"}` : ""}.</div>`;
+}
+
+// Renew / Mark as rented / Relist, as small forms (used on the listing
+// page, the edit page and My listings).
+function ownerLifecycleButtons(l, { block = false } = {}) {
+  const cls = `btn ${block ? "btn-block " : "btn-sm "}`;
+  const id = escapeHtml(l.id);
+  if (l.status === "rented") return `<form method="POST" action="/api/listings/${id}/renew" class="inline-form"><button class="${cls}btn-accent" type="submit">Relist this space</button></form>`;
+  if (l.status !== "live") return "";
+  const left = daysUntil(l.expiresAt);
+  const renew =
+    db.isExpired(l) || (left != null && left <= 14)
+      ? `<form method="POST" action="/api/listings/${id}/renew" class="inline-form"><button class="${cls}btn-accent" type="submit">${db.isExpired(l) ? "Renew listing" : "Renew for 60 days"}</button></form>`
+      : "";
+  return `${renew}<a href="/sell/rented/${id}" class="${cls}btn-outline"${block && renew ? ` style="margin-top:10px"` : ""}>Mark as rented</a>`;
+}
+
 async function renderListing(req, res, user, listing) {
   const owner = await db.getUserById(listing.ownerId);
   const isOwner = Boolean(user && user.id === listing.ownerId);
-  const isLive = listing.status === "live";
+  const expired = db.isExpired(listing);
+  const isLive = listing.status === "live" && !expired;
+  const viewer = viewerContext(req, user);
+  const vc = { viewerCurrency: viewer.currency };
   if (!isOwner && isLive) await db.incrementListingView(listing.id);
 
   const photos = listing.photos || [];
   const existingConversation = user && !isOwner ? await db.getConversationFor(listing.id, user.id) : null;
-  const size = sizeLabel(listing);
-  const locationLine = publicLocationLine(listing);
+  const size = sizeLabel(listing, viewer.units);
+  const cc = listing.countryCode || DEFAULT_COUNTRY;
+  const locationLine = [publicLocationLine(listing), cc !== viewer.country ? countryName(cc) : ""].filter(Boolean).join(", ");
   const embed = mapsEmbedUrl(listing);
   const coords = publicCoords(listing);
   const nextPath = `/listing/${listing.id}`;
@@ -339,8 +439,10 @@ async function renderListing(req, res, user, listing) {
 
   let actionBox;
   if (isOwner) {
-    actionBox = `<div class="notice notice-blue">This is your listing${isLive ? "" : ` — <strong>${listing.status === "removed" ? "removed by moderators" : escapeHtml(listing.status)}</strong>`}.</div>
-      <a href="/sell/edit/${escapeHtml(listing.id)}" class="btn btn-primary btn-block">Edit listing</a>
+    actionBox = `${ownerStatusNotice(listing)}
+      ${ownerLifecycleButtons(listing, { block: true })}
+      <a href="/sell/edit/${escapeHtml(listing.id)}" class="btn btn-primary btn-block" style="margin-top:10px">Edit listing</a>`;
+    actionBox += `
       <a href="/account/messages" class="btn btn-outline btn-block" style="margin-top:10px">View messages</a>
       <div class="small muted" style="margin-top:10px">${listing.viewCount || 0} view${listing.viewCount === 1 ? "" : "s"} from other people.</div>`;
   } else if (!isLive) {
@@ -371,9 +473,10 @@ async function renderListing(req, res, user, listing) {
           <dl class="detail-facts">
             <div><dt>Type of space</dt><dd>${escapeHtml(categoryLabel(listing.category))}</dd></div>
             ${size ? `<div><dt>Size</dt><dd>${escapeHtml(size)}</dd></div>` : ""}
-            <div><dt>Price</dt><dd>${escapeHtml(priceLabel(listing))}</dd></div>
+            <div><dt>Price</dt><dd>${escapeHtml(priceLabel(listing, vc))}${listing.price > 0 ? ` <span class="muted small">(${escapeHtml(listing.currency || "AUD")})</span>` : ""}</dd></div>
             <div><dt>Location</dt><dd>${escapeHtml(locationLine)}${listing.showExactLocation ? "" : ` <span class="muted small">(approximate)</span>`}</dd></div>
             <div><dt>Listed</dt><dd>${escapeHtml(formatDate(listing.createdAt))}</dd></div>
+            <div><dt>Last updated</dt><dd>${escapeHtml(timeAgo(listing.renewedAt || listing.createdAt))}</dd></div>
             <div><dt>Listing ID</dt><dd class="mono">${escapeHtml(listing.id)}</dd></div>
           </dl>
         </section>
@@ -383,9 +486,9 @@ async function renderListing(req, res, user, listing) {
       <aside class="detail-side">
         <div class="side-card">
           <h1 class="detail-title">${escapeHtml(listing.title)}</h1>
-          <div class="detail-price">${escapeHtml(priceLabel(listing, { withNote: false }))}${listing.priceNote && listing.price > 0 ? ` <span class="muted detail-price-note">${escapeHtml(listing.priceNote)}</span>` : ""}</div>
+          <div class="detail-price">${escapeHtml(priceLabel(listing, { withNote: false, ...vc }))}${listing.priceNote && listing.price > 0 ? ` <span class="muted detail-price-note">${escapeHtml(listing.priceNote)}</span>` : ""}</div>
           ${!(listing.price > 0) && listing.priceNote ? `<div class="muted small">${escapeHtml(listing.priceNote)}</div>` : ""}
-          <div class="muted small" style="margin:6px 0 16px">${escapeHtml(categoryLabel(listing.category))} · ${escapeHtml(listing.suburb || locationLine)} · ${escapeHtml(listedAgo(listing.createdAt))}</div>
+          <div class="muted small" style="margin:6px 0 16px">${escapeHtml(categoryLabel(listing.category))} · ${escapeHtml(placeLine(listing, viewer) || locationLine)} · Updated ${escapeHtml(timeAgo(listing.renewedAt || listing.createdAt))}</div>
           ${notice(sendError, "orange")}
           ${actionBox}
         </div>
@@ -413,7 +516,7 @@ async function renderListing(req, res, user, listing) {
     <script src="/listing.js" defer></script>
   `;
 
-  const description = `${priceLabel(listing)} · ${categoryLabel(listing.category)} in ${listing.suburb || "Australia"}. ${String(listing.description || "").slice(0, 150)}`;
+  const description = `${priceLabel(listing)} · ${categoryLabel(listing.category)} in ${[listing.suburb, countryName(cc)].filter(Boolean).join(", ")}. ${String(listing.description || "").slice(0, 150)}`;
   send(
     res,
     200,
@@ -535,7 +638,7 @@ export async function onboardingPage(req, res, query) {
           <input type="hidden" name="next" value="${escapeHtml(next)}" />
           <div class="field"><label for="su-name">Full name</label><input id="su-name" name="fullName" required maxlength="80" autocomplete="name" value="${escapeHtml(query.get("fullName") || "")}" /></div>
           <div class="field"><label for="su-email">Email</label><input id="su-email" type="email" name="email" required maxlength="200" autocomplete="email" value="${escapeHtml(query.get("email") || "")}" /></div>
-          ${mobileFieldMarkup({ idPrefix: "su-mobile", iso: query.get("mobileCountry") || "AU", number: query.get("mobileNumber") || "" })}
+          ${mobileFieldMarkup({ idPrefix: "su-mobile", iso: query.get("mobileCountry") || countryFromAcceptLanguage(req.headers["accept-language"]) || "AU", number: query.get("mobileNumber") || "" })}
           ${passwordFieldsMarkup({ idPrefix: "su" })}
           <label class="consent-row small"><input type="checkbox" name="agreeTerms" value="1" required /> <span>I agree to the <a href="/terms" target="_blank" class="link">Terms</a> and <a href="/privacy" target="_blank" class="link">Privacy Policy</a>.</span></label>
           <button class="btn btn-accent btn-block" type="submit">Create free account</button>
@@ -636,18 +739,25 @@ export async function myListingsPage(req, res, query) {
   const user = await requireUser(req, res, "/sell");
   if (!user) return;
   const listings = await db.getListingsByOwner(user.id);
-  const statusBadge = (l) =>
-    l.status === "live" ? `<span class="badge badge-green">Live</span>` : l.status === "removed" ? `<span class="badge badge-orange">Removed by moderators</span>` : `<span class="badge badge-steel">${escapeHtml(l.status)}</span>`;
+  const viewer = viewerContext(req, user);
+  const statusBadge = (l) => {
+    if (l.status === "removed") return `<span class="badge badge-orange">Removed by moderators</span>`;
+    if (l.status === "rented") return `<span class="badge badge-blue">Rented</span>`;
+    if (db.isExpired(l)) return `<span class="badge badge-orange">Expired</span>`;
+    const left = daysUntil(l.expiresAt);
+    return `<span class="badge badge-green">Live${left != null ? ` · ${left} day${left === 1 ? "" : "s"} left` : ""}</span>`;
+  };
+  const needsAttention = listings.filter((l) => db.isExpired(l) || (l.status === "live" && daysUntil(l.expiresAt) != null && daysUntil(l.expiresAt) <= 7)).length;
   const rows = listings
     .map(
       (l) => `<div class="listing-row">
         <a href="/listing/${escapeHtml(l.id)}" class="listing-row-thumb">${coverPhoto(l) ? `<img src="${escapeHtml(coverPhoto(l))}" alt="" loading="lazy" />` : ""}</a>
         <div class="listing-row-body">
           <a href="/listing/${escapeHtml(l.id)}"><strong>${escapeHtml(l.title)}</strong></a> ${statusBadge(l)}
-          <div class="small muted">${escapeHtml(priceLabel(l))} · ${escapeHtml(categoryLabel(l.category))} · ${l.viewCount || 0} views · listed ${escapeHtml(timeAgo(l.createdAt))}</div>
+          <div class="small muted">${escapeHtml(priceLabel(l, { viewerCurrency: viewer.currency }))} · ${escapeHtml(categoryLabel(l.category))} · ${escapeHtml(countryName(l.countryCode || DEFAULT_COUNTRY))} · ${l.viewCount || 0} view${l.viewCount === 1 ? "" : "s"} · updated ${escapeHtml(timeAgo(l.renewedAt || l.createdAt))}</div>
           ${l.status === "removed" && l.removedReason ? `<div class="small" style="color:var(--red)">Reason: ${escapeHtml(l.removedReason)}</div>` : ""}
         </div>
-        <div class="listing-row-actions"><a href="/sell/edit/${escapeHtml(l.id)}" class="btn btn-outline btn-sm">Edit</a></div>
+        <div class="listing-row-actions">${ownerLifecycleButtons(l)}<a href="/sell/edit/${escapeHtml(l.id)}" class="btn btn-outline btn-sm">Edit</a></div>
       </div>`
     )
     .join("");
@@ -656,7 +766,21 @@ export async function myListingsPage(req, res, query) {
       <h1>My listings</h1>
       <a href="/sell/new" class="btn btn-accent">+ New listing</a>
     </div>
-    ${notice(query.get("created") ? "Your listing is live." : query.get("deleted") ? "Listing deleted." : query.get("updated") ? "Changes saved." : "")}
+    ${notice(
+      query.get("created")
+        ? "Your listing is live for 60 days. We'll email you before it expires."
+        : query.get("deleted")
+        ? "Listing deleted."
+        : query.get("updated")
+        ? "Changes saved — and your listing is live for another 60 days."
+        : query.get("renewed")
+        ? "Renewed — your listing is live for another 60 days."
+        : query.get("rented")
+        ? "Marked as rented and hidden from browse. Thanks for letting us know how it went!"
+        : ""
+    )}
+    ${needsAttention ? notice(`${needsAttention} listing${needsAttention === 1 ? " needs" : "s need"} renewing to stay visible.`, "orange") : ""}
+    <p class="small muted">Listings stay up for 60 days. Renew them any time, or mark a space as rented when it's taken.</p>
     ${listings.length ? `<div class="listing-rows">${rows}</div>` : `<div class="panel empty-state"><p class="muted">You haven't listed anything yet.</p><a href="/sell/new" class="btn btn-accent">List your space</a></div>`}
     ${query.get("created") ? trackOnLoad("publish_listing", {}) : ""}`;
   send(res, 200, await layout({ title: "My listings", activeNav: "sell", user, body, noindex: true }));
@@ -666,8 +790,13 @@ export async function myListingsPage(req, res, query) {
 // public/listing-form.js (photos managed client-side: previews, reorder,
 // in-browser resizing); validation errors come back as JSON and are shown
 // inline, so nothing the seller typed is lost.
-function listingFormMarkup({ listing = null, action, submitLabel, needsVerification }) {
+function listingFormMarkup({ listing = null, action, submitLabel, needsVerification, country = DEFAULT_COUNTRY, units = "m" }) {
   const v = listing || {};
+  const cc = v.countryCode || country;
+  const currency = currencyFor(cc);
+  const currencies = Object.fromEntries(MARKETS.map((c) => [c.iso, c.currency]));
+  const maxSide = units === "ft" ? `${Math.round(LISTING_MAX_DIMENSION_M * 3.28084)} ft` : `${LISTING_MAX_DIMENSION_M}m`;
+  const unitWord = units === "ft" ? "feet" : "metres";
   const mapsKey = browserMapsKey();
   const existingPhotos = JSON.stringify(v.photos || []).replace(/</g, "\\u003c");
   const fieldError = (name) => `<div class="field-error" data-error-for="${name}" hidden></div>`;
@@ -695,10 +824,16 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
           <input id="lf-title" name="title" required maxlength="${LISTING_TITLE_MAX_LENGTH}" value="${escapeHtml(v.title || "")}" placeholder="e.g. Street-facing brick wall on Pittwater Rd" data-counter="${LISTING_TITLE_MAX_LENGTH}" />
           ${fieldError("title")}
         </div>
+        <div class="field">
+          <label for="lf-country">Country of the space</label>
+          <select id="lf-country" name="countryCode" data-currencies="${escapeHtml(JSON.stringify(currencies))}">${marketOptions(cc)}</select>
+          <div class="hint">The price is in this country's currency, set automatically.</div>
+          ${fieldError("countryCode")}
+        </div>
         <div class="form-row">
           <div class="field">
-            <label for="lf-price">Price (AUD)</label>
-            <div class="input-prefix"><span>$</span><input id="lf-price" name="price" inputmode="decimal" value="${v.price > 0 ? escapeHtml(String(v.price)) : v.id ? "0" : ""}" placeholder="e.g. 250" /></div>
+            <label for="lf-price">Price (<span data-currency-label>${currency}</span>)</label>
+            <div class="input-prefix"><span data-currency-label>${currency}</span><input id="lf-price" name="price" inputmode="decimal" value="${v.price > 0 ? escapeHtml(String(v.price)) : v.id ? "0" : ""}" placeholder="e.g. 250" /></div>
             <div class="hint">Enter 0 for “price on request”.</div>
             ${fieldError("price")}
           </div>
@@ -738,6 +873,7 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
           <input type="hidden" name="state" value="${escapeHtml(v.state || "")}" />
           <input type="hidden" name="postcode" value="${escapeHtml(v.postcode || "")}" />
           <input type="hidden" name="country" value="${escapeHtml(v.country || "")}" />
+          <input type="hidden" name="countryIso" value="${escapeHtml(v.countryCode || "")}" />
           ${fieldError("address")}
         </div>
         <label class="consent-row"><input type="checkbox" name="showExactLocation" value="1"${v.showExactLocation ? " checked" : ""} />
@@ -747,10 +883,11 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
       <section class="form-section">
         <h2>More details <span class="optional">(optional)</span></h2>
         <div class="form-row">
-          <div class="field"><label for="lf-w">Width (metres)</label><input id="lf-w" name="widthM" inputmode="decimal" value="${v.widthM ? escapeHtml(String(v.widthM)) : ""}" placeholder="e.g. 2.4" /></div>
-          <div class="field"><label for="lf-h">Height (metres)</label><input id="lf-h" name="heightM" inputmode="decimal" value="${v.heightM ? escapeHtml(String(v.heightM)) : ""}" placeholder="e.g. 1.2" /></div>
+          <div class="field"><label for="lf-w">Width (${unitWord})</label><input id="lf-w" name="widthM" inputmode="decimal" value="${escapeHtml(sizeForInput(v.widthM, units))}" placeholder="${units === "ft" ? "e.g. 8" : "e.g. 2.4"}" /></div>
+          <div class="field"><label for="lf-h">Height (${unitWord})</label><input id="lf-h" name="heightM" inputmode="decimal" value="${escapeHtml(sizeForInput(v.heightM, units))}" placeholder="${units === "ft" ? "e.g. 4" : "e.g. 1.2"}" /></div>
+          <input type="hidden" name="sizeUnit" value="${units}" />
         </div>
-        <div class="hint" style="margin-top:-8px;margin-bottom:12px">Up to ${LISTING_MAX_DIMENSION_M}m per side.</div>
+        <div class="hint" style="margin-top:-8px;margin-bottom:12px">Up to ${maxSide} per side. Change units in your <a href="/account#region" class="link">account settings</a>.</div>
         ${fieldError("size")}
         <div class="field">
           <label for="lf-yt">Video presentation <span class="optional">(YouTube link)</span></label>
@@ -767,7 +904,7 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
       </div>
       <p class="small muted">By publishing you confirm you control this space (or have permission to offer it) and agree to the <a href="/terms" target="_blank" class="link">Terms</a>.</p>
     </form>
-    <script>window.FRONTAGE_PLACES = ${JSON.stringify({ key: mapsKey || null, countries: placesCountries() })};</script>
+    <script>window.FRONTAGE_PLACES = ${JSON.stringify({ key: mapsKey || null })};</script>
     <script src="/listing-form.js" defer></script>`;
 }
 
@@ -779,7 +916,7 @@ export async function newListingPage(req, res) {
       <a href="${(await db.getListingsByOwner(user.id)).length ? "/sell" : "/"}" class="small muted">← Back</a>
       <h1 style="margin:8px 0 4px">List your space</h1>
       <p class="muted" style="margin-bottom:24px">Free to list. Advertisers message you and you deal directly.</p>
-      ${listingFormMarkup({ action: "/api/listings", submitLabel: "Publish listing", needsVerification: isEmailConfigured() && !user.emailVerifiedAt })}
+      ${listingFormMarkup({ action: "/api/listings", submitLabel: "Publish listing", needsVerification: isEmailConfigured() && !user.emailVerifiedAt, country: isMarket(user.country) ? user.country : DEFAULT_COUNTRY, units: user.units || "m" })}
     </div>`;
   send(res, 200, await layout({ title: "List your space", activeNav: "sell", user, body, noindex: true }));
 }
@@ -794,7 +931,9 @@ export async function editListingPage(req, res, id) {
       <a href="/sell" class="small muted">← My listings</a>
       <div class="page-head" style="margin-top:8px"><h1>Edit listing</h1><a href="/listing/${escapeHtml(listing.id)}" class="btn btn-outline btn-sm">View listing</a></div>
       ${listing.status === "removed" ? `<div class="notice notice-orange">Our moderators removed this listing${listing.removedReason ? `: ${escapeHtml(listing.removedReason)}` : ""}. Editing it won't put it back live — <a href="/contact" class="link">contact us</a> if you think this was a mistake.</div>` : ""}
-      ${listingFormMarkup({ listing, action: `/api/listings/${listing.id}/update`, submitLabel: "Save changes", needsVerification: false })}
+      ${listing.status === "removed" ? "" : ownerStatusNotice(listing)}
+      <div class="lifecycle-row">${ownerLifecycleButtons(listing)}</div>
+      ${listingFormMarkup({ listing, action: `/api/listings/${listing.id}/update`, submitLabel: "Save changes", needsVerification: false, units: user.units || "m" })}
       <div class="panel danger-zone">
         <h2>Delete this listing</h2>
         <p class="small muted">Takes it off Frontage straight away. Your existing conversations stay in your inbox.</p>
@@ -804,6 +943,159 @@ export async function editListingPage(req, res, id) {
       </div>
     </div>`;
   send(res, 200, await layout({ title: "Edit listing", activeNav: "sell", user, body, noindex: true }));
+}
+
+// ---------------- Deals: "Mark as rented" + buyer check-in ----------------
+// Frontage never sees money change hands; these pages just ask. Every
+// answer is optional apart from marking the space rented.
+function dealQuestionsMarkup({ currency, askWho = [], viaLabel }) {
+  return `
+    <fieldset class="field radio-list"><legend>${escapeHtml(viaLabel)}</legend>
+      <label><input type="radio" name="via" value="yes" /> Yes</label>
+      <label><input type="radio" name="via" value="no" /> No — somewhere else</label>
+      <label><input type="radio" name="via" value="unsure" checked /> Prefer not to say</label>
+    </fieldset>
+    ${
+      askWho.length
+        ? `<div class="field"><label for="deal-who">Who rented it? <span class="optional">(optional)</span></label>
+            <select id="deal-who" name="conversationId"><option value="">Not sure / someone else</option>${askWho
+              .map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(String(c.buyerName || "").split(" ")[0])} (messaged you)</option>`)
+              .join("")}</select></div>`
+        : ""
+    }
+    <div class="form-row">
+      <div class="field"><label for="deal-value">Deal value <span class="optional">(${escapeHtml(currency)}, optional)</span></label>
+        <div class="input-prefix"><span>${escapeHtml(currency)}</span><input id="deal-value" name="dealValue" inputmode="decimal" placeholder="e.g. 1200" /></div></div>
+      <div class="field"><label for="deal-term">Length <span class="optional">(months, optional)</span></label><input id="deal-term" name="termMonths" inputmode="numeric" placeholder="e.g. 6" /></div>
+    </div>
+    <div class="hint" style="margin-top:-6px;margin-bottom:14px">Private — never shown on the site. It helps us understand what spaces rent for.</div>
+    <label class="consent-row"><input type="checkbox" name="okToFeature" value="1" />
+      <span>Frontage can feature this as a success story (the space and suburb — <strong>never the price</strong>). We'll check with you before using any photos.</span></label>`;
+}
+
+export async function markRentedPage(req, res, id) {
+  const user = await requireUser(req, res, `/sell/rented/${id}`);
+  if (!user) return;
+  const listing = await db.getListingById(id);
+  if (!listing || listing.ownerId !== user.id || listing.status !== "live") return redirect(res, "/sell");
+  const buyers = await db.getListingConversationBuyers(listing.id);
+  const body = `
+    <div class="form-card narrow-card">
+      <a href="/sell" class="small muted">← My listings</a>
+      <h1 style="margin-top:8px">Mark as rented</h1>
+      <p class="muted">“${escapeHtml(listing.title)}” will come off browse. You can relist it in one click when the space is free again.</p>
+      <form method="POST" action="/api/listings/${escapeHtml(listing.id)}/rented" data-single-submit>
+        ${dealQuestionsMarkup({ currency: listing.currency || "AUD", askWho: buyers, viaLabel: "Did you find the advertiser on Frontage?" })}
+        <button class="btn btn-primary btn-block" type="submit">Mark as rented</button>
+      </form>
+    </div>`;
+  send(res, 200, await layout({ title: "Mark as rented", activeNav: "sell", user, body, noindex: true }));
+}
+
+// Linked from the buyer check-in email: /deal-check/<token>?answer=yes|no.
+// The token itself is the authorisation (no login needed).
+export async function dealCheckPage(req, res, token, query) {
+  const user = await currentUser(req);
+  const convo = await db.getConversationByFollowupToken(token);
+  if (!convo) return notFoundPage(req, res, "This link has expired. Thanks anyway!");
+  const answer = query.get("answer");
+  const thanks = (msg) => `<div class="form-card narrow-card" style="text-align:center"><div style="font-size:40px" aria-hidden="true">🙌</div><h1>Thanks for letting us know</h1><p class="muted">${msg}</p><a href="/" class="btn btn-primary">Browse spaces</a></div>`;
+  let body;
+  if (answer === "no") {
+    await db.upsertBuyerDeal(convo, { viaFrontage: "no", currency: null });
+    body = thanks("Plenty of new spaces are listed every week — have another look when you're ready.");
+  } else if (answer === "yes" || query.get("details") === "1") {
+    const listing = await db.getListingById(convo.listingId);
+    const currency = (listing && listing.currency) || "AUD";
+    if (answer === "yes") await db.upsertBuyerDeal(convo, { viaFrontage: "yes", currency });
+    body = query.get("saved")
+      ? thanks("Great to hear it worked out. Good luck with the campaign!")
+      : `<div class="form-card narrow-card">
+          <h1>Great — you're advertising on “${escapeHtml(convo.listingTitle)}”</h1>
+          <p class="muted">Two optional questions, then you're done.</p>
+          <form method="POST" action="/api/deal-check/${escapeHtml(token)}" data-single-submit>
+            <input type="hidden" name="via" value="yes" />
+            <div class="form-row">
+              <div class="field"><label for="deal-value">What did you pay? <span class="optional">(${escapeHtml(currency)}, optional)</span></label>
+                <div class="input-prefix"><span>${escapeHtml(currency)}</span><input id="deal-value" name="dealValue" inputmode="decimal" placeholder="e.g. 1200" /></div></div>
+              <div class="field"><label for="deal-term">For how long? <span class="optional">(months)</span></label><input id="deal-term" name="termMonths" inputmode="numeric" placeholder="e.g. 6" /></div>
+            </div>
+            <div class="hint" style="margin-top:-6px;margin-bottom:14px">Private — never shown on the site.</div>
+            <label class="consent-row"><input type="checkbox" name="okToFeature" value="1" />
+              <span>Frontage can feature this as a success story (the space and suburb — <strong>never the price</strong>). We'll check with you before using any photos.</span></label>
+            <button class="btn btn-primary btn-block" type="submit">Save</button>
+          </form>
+        </div>`;
+  } else {
+    body = `<div class="form-card narrow-card" style="text-align:center">
+        <h1>Did you end up advertising on “${escapeHtml(convo.listingTitle)}”?</h1>
+        <div style="display:flex;gap:10px;justify-content:center;margin-top:18px">
+          <a class="btn btn-accent" href="/deal-check/${escapeHtml(token)}?answer=yes">Yes</a>
+          <a class="btn btn-outline" href="/deal-check/${escapeHtml(token)}?answer=no">No</a>
+        </div></div>`;
+  }
+  send(res, 200, await layout({ title: "Did it work out?", user, body, noindex: true }));
+}
+
+export async function adminDealsPage(req, res) {
+  const user = await requirePermission(req, res, "canAccessSupport", "/admin/deals");
+  if (!user) return;
+  const deals = await db.getDeals();
+  // The seller and the buyer can both report the same deal (same
+  // conversation). Count it once for the totals, preferring the seller's
+  // answers and filling gaps from the buyer's.
+  const merged = new Map();
+  for (const d of deals) {
+    const key = d.conversationId ? `c:${d.conversationId}` : `d:${d.id}`;
+    const prev = merged.get(key);
+    if (!prev) merged.set(key, { ...d });
+    else {
+      const [main, other] = prev.reportedBy === "seller" || d.reportedBy !== "seller" ? [prev, d] : [{ ...d }, prev];
+      for (const f of ["dealValue", "currency", "termMonths"]) if (main[f] == null) main[f] = other[f];
+      if (main.viaFrontage !== "yes" && other.viaFrontage === "yes") main.viaFrontage = "yes";
+      merged.set(key, main);
+    }
+  }
+  const unique = [...merged.values()];
+  const reported = unique.length;
+  const viaYes = unique.filter((d) => d.viaFrontage === "yes");
+  const byCurrency = {};
+  for (const d of viaYes) {
+    if (!(Number(d.dealValue) > 0) || !d.currency) continue;
+    const c = (byCurrency[d.currency] = byCurrency[d.currency] || { total: 0, count: 0 });
+    c.total += Number(d.dealValue);
+    c.count += 1;
+  }
+  const featureable = viaYes.filter((d) => d.okToFeature);
+  const tiles = [
+    ["Deals reported", reported],
+    ["Found on Frontage", viaYes.length],
+    ["OK to feature", featureable.length],
+  ]
+    .map(([label, n]) => `<div class="stat-tile"><div class="stat-num">${n}</div><div class="small muted">${label}</div></div>`)
+    .join("");
+  const values = Object.entries(byCurrency)
+    .map(([cur, v]) => `<li>${escapeHtml(cur)}: ${escapeHtml(money(v.total, cur))} total across ${v.count} deal${v.count === 1 ? "" : "s"} · average ${escapeHtml(money(Math.round(v.total / v.count), cur))}</li>`)
+    .join("");
+  const rows = deals
+    .map(
+      (d) => `<div class="job-row">
+        <div class="row-between"><div><strong>${escapeHtml(d.listingTitle || d.listingId || "Deleted listing")}</strong>
+          <div class="small muted">${escapeHtml([d.listingSuburb, d.listingCountry ? countryName(d.listingCountry) : ""].filter(Boolean).join(", "))} · reported by the ${escapeHtml(d.reportedBy)}${d.reporterName ? ` (${escapeHtml(d.reporterName)})` : ""} · ${escapeHtml(timeAgo(d.createdAt))}</div></div>
+          <span class="badge ${d.viaFrontage === "yes" ? "badge-green" : d.viaFrontage === "no" ? "badge-steel" : "badge-blue"}">${d.viaFrontage === "yes" ? "Via Frontage" : d.viaFrontage === "no" ? "Elsewhere" : "Not said"}</span></div>
+        <div class="small">${Number(d.dealValue) > 0 ? `${escapeHtml(money(d.dealValue, d.currency || "AUD"))} ${escapeHtml(d.currency || "AUD")}` : "No value given"}${d.termMonths ? ` · ${d.termMonths} months` : ""}${d.okToFeature ? ` · <strong>OK to feature</strong>` : ""}</div>
+      </div>`
+    )
+    .join("");
+  const body = `${adminSubnav(user, "deals")}
+    <h1>Deals</h1>
+    <p class="muted small">Deals happen off the site, so these are what sellers (when they mark a space rented) and buyers (in the 3-week check-in email) tell us. Values are private and never shown publicly.</p>
+    <div class="stat-row">${tiles}</div>
+    ${values ? `<h2 style="margin-top:22px">Reported value (via Frontage)</h2><ul class="small">${values}</ul>` : ""}
+    <h2 style="margin-top:22px">All reports</h2>
+    <p class="muted small">When both sides report the same deal it's listed twice here but counted once above.</p>
+    ${deals.length ? `<div class="job-list">${rows}</div>` : `<div class="panel empty-state"><p class="muted">No deals reported yet.</p></div>`}`;
+  send(res, 200, await layout({ title: "Deals", activeNav: "admin-deals", user, body, noindex: true }));
 }
 
 // ---------------- Account ----------------
@@ -828,6 +1120,7 @@ export async function accountPage(req, res, query) {
       <nav class="settings-nav">
         <a href="#profile" data-section="profile" class="is-active">Personal info</a>
         <a href="#security" data-section="security">Login &amp; security</a>
+        <a href="#region" data-section="region">Region &amp; units</a>
         <a href="#notifications" data-section="notifications">Notifications</a>
       </nav>
       <div class="settings-content">
@@ -838,7 +1131,7 @@ export async function accountPage(req, res, query) {
             <div class="field"><label for="ac-name">Full name</label><input id="ac-name" name="fullName" required maxlength="80" value="${escapeHtml(user.fullName)}" /></div>
             <div class="field"><label for="ac-email">Email</label><input id="ac-email" type="email" name="email" required maxlength="200" value="${escapeHtml(user.email)}" />
               <div class="hint">Changing it means verifying the new address.</div></div>
-            ${mobileFieldMarkup({ idPrefix: "ac-mobile", ...splitMobile(user.mobile) })}
+            ${mobileFieldMarkup({ idPrefix: "ac-mobile", ...splitMobile(user.mobile, user.country) })}
             <div class="field"><label for="ac-biz">Business name <span class="optional">(optional)</span></label><input id="ac-biz" name="businessName" maxlength="100" value="${escapeHtml(user.businessName || "")}" />
               <div class="hint">Shown as the seller name on your listings instead of your first name.</div></div>
             <div class="field"><label for="ac-gbp">Google Business profile link <span class="optional">(optional)</span></label><input id="ac-gbp" type="url" name="googleBusinessUrl" maxlength="300" value="${escapeHtml(user.googleBusinessUrl || "")}" placeholder="https://g.page/your-business" /></div>
@@ -852,6 +1145,21 @@ export async function accountPage(req, res, query) {
             <div class="field"><label for="ac-cur">Current password</label><input id="ac-cur" type="password" name="currentPassword" required autocomplete="current-password" /></div>
             ${passwordFieldsMarkup({ idPrefix: "ac", name: "newPassword", label: "New password" })}
             <button class="btn btn-primary" type="submit">Update password</button>
+          </form>
+        </section>
+        <section class="settings-section" data-section="region" hidden>
+          <h2>Region &amp; units</h2>
+          <p class="section-hint">Your country is where browsing starts and where new listings default to. Prices always show in each listing's own currency.</p>
+          <form method="POST" action="/api/account/region">
+            <div class="field"><label for="ac-country">Country</label>
+              <select id="ac-country" name="country">${marketOptions(isMarket(user.country) ? user.country : DEFAULT_COUNTRY)}</select>
+              <div class="hint">Frontage is available in ${MARKETS.length} countries.</div></div>
+            <div class="field"><label for="ac-units">Size units</label>
+              <select id="ac-units" name="units">
+                <option value="m"${(user.units || "m") === "m" ? " selected" : ""}>Metres</option>
+                <option value="ft"${user.units === "ft" ? " selected" : ""}>Feet</option>
+              </select></div>
+            <button class="btn btn-primary" type="submit">Save</button>
           </form>
         </section>
         <section class="settings-section" data-section="notifications" hidden>
@@ -909,7 +1217,7 @@ export async function pricingGuidePage(req, res) {
     <h1>Pricing guide</h1>
     <p class="lead">You can set any price you like. Here's how to work out a fair one.</p>
     <p>Look at similar spaces near you on Frontage, then use the examples below as a rough starting point. Enter <strong>0</strong> if you'd rather say “price on request” and negotiate each enquiry. Use the <em>price details</em> field to say what the price covers — e.g. “per month, min 3 months” or “includes install”.</p>
-    <p class="small muted">These ranges are illustrative, in AUD, to help you gauge a price — they aren't a valuation or a guarantee of what a space will earn.</p>
+    <p class="small muted">These ranges are illustrative, in Australian dollars for spaces in Australia — rates elsewhere vary with the local market, to help you gauge a price — they aren't a valuation or a guarantee of what a space will earn.</p>
     <h2>Example situations</h2>
     <div class="scenario-grid">
       ${PRICING_SCENARIOS.map(
@@ -1040,10 +1348,18 @@ export async function adminListingsPage(req, res, query) {
   const user = await requirePermission(req, res, "canAccessSupport", "/admin/listings");
   if (!user) return;
   const listings = await db.getAllListingsAdmin();
-  const badge = (s) => ({ live: "badge-green", removed: "badge-orange" }[s] || "badge-steel");
+  const badge = (s) => ({ live: "badge-green", removed: "badge-orange", rented: "badge-blue" }[s] || "badge-steel");
+  // Currency is set from the country automatically, so a mismatch means bad
+  // data (e.g. an older listing, or a country changed outside the form).
+  const mismatched = (l) => (l.currency || "AUD") !== currencyFor(l.countryCode || DEFAULT_COUNTRY);
+  const mismatchCount = listings.filter(mismatched).length;
   const rows = listings
     .map((l) => {
       let action = "";
+      const currencyFlag = mismatched(l)
+        ? `<div class="notice notice-orange" style="margin:8px 0 0">Currency mismatch: priced in ${escapeHtml(l.currency || "AUD")} but the space is in ${escapeHtml(countryName(l.countryCode || DEFAULT_COUNTRY))} (${currencyFor(l.countryCode || DEFAULT_COUNTRY)}).
+            <form method="POST" action="/api/admin/listings/${escapeHtml(l.id)}/fix-currency" class="inline-form"><button class="btn btn-outline btn-sm" type="submit">Fix — switch to ${currencyFor(l.countryCode || DEFAULT_COUNTRY)}</button></form></div>`
+        : "";
       if (l.status === "live") {
         action = `<form method="POST" action="/api/admin/listings/${escapeHtml(l.id)}/remove" class="admin-actions">
           <input name="reason" placeholder="Reason (emailed to the seller)" required maxlength="500" />
@@ -1054,8 +1370,9 @@ export async function adminListingsPage(req, res, query) {
       }
       return `<div class="job-row">
         <div class="row-between"><div><a href="/listing/${escapeHtml(l.id)}" class="link"><strong>${escapeHtml(l.title)}</strong></a>
-          <div class="small muted">${escapeHtml(l.id)} · ${escapeHtml(l.ownerName)} (${escapeHtml(l.ownerId)})${l.ownerSuspendedAt ? " · owner suspended" : ""} · ${escapeHtml(priceLabel(l))} · ${escapeHtml(timeAgo(l.createdAt))}</div></div>
-          <span class="badge ${badge(l.status)}">${escapeHtml(l.status)}</span></div>
+          <div class="small muted">${escapeHtml(l.id)} · ${escapeHtml(l.ownerName)} (${escapeHtml(l.ownerId)})${l.ownerSuspendedAt ? " · owner suspended" : ""} · ${escapeHtml(priceLabel(l))} ${escapeHtml(l.currency || "AUD")} · ${escapeHtml(countryName(l.countryCode || DEFAULT_COUNTRY))} · ${escapeHtml(timeAgo(l.createdAt))}</div></div>
+          <span class="badge ${badge(l.status)}">${l.status === "live" && l.isExpired ? "expired" : escapeHtml(l.status)}</span></div>
+        ${currencyFlag}
         ${action}
       </div>`;
     })
@@ -1064,6 +1381,7 @@ export async function adminListingsPage(req, res, query) {
     <h1>Listings</h1>
     ${notice(query.get("done") ? "Listing updated." : "")}
     <p class="muted small">Every listing, newest first. Removing one takes it off Frontage immediately and emails the seller the reason. Seller-deleted listings can't be restored.</p>
+    ${mismatchCount ? notice(`${mismatchCount} listing${mismatchCount === 1 ? " has" : "s have"} a currency that doesn't match the country — fix below.`, "orange") : ""}
     ${listings.length ? `<div class="job-list">${rows}</div>` : `<div class="panel empty-state"><p class="muted">No listings yet.</p></div>`}`;
   send(res, 200, await layout({ title: "Listings", activeNav: "admin-listings", user, body, noindex: true }));
 }

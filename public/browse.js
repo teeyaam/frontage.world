@@ -10,6 +10,9 @@
   if (!btn || !mapEl || !resultsEl) return;
   var map = null;
   var loading = false;
+  // Where to centre an empty map for each market: [lat, lng, zoom].
+  var CENTRES = { AU: [-25.3, 133.8, 4], AT: [47.5, 14.5, 7], BE: [50.6, 4.6, 8], BR: [-14.2, -51.9, 4], CA: [56.1, -106.3, 3], DK: [56, 10, 6], FI: [64.5, 26, 5], FR: [46.6, 2.4, 5], DE: [51.2, 10.4, 6], HK: [22.35, 114.15, 10], IN: [22, 79, 4], IE: [53.4, -8, 6], IT: [42.8, 12.5, 5], JP: [36.2, 138.3, 5], MX: [23.6, -102.5, 5], NL: [52.2, 5.3, 7], NZ: [-41, 174, 5], NO: [64.5, 11, 4], PL: [52, 19, 6], PT: [39.6, -8, 6], SG: [1.35, 103.82, 11], ZA: [-29, 24, 5], KR: [36.3, 127.8, 7], ES: [40.2, -3.7, 6], SE: [62, 15, 4], CH: [46.8, 8.2, 7], TW: [23.7, 121, 7], AE: [24.3, 54.3, 7], GB: [54, -2.5, 5], US: [39.8, -98.6, 4] };
+  var centre = CENTRES[cfg.country] || [20, 0, 2];
 
   function popupContent(l) {
     // Built with DOM APIs, never innerHTML — titles are seller-supplied.
@@ -36,14 +39,14 @@
   }
 
   function fetchListings() {
-    return fetch("/api/listings/map" + window.location.search, { headers: { Accept: "application/json" } })
+    return fetch("/api/listings/map" + (cfg.mapQuery || window.location.search), { headers: { Accept: "application/json" } })
       .then(function (r) { return r.json(); })
       .then(function (d) { return (d && d.listings) || []; });
   }
 
   function initGoogle() {
     window.frontageInitBrowseMap = function () {
-      map = new google.maps.Map(mapEl, { center: { lat: -33.8688, lng: 151.2093 }, zoom: 10, mapTypeControl: false, streetViewControl: false, clickableIcons: false });
+      map = new google.maps.Map(mapEl, { center: { lat: centre[0], lng: centre[1] }, zoom: centre[2], mapTypeControl: false, streetViewControl: false, clickableIcons: false });
       var info = new google.maps.InfoWindow();
       fetchListings().then(function (listings) {
         var bounds = new google.maps.LatLngBounds();
@@ -73,7 +76,7 @@
     var s = document.createElement("script");
     s.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
     s.onload = function () {
-      map = L.map(mapEl).setView([-33.8688, 151.2093], 10);
+      map = L.map(mapEl).setView([centre[0], centre[1]], centre[2]);
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 19,

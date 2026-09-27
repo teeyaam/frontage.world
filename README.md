@@ -46,6 +46,24 @@ npm run dev             # http://localhost:3000
   description, address (Google autocomplete), optional size and YouTube
   link. Unless the seller opts in, the public only sees the suburb and an
   approximate map area (`lib/geo.js#publicCoords`).
+- **International** (`lib/countries.js`): 30 markets. A listing's currency
+  is always its country's (never chosen by hand); prices are never
+  converted. Visitors browse their own country first (account country, else
+  the browser language) with a country switcher and "All countries"; prices
+  from another currency get an unmistakable symbol (NZ$, US$…). Sizes are
+  stored in metres and shown in each member's units (Account → Region &
+  units). Address search and server geocoding are scoped to the listing's
+  country.
+- **Freshness**: listings last 60 days (`LISTING_LIFETIME_DAYS`). Sellers can
+  renew, mark as rented, or relist from My listings. `lib/jobs.js` runs
+  hourly in the web process: reminder 7 days before expiry, an expired
+  notice, and a buyer check-in 3 weeks after the first message. Each email
+  is claimed in the database first so it goes out once. `JOBS_ENABLED=0`
+  turns the job off.
+- **Deals**: deals happen off the site, so sellers answer a few optional
+  questions when they mark a space rented and buyers answer the emailed
+  check-in (`/deal-check/:token`, no login). Admins see totals at
+  `/admin/deals`; deal values are never shown publicly.
 - **Messaging** (`routes/messages.js`): one conversation per listing +
   buyer, one inbox labelled by listing title, per-conversation unread state,
   "Seen" receipts, polling (no websockets). Email alerts are throttled to one
@@ -78,7 +96,7 @@ server.js                routing, static files, security headers, redirects for 
 routes/pages.js          browse, listing page, listing form, auth pages, account, content + legal pages, admin
 routes/messages.js       inbox, conversation page, sending, reporting a conversation
 routes/api.js            auth, listings, account, contact, reports, moderation actions
-lib/                     db, auth, geo, maps, upload, email, rateLimit, listingInput, youtube, legal, pricingGuide, ...
+lib/                     db, auth, countries, format, jobs, geo, maps, upload, email, rateLimit, listingInput, youtube, legal, pricingGuide, ...
 public/                  style.css, client.js (shared), browse.js, listing.js, listing-form.js, chat.js
 scripts/                 schema + operational scripts (above)
 archive/v1-transactional the retired transactional product (not loaded)

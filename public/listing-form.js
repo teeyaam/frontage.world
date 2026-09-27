@@ -233,8 +233,24 @@
   var places = window.FRONTAGE_PLACES || {};
   var addr = form.elements.address;
   var list = document.getElementById("address-suggestions");
-  var hidden = ["placeId", "lat", "lng", "suburb", "state", "postcode", "country"];
-  function clearPlace() { hidden.forEach(function (n) { form.elements[n].value = ""; }); }
+  var hidden = ["placeId", "lat", "lng", "suburb", "state", "postcode", "country", "countryIso"];
+  function clearPlace() { hidden.forEach(function (n) { if (form.elements[n]) form.elements[n].value = ""; }); }
+
+  // ---------- Country → currency (automatic) ----------
+  var countrySel = form.elements.countryCode;
+  var currencies = {};
+  try { currencies = JSON.parse(countrySel.getAttribute("data-currencies") || "{}"); } catch (e) {}
+  function selectedCountry() { return countrySel ? countrySel.value : "AU"; }
+  if (countrySel) {
+    countrySel.addEventListener("change", function () {
+      var cur = currencies[countrySel.value] || "";
+      form.querySelectorAll("[data-currency-label]").forEach(function (el) { el.textContent = cur; });
+      // An address picked for the old country no longer applies.
+      if (addr.value) { addr.value = ""; clearPlace(); }
+      clearError("countryCode");
+      clearError("address");
+    });
+  }
 
   if (places.key && addr) {
     var lib = null;
@@ -298,6 +314,7 @@
         form.elements.state.value = comp("administrative_area_level_1", true);
         form.elements.postcode.value = comp("postal_code");
         form.elements.country.value = comp("country");
+        if (form.elements.countryIso) form.elements.countryIso.value = comp("country", true);
         clearError("address");
         token = new lib.AutocompleteSessionToken(); // a selection ends the billing session
       }).catch(function () {});
@@ -308,7 +325,7 @@
       var q = addr.value.trim();
       if (!lib || q.length < 3) { closeList(); return; }
       timer = setTimeout(function () {
-        lib.AutocompleteSuggestion.fetchAutocompleteSuggestions({ input: q, sessionToken: token, includedRegionCodes: places.countries || [] })
+        lib.AutocompleteSuggestion.fetchAutocompleteSuggestions({ input: q, sessionToken: token, includedRegionCodes: [selectedCountry().toLowerCase()] })
           .then(function (r) { suggestions = (r.suggestions || []).filter(function (x) { return x.placePrediction; }).slice(0, 5); active = -1; renderList(); })
           .catch(function () { closeList(); });
       }, 220);

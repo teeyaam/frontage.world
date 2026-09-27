@@ -144,6 +144,12 @@
       showSection((location.hash || "#profile").slice(1));
     }
 
+    // <form data-autosubmit>: submit as soon as a select changes (the
+    // browse country switcher). A <noscript> button covers no-JS visitors.
+    document.querySelectorAll("form[data-autosubmit] select").forEach(function (sel) {
+      sel.addEventListener("change", function () { sel.form.submit(); });
+    });
+
     // Dropdowns (<details class="nav-dropdown">) close on an outside click.
     document.addEventListener("click", function (e) {
       document.querySelectorAll("details.nav-dropdown[open]").forEach(function (d) {

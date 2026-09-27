@@ -18,6 +18,7 @@ import * as db from "./lib/db.js";
 import { parseCookies, cookieSecureFlag } from "./lib/auth.js";
 import { readBody } from "./lib/body.js";
 import { appBaseUrl } from "./lib/email.js";
+import { startJobs } from "./lib/jobs.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -137,7 +138,7 @@ function retiredRedirect(pathname) {
   if (pathname === "/plan" || pathname === "/account/leases" || pathname === "/seller/inquiries" || pathname === "/seller/jobs" || pathname.startsWith("/job/"))
     return "/account/messages";
   if (pathname === "/sell/insights" || pathname.startsWith("/sell/insights/")) return "/sell";
-  if (pathname.startsWith("/contractor") || pathname.startsWith("/admin/deals") || pathname === "/admin/contractor-applications" || pathname === "/sell/bdr-new" || pathname.startsWith("/claim/") || pathname.startsWith("/order/") || pathname.startsWith("/contract/"))
+  if (pathname.startsWith("/contractor") || pathname === "/admin/contractor-applications" || pathname === "/sell/bdr-new" || pathname.startsWith("/claim/") || pathname.startsWith("/order/") || pathname.startsWith("/contract/"))
     return "/";
   if (pathname === "/terms/buyer" || pathname === "/terms/seller" || pathname === "/terms/non-discrimination") return "/terms";
   if (pathname === "/investors") return "/about";
@@ -243,6 +244,9 @@ const server = http.createServer(async (req, res) => {
       if (pathname === "/admin/listings") return await pages.adminListingsPage(req, res, query);
       if (pathname === "/admin/users") return await pages.adminUsersPage(req, res, query);
       if (pathname === "/admin/staff") return await pages.adminStaffPage(req, res, query);
+      if (pathname === "/admin/deals") return await pages.adminDealsPage(req, res);
+      if ((m = pathname.match(/^\/sell\/rented\/([^/]+)$/))) return await pages.markRentedPage(req, res, m[1]);
+      if ((m = pathname.match(/^\/deal-check\/([^/]+)$/))) return await pages.dealCheckPage(req, res, m[1], query);
       if ((m = pathname.match(/^\/listing\/([^/]+)$/))) return await pages.listingDetailPage(req, res, m[1]);
       if ((m = pathname.match(/^\/listing\/([^/]+)\/report$/))) return await pages.reportListingPage(req, res, m[1], query);
       if ((m = pathname.match(/^\/sell\/edit\/([^/]+)$/))) return await pages.editListingPage(req, res, m[1]);
@@ -262,6 +266,11 @@ const server = http.createServer(async (req, res) => {
       if (pathname === "/api/account/profile") return await api.updateAccountProfile(req, res);
       if (pathname === "/api/account/password") return await api.updateAccountPassword(req, res);
       if (pathname === "/api/account/notifications") return await api.updateAccountNotifications(req, res);
+      if (pathname === "/api/account/region") return await api.updateAccountRegion(req, res);
+      if ((m = pathname.match(/^\/api\/listings\/([^/]+)\/renew$/))) return await api.renewListingHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/listings\/([^/]+)\/rented$/))) return await api.markRentedHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/deal-check\/([^/]+)$/))) return await api.dealCheckSubmit(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/admin\/listings\/([^/]+)\/fix-currency$/))) return await api.fixListingCurrencyHandler(req, res, m[1]);
       if (pathname === "/api/account/resend-verification") return await api.resendVerificationHandler(req, res);
       if (pathname === "/api/listings") return await api.createListingHandler(req, res);
       if (pathname === "/api/contact") return await api.contactSubmit(req, res);
@@ -287,4 +296,5 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Frontage running at http://localhost:${PORT}`);
+  startJobs();
 });
