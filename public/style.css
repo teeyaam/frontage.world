@@ -408,7 +408,6 @@ a { color: inherit; text-decoration: none; }
 
 /* Example listings (lib/exampleListings.js) */
 .card-diagram { position: relative; }
-.example-badge { position: absolute; top: 8px; left: 8px; background: #244A80; color: #fff; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; }
 .results-examples { font-weight: 400; margin-left: 6px; }
 .example-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
 .example-tile { border: 1px solid var(--line, #DAD6CC); border-radius: 10px; padding: 6px; font-size: 12px; }

@@ -115,7 +115,10 @@ export async function login(req, res) {
   if (!user || !verifyPassword(String(b.password || ""), user.passwordHash, user.passwordSalt)) return fail("Incorrect email or password.");
   if (user.suspendedAt) return fail("This account has been suspended. Contact us if you think this is a mistake.");
   const session = await db.createSession(user.id);
-  redirect(res, next, sessionCookieHeader(session.token));
+  // Logging in lands on the listings, worldwide — unless they were heading
+  // somewhere specific (a listing, their messages, the sell form).
+  const landing = next === "/" || next.startsWith("/?") ? "/?country=all" : next;
+  redirect(res, landing, sessionCookieHeader(session.token));
 }
 
 export async function logout(req, res) {

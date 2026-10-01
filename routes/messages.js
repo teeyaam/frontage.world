@@ -7,7 +7,7 @@ import { currentUser } from "../lib/auth.js";
 import * as db from "../lib/db.js";
 import { readBody } from "../lib/body.js";
 import { priceLabel, timeAgo } from "../lib/format.js";
-import { defaultTerms, parseTerms, agreementHtml, FEE_FREQUENCIES, INSPECTIONS, PARTY, INSURANCE } from "../lib/agreement.js";
+import { defaultTerms, parseTerms, agreementHtml, insuranceText, FEE_FREQUENCIES, INSPECTIONS, PARTY } from "../lib/agreement.js";
 import { checkMessageAllowed, MESSAGE_MAX_LENGTH } from "../lib/rateLimit.js";
 import { trySend, newMessageEmail } from "../lib/email.js";
 import { send, redirect, requireUser, notFoundPage, coverPhoto, reportFormMarkup, viewerContext } from "./pages.js";
@@ -206,10 +206,8 @@ function agreementFormPage({ conversation, listing, terms, errors = {}, isNew })
           ${select("artworkBy", PARTY, "Who supplies the artwork")}
           ${select("installBy", PARTY, "Who installs and removes it")}
         </div>
-        <div class="form-row">
-          ${select("approvalsBy", PARTY, "Who gets council / landlord approvals")}
-          ${select("insurance", INSURANCE, "Insurance")}
-        </div>
+        ${select("approvalsBy", PARTY, "Who gets council / landlord approvals")}
+        <div class="field"><label for="ag-insurance">Insurance <span class="muted">(optional)</span></label><textarea id="ag-insurance" name="insurance" rows="3" maxlength="1000" placeholder="e.g. The Advertiser holds public liability insurance covering the ad and its installation, and shows a certificate on request.">${escapeHtml(insuranceText(terms.insurance))}</textarea><div class="small muted">Leave blank if you haven't agreed anything about insurance.</div></div>
         <div class="form-row">
           ${input("removalDays", "Days to remove the ad after the end", 'inputmode="numeric"')}
           ${input("noticeDays", "Notice to end early (days)", 'inputmode="numeric"')}

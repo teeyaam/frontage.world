@@ -150,7 +150,7 @@ export function listingCard(l, viewer) {
   const photo = coverPhoto(l);
   const place = placeLine(l, viewer);
   return `<a class="card" href="/listing/${escapeHtml(l.id)}">
-      <div class="card-diagram">${photo ? `<img src="${escapeHtml(photo)}" alt="" loading="lazy" />` : `<span class="muted small">No photo</span>`}${l.exampleKey ? `<span class="example-badge">Example</span>` : ""}</div>
+      <div class="card-diagram">${photo ? `<img src="${escapeHtml(photo)}" alt="" loading="lazy" />` : `<span class="muted small">No photo</span>`}</div>
       <div class="card-body">
         <div class="card-price">${escapeHtml(priceLabel(l, { withNote: false, viewerCurrency: viewer && viewer.currency }))}${l.priceNote && l.price > 0 ? ` <span class="muted card-price-note">${escapeHtml(l.priceNote)}</span>` : ""}</div>
         <h3 class="card-title">${escapeHtml(l.title)}</h3>
@@ -336,7 +336,7 @@ export async function listingsMapJson(req, res, query) {
     .map((l) => {
       const c = publicCoords(l);
       if (!c) return null;
-      return { id: l.id, title: l.exampleKey ? `Example: ${l.title}` : l.title, price: priceLabel(l, { withNote: false, viewerCurrency: viewer.currency }), suburb: placeLine(l, viewer), category: categoryLabel(l.category), photo: coverPhoto(l), lat: c.lat, lng: c.lng, exact: c.exact };
+      return { id: l.id, title: l.title, price: priceLabel(l, { withNote: false, viewerCurrency: viewer.currency }), suburb: placeLine(l, viewer), category: categoryLabel(l.category), photo: coverPhoto(l), lat: c.lat, lng: c.lng, exact: c.exact };
     })
     .filter(Boolean);
   res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
