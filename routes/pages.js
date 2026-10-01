@@ -310,6 +310,7 @@ export async function browsePage(req, res, query) {
     200,
     await layout({
       title: cat ? `${categoryLabel(cat)} advertising space` : "Every wall is a billboard",
+      fullTitle: cat ? undefined : "Frontage — Advertising space marketplace | Every wall is a billboard",
       activeNav: "browse",
       user,
       body,
@@ -1265,6 +1266,89 @@ export async function aboutPage(req, res) {
     <p>Like any classifieds site, Frontage doesn't take part in the deal. You agree the price, the term and the details between yourselves, and payment goes straight to the owner — we don't take a cut.</p>
     <p><a href="/how-it-works" class="link">How it works →</a></p>`);
   send(res, 200, await layout({ title: "About", user, body, canonicalPath: "/about" }));
+}
+
+// ---------------- Search landing pages ----------------
+// Plain, useful pages for the two things people search for: earning from
+// space they own, and finding somewhere local to advertise.
+export async function rentOutYourWallPage(req, res) {
+  const user = await currentUser(req);
+  const body = contentPage(`
+    <h1>Rent out your wall, fence or window for advertising</h1>
+    <p class="lead">Got a wall, fence, shop window or vehicle that people walk or drive past every day? Local businesses will pay to put their ad on it. List it on Frontage for free and deal directly with advertisers.</p>
+    <p><a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent">List your space — free</a></p>
+
+    <h2>What kind of space can earn money?</h2>
+    <ul>
+      <li><strong>Side walls</strong> facing a road, a set of traffic lights or a busy corner.</li>
+      <li><strong>Front fences</strong> on busy streets, corner blocks, or near schools and shops.</li>
+      <li><strong>Shop and café windows</strong> on high streets with plenty of foot traffic.</li>
+      <li><strong>Rural fences</strong> beside highways and the roads into town.</li>
+      <li><strong>Screens</strong> in cafés, gyms, waiting rooms and shopfronts.</li>
+      <li><strong>Vehicles</strong> — vans, utes, trucks and food trucks that are out on the road every day.</li>
+    </ul>
+
+    <h2>How much can you charge?</h2>
+    <p>You set the price. What a space is worth comes down to how many people see it, how long they see it for, its size, and where it is. As a rough guide in Australia, a front fence on a quiet suburban street might go for $40–$120 a month, while a large, clear wall on a main road can earn $300–$1,200 a month. These are examples, not promises — see the <a href="/pricing-guide" class="link">pricing guide</a> for more.</p>
+
+    <h2>How it works</h2>
+    <ol>
+      <li><strong>List your space for free.</strong> Add photos, your price and a short description. People only see the suburb unless you choose to show the exact address.</li>
+      <li><strong>Answer messages from advertisers.</strong> We email you when someone gets in touch.</li>
+      <li><strong>Agree the deal directly.</strong> Use our free agreement template to put the price, dates, inspections and who installs the ad in writing. Payment goes straight to you — Frontage takes no commission.</li>
+    </ol>
+
+    <h2>Before you list</h2>
+    <ul>
+      <li>Check whether your council, landlord or strata scheme has rules about signage.</li>
+      <li>You decide who you deal with and which ads you're happy to show.</li>
+      <li>Read our <a href="/safety" class="link">safety tips</a> — never accept payment by gift card or crypto.</li>
+    </ul>
+    <p><a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent">List your space — free</a></p>`);
+  send(res, 200, await layout({
+    title: "Rent out your wall, fence or window for advertising",
+    description: "Earn money from a wall, fence, shop window or vehicle people pass every day. List it free on Frontage, set your own price and deal directly with local advertisers.",
+    user, body, canonicalPath: "/rent-out-your-wall",
+  }));
+}
+
+export async function findAdvertisingSpacePage(req, res) {
+  const user = await currentUser(req);
+  const body = contentPage(`
+    <h1>Find local advertising space for your business</h1>
+    <p class="lead">Put your business on the walls, fences and windows your customers pass every day — and deal directly with the owner, with no agency and no minimum spend.</p>
+    <p><a href="/?country=all" class="btn btn-accent">Browse advertising space</a></p>
+
+    <h2>Why advertise on local space?</h2>
+    <ul>
+      <li><strong>Seen by people near you.</strong> Pick the exact street, corner or suburb your customers live and work in.</li>
+      <li><strong>Seen every day.</strong> Unlike a post that scrolls away, a sign on someone's daily route keeps working.</li>
+      <li><strong>Affordable.</strong> Many spaces cost far less than a traditional billboard, and you agree the price with the owner.</li>
+    </ul>
+
+    <h2>Types of space</h2>
+    <p>Walls, fences, shop and café windows, billboards, digital screens, indoor spaces like gyms and cafés, and vehicles such as vans and food trucks. Browse by type, by suburb or on the map, in 30 countries.</p>
+
+    <h2>How to pick a good spot</h2>
+    <ul>
+      <li><strong>Sightlines:</strong> can people actually see it, and from how far away?</li>
+      <li><strong>Dwell time:</strong> traffic lights, bus stops and queues give people time to read.</li>
+      <li><strong>Traffic:</strong> how many people pass by car or on foot, and when.</li>
+      <li><strong>Fit:</strong> is it close to where your customers are and to where they can buy?</li>
+    </ul>
+
+    <h2>How it works</h2>
+    <ol>
+      <li><strong>Browse spaces</strong> and shortlist the ones that suit you.</li>
+      <li><strong>Message the owner</strong> to ask about availability, size, visibility and permits.</li>
+      <li><strong>Agree the details directly.</strong> See the space first, check any council or landlord rules, and put the deal in writing — owners can share our agreement template with you. Frontage never handles payments.</li>
+    </ol>
+    <p><a href="/?country=all" class="btn btn-accent">Browse advertising space</a> <a href="/how-it-works" class="btn btn-outline">How it works</a></p>`);
+  send(res, 200, await layout({
+    title: "Find local advertising space for your business",
+    description: "Find walls, fences, shop windows, screens and vehicles to advertise on near your customers. Message the owner and deal directly — no agency, no minimum spend.",
+    user, body, canonicalPath: "/find-advertising-space",
+  }));
 }
 
 export async function howItWorksPage(req, res) {
