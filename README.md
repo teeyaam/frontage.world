@@ -48,8 +48,8 @@ npm run dev             # http://localhost:3000
   approximate map area (`lib/geo.js#publicCoords`).
 - **International** (`lib/countries.js`): 30 markets. A listing's currency
   is always its country's (never chosen by hand); prices are never
-  converted. Visitors browse their own country first (account country, else
-  the browser language) with a country switcher and "All countries"; prices
+  converted. Browsing starts on all countries, with a country switcher to
+  narrow it; prices
   from another currency get an unmistakable symbol (NZ$, US$…). Sizes are
   stored in metres and shown in each member's units (Account → Region &
   units). Address search and server geocoding are scoped to the listing's

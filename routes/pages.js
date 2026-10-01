@@ -159,12 +159,11 @@ export function listingCard(l, viewer) {
     </a>`;
 }
 
-// The browse country: ?country=XX (a market) or ?country=all, else the
-// viewer's own country.
-function browseCountry(query, viewer) {
+// The browse country: ?country=XX (a market), otherwise all countries —
+// everyone starts on the worldwide listings and narrows with the switcher.
+function browseCountry(query) {
   const q = String(query.get("country") || "").toUpperCase();
-  if (q === "ALL") return "all";
-  return isMarket(q) ? q : viewer.country;
+  return isMarket(q) ? q : "all";
 }
 
 export async function browsePage(req, res, query) {

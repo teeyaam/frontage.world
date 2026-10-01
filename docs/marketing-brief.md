@@ -60,8 +60,8 @@ Portugal, Singapore, South Africa, South Korea, Spain, Sweden,
 Switzerland, Taiwan, United Arab Emirates, United Kingdom, United States.
 
 - Each listing is priced in its own country's currency and never
-  converted. Visitors see their own country first and can switch country
-  or view all.
+  converted. Visitors start on listings from all countries and can narrow
+  to one country.
 - Sizes show in metres, or feet for US members; any member can change
   this.
 - **The site is English-only.** Content for non-English markets should
