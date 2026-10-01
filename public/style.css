@@ -438,3 +438,6 @@ a { color: inherit; text-decoration: none; }
   .agreement-doc { border: 0; padding: 0; max-width: none; }
   .ag-section { break-inside: avoid; }
 }
+
+.footer-social { margin: 6px 0 10px; }
+.footer-social a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
