@@ -185,3 +185,19 @@
     });
   });
 })();
+
+// Quick-reply chips (routes/messages.js quickRepliesMarkup) and print buttons.
+document.addEventListener("click", function (e) {
+  var chip = e.target.closest && e.target.closest("[data-quick]");
+  if (chip) {
+    var wrap = chip.closest("[data-target]");
+    var ta = wrap && document.getElementById(wrap.getAttribute("data-target"));
+    if (!ta) return;
+    var text = chip.getAttribute("data-quick");
+    var current = ta.value.trim();
+    ta.value = current && current !== text ? current + "\n" + text : text;
+    ta.focus();
+    return;
+  }
+  if (e.target.closest && e.target.closest("[data-print]")) window.print();
+});

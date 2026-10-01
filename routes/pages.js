@@ -31,6 +31,8 @@ import {
 } from "../lib/countries.js";
 import { PRICING_SCENARIOS, PRICING_FACTORS, PRICE_NOTE_EXAMPLES } from "../lib/pricingGuide.js";
 import { termsHtml, privacyHtml, SAFETY_TIPS, LEGAL_UPDATED } from "../lib/legal.js";
+import { EXAMPLE_LISTINGS, imagePrompt } from "../lib/exampleListings.js";
+import { quickRepliesMarkup } from "./messages.js";
 
 export function send(res, status, html) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
@@ -81,6 +83,13 @@ export async function notFoundPage(req, res, message = "That page doesn't exist,
   );
 }
 
+// Verification emails from a new domain often land in spam at first; tell
+// people where to look and how to make the next ones arrive properly.
+function spamFolderTip() {
+  const from = (String(process.env.EMAIL_FROM || "").match(/<([^>]+)>/) || [])[1] || String(process.env.EMAIL_FROM || "").trim();
+  return `<div class="notice notice-blue spam-tip"><strong>Can't see it?</strong> Check your <strong>Spam</strong>, <strong>Junk</strong> or <strong>Promotions</strong> folder — emails from new sites often land there. If you find it, mark it <strong>Not spam</strong>${from ? ` and add <strong>${escapeHtml(from)}</strong> to your contacts` : ""} so message alerts from Frontage reach your inbox too.</div>`;
+}
+
 function notice(message, kind = "green") {
   return message ? `<div class="notice notice-${kind}" role="status">${escapeHtml(message)}</div>` : "";
 }
@@ -122,7 +131,7 @@ function adminSubnav(user, activeKey) {
       { key: "deals", href: "/admin/deals", label: "Deals" }
     );
   }
-  if (user.isAdmin) items.push({ key: "staff", href: "/admin/staff", label: "Staff access" });
+  if (user.isAdmin) items.push({ key: "examples", href: "/admin/examples", label: "Examples" }, { key: "staff", href: "/admin/staff", label: "Staff access" });
   if (items.length <= 1) return "";
   return `<div class="admin-subnav">${items.map((i) => `<a href="${i.href}"${i.key === activeKey ? ' class="active"' : ""}>${i.label}</a>`).join("")}</div>`;
 }
@@ -141,7 +150,7 @@ export function listingCard(l, viewer) {
   const photo = coverPhoto(l);
   const place = placeLine(l, viewer);
   return `<a class="card" href="/listing/${escapeHtml(l.id)}">
-      <div class="card-diagram">${photo ? `<img src="${escapeHtml(photo)}" alt="" loading="lazy" />` : `<span class="muted small">No photo</span>`}</div>
+      <div class="card-diagram">${photo ? `<img src="${escapeHtml(photo)}" alt="" loading="lazy" />` : `<span class="muted small">No photo</span>`}${l.exampleKey ? `<span class="example-badge">Example</span>` : ""}</div>
       <div class="card-body">
         <div class="card-price">${escapeHtml(priceLabel(l, { withNote: false, viewerCurrency: viewer && viewer.currency }))}${l.priceNote && l.price > 0 ? ` <span class="muted card-price-note">${escapeHtml(l.priceNote)}</span>` : ""}</div>
         <h3 class="card-title">${escapeHtml(l.title)}</h3>
@@ -172,7 +181,10 @@ export async function browsePage(req, res, query) {
   const sortKey = SORT_OPTIONS[query.get("sort")] ? query.get("sort") : "newest";
   const mapView = query.get("view") === "map";
 
-  let listings = filterListings(allListings, query, { country }).slice().sort(SORT_OPTIONS[sortKey].cmp);
+  const byExampleLast = (a, b) => Number(Boolean(a.exampleKey)) - Number(Boolean(b.exampleKey)) || SORT_OPTIONS[sortKey].cmp(a, b);
+  let listings = filterListings(allListings, query, { country }).slice().sort(byExampleLast);
+  const exampleCount = listings.filter((l) => l.exampleKey).length;
+  const realCount = listings.length - exampleCount;
 
   // Zero results for a place search: suggest the nearest suburbs that do
   // have matching listings, instead of a dead end.
@@ -286,7 +298,7 @@ export async function browsePage(req, res, query) {
     </div>
     <div id="category-chips" class="chip-row">${categoryChips}</div>
     <div id="browse-map" class="browse-map"${mapView ? "" : " hidden"}></div>
-    <h2 class="results-heading">${listings.length} space${listings.length === 1 ? "" : "s"} ${country === "all" ? "worldwide" : `in ${escapeHtml(countryName(country))}`}${cat ? ` · ${escapeHtml(categoryLabel(cat))}` : ""}</h2>
+    <h2 class="results-heading">${realCount} space${realCount === 1 ? "" : "s"} ${country === "all" ? "worldwide" : `in ${escapeHtml(countryName(country))}`}${cat ? ` · ${escapeHtml(categoryLabel(cat))}` : ""}${exampleCount ? ` <span class="muted small results-examples">+ ${exampleCount} example${exampleCount === 1 ? "" : "s"} showing what a listing looks like</span>` : ""}</h2>
     <div id="browse-results"${mapView ? " hidden" : ""}>${listings.length === 0 ? noResultsHtml : `<div class="grid">${listings.map((l) => listingCard(l, viewer)).join("")}</div>`}</div>
     <script>
       window.FRONTAGE_MAP = ${JSON.stringify({ target: "browse-map", engine: googleKey ? "google" : "leaflet", key: googleKey || null, startInMap: mapView, country, mapQuery: mapQueryString(query, country) })};
@@ -324,7 +336,7 @@ export async function listingsMapJson(req, res, query) {
     .map((l) => {
       const c = publicCoords(l);
       if (!c) return null;
-      return { id: l.id, title: l.title, price: priceLabel(l, { withNote: false, viewerCurrency: viewer.currency }), suburb: placeLine(l, viewer), category: categoryLabel(l.category), photo: coverPhoto(l), lat: c.lat, lng: c.lng, exact: c.exact };
+      return { id: l.id, title: l.exampleKey ? `Example: ${l.title}` : l.title, price: priceLabel(l, { withNote: false, viewerCurrency: viewer.currency }), suburb: placeLine(l, viewer), category: categoryLabel(l.category), photo: coverPhoto(l), lat: c.lat, lng: c.lng, exact: c.exact };
     })
     .filter(Boolean);
   res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -437,8 +449,13 @@ async function renderListing(req, res, user, listing) {
        <script src="/listing-map.js" defer></script>`
     : "";
 
+  const isExample = Boolean(listing.exampleKey);
   let actionBox;
-  if (isOwner) {
+  if (isExample) {
+    actionBox = `<div class="notice notice-blue"><strong>This is an example listing.</strong> Frontage made it to show what a finished listing looks like — it isn't a real space and can't be messaged.</div>
+      <a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent btn-block btn-lg">List your own space — free</a>
+      <a href="/" class="btn btn-outline btn-block" style="margin-top:10px">Browse real spaces</a>`;
+  } else if (isOwner) {
     actionBox = `${ownerStatusNotice(listing)}
       ${ownerLifecycleButtons(listing, { block: true })}
       <a href="/sell/edit/${escapeHtml(listing.id)}" class="btn btn-primary btn-block" style="margin-top:10px">Edit listing</a>`;
@@ -453,6 +470,7 @@ async function renderListing(req, res, user, listing) {
   } else {
     actionBox = `${existingConversation && existingConversation.lastMessageAt ? `<a href="/messages/${escapeHtml(existingConversation.id)}" class="btn btn-outline btn-block" style="margin-bottom:12px">View your conversation →</a>` : ""}
       <form method="POST" action="/api/listings/${escapeHtml(listing.id)}/messages" class="composer" id="message-seller" data-single-submit>
+        ${existingConversation && existingConversation.lastMessageAt ? "" : quickRepliesMarkup("buyer", "first-message")}
         <label for="first-message" class="composer-label">${existingConversation && existingConversation.lastMessageAt ? "Send another message" : "Send the seller a message"}</label>
         <textarea id="first-message" name="body" rows="3" maxlength="2000" required>${existingConversation && existingConversation.lastMessageAt ? "" : "Hi, is this space still available?"}</textarea>
         <button class="btn btn-accent btn-block" type="submit">Send</button>
@@ -461,6 +479,7 @@ async function renderListing(req, res, user, listing) {
 
   const body = `
     <a href="/" class="small muted back-link">← Back to browse</a>
+    ${isExample ? `<div class="notice notice-blue example-banner"><strong>Example listing</strong> — made by Frontage to show what a listing can look like. Not a real space.</div>` : ""}
     <div class="detail-layout">
       <div class="detail-main">
         ${gallery}
@@ -493,7 +512,7 @@ async function renderListing(req, res, user, listing) {
           ${actionBox}
         </div>
         ${
-          owner
+          owner && !isExample
             ? `<div class="side-card seller-card">
                  <div class="avatar" aria-hidden="true">${escapeHtml((owner.businessName || owner.fullName || "?").charAt(0).toUpperCase())}</div>
                  <div style="min-width:0">
@@ -508,10 +527,10 @@ async function renderListing(req, res, user, listing) {
           <strong class="small">Stay safe</strong>
           <p class="small muted">Frontage never handles payments. See the space before you pay, and never pay by gift card or crypto. <a href="/safety" class="link">Safety tips</a></p>
         </div>
-        ${!isOwner ? `<div class="small" style="text-align:center"><a href="/listing/${escapeHtml(listing.id)}/report" class="muted link-quiet">Report this listing</a></div>` : ""}
+        ${!isOwner && !isExample ? `<div class="small" style="text-align:center"><a href="/listing/${escapeHtml(listing.id)}/report" class="muted link-quiet">Report this listing</a></div>` : ""}
       </aside>
     </div>
-    ${isLive && !isOwner ? `<div class="mobile-cta"><a href="#message-seller" class="btn btn-accent btn-block">Message seller</a></div>` : ""}
+    ${isLive && !isOwner && !isExample ? `<div class="mobile-cta"><a href="#message-seller" class="btn btn-accent btn-block">Message seller</a></div>` : ""}
     ${trackOnLoad("view_listing", { listing_id: listing.id, category: listing.category })}
     <script src="/listing.js" defer></script>
   `;
@@ -528,7 +547,7 @@ async function renderListing(req, res, user, listing) {
       description,
       ogImage: coverPhoto(listing) || undefined,
       canonicalPath: `/listing/${listing.id}`,
-      noindex: !isLive,
+      noindex: !isLive || isExample,
     })
   );
 }
@@ -671,7 +690,7 @@ export async function welcomePage(req, res, query) {
       <div style="font-size:44px;line-height:1;margin-bottom:12px" aria-hidden="true">📬</div>
       <h1>Thanks for signing up, ${escapeHtml(String(user.fullName || "").split(" ")[0] || "there")}!</h1>
       <p class="muted">We've sent a link to <strong>${escapeHtml(user.email)}</strong>. Open it to verify your email — you'll need to before you can message sellers or list a space.</p>
-      <p class="small muted">Can't find it? Check your spam or promotions folder.</p>
+      ${spamFolderTip()}
       <a href="${escapeHtml(next)}" class="btn btn-primary btn-block">Continue</a>
       <form method="POST" action="/api/account/resend-verification" style="margin-top:10px"><button class="btn btn-outline btn-block" type="submit">Resend the email</button></form>
     </div>
@@ -802,7 +821,7 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
   const fieldError = (name) => `<div class="field-error" data-error-for="${name}" hidden></div>`;
   const ytValue = v.youtubeId ? youTubeWatchUrl(v.youtubeId) : "";
   return `
-    ${needsVerification ? `<div class="notice notice-orange">Verify your email before publishing — check your inbox, or <a href="/account" class="link">resend the link</a>.</div>` : ""}
+    ${needsVerification ? `<div class="notice notice-orange">Verify your email before publishing — check your inbox, or <a href="/account" class="link">resend the link</a>.</div>${spamFolderTip()}` : ""}
     <form id="listing-form" class="listing-form" method="POST" action="${escapeHtml(action)}" enctype="multipart/form-data" novalidate
       data-existing-photos='${escapeHtml(existingPhotos)}' data-max-photos="${LISTING_MAX_PHOTOS}">
       <div class="form-error" id="form-error" role="alert" hidden></div>
@@ -1037,6 +1056,63 @@ export async function dealCheckPage(req, res, token, query) {
   send(res, 200, await layout({ title: "Did it work out?", user, body, noindex: true }));
 }
 
+// ---------------- Admin: example listings ----------------
+export async function adminExamplesPage(req, res, query) {
+  const user = await requireSuperAdmin(req, res, "/admin/examples");
+  if (!user) return;
+  const examples = await db.getExampleListings();
+  const byKey = new Map(examples.map((l) => [l.exampleKey, l]));
+  const live = examples.filter((l) => l.status === "live").length;
+  const missing = EXAMPLE_LISTINGS.length - EXAMPLE_LISTINGS.filter((e) => byKey.has(e.key)).length;
+  const tiles = EXAMPLE_LISTINGS.map((e) => {
+    const l = byKey.get(e.key);
+    const photo = l && coverPhoto(l);
+    return `<div class="example-tile" data-key="${escapeHtml(e.key)}">
+        ${photo ? `<img src="${escapeHtml(photo)}" alt="" loading="lazy" />` : `<div class="ph muted">No photo</div>`}
+        <div style="margin-top:4px"><strong class="mono">${escapeHtml(e.key)}</strong> · ${l ? (l.status === "live" ? `<a class="link" href="/listing/${escapeHtml(l.id)}">live</a>` : "waiting for photo") : "not created"}</div>
+        <div class="muted">${escapeHtml(e.title)}</div>
+      </div>`;
+  }).join("");
+  const body = `${adminSubnav(user, "examples")}
+    <h1>Example listings</h1>
+    <p class="muted small">${EXAMPLE_LISTINGS.length} labelled examples, 3 per country, to show visitors what a finished listing looks like. Each one is badged "Example", can't be messaged, stays out of Google and sorts after real listings. An example goes live once it has a photo.</p>
+    ${query.get("created") ? notice(`Created ${escapeHtml(query.get("created"))} example listings.`) : ""}
+    ${query.get("deleted") ? notice(`Deleted ${escapeHtml(query.get("deleted"))} example listings.`) : ""}
+    ${notice(query.get("err"), "orange")}
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-num">${examples.length}</div><div class="small muted">Created</div></div>
+      <div class="stat-tile"><div class="stat-num">${live}</div><div class="small muted">Live (have a photo)</div></div>
+      <div class="stat-tile"><div class="stat-num">${examples.length - live}</div><div class="small muted">Waiting for a photo</div></div>
+    </div>
+    ${missing ? `<form method="POST" action="/api/admin/examples/create" style="margin:16px 0"><button class="btn btn-primary" type="submit">${examples.length ? `Create the ${missing} missing examples` : `Create the ${EXAMPLE_LISTINGS.length} example listings`}</button> <span class="small muted">They stay hidden until each has a photo.</span></form>` : ""}
+    <section class="panel" style="margin:16px 0">
+      <h2>Upload photos</h2>
+      <p class="small muted">Name each image after its code, e.g. <span class="mono">EX-AU-1.jpg</span>, then pick them all at once. Each photo replaces that example's photo and puts it live. <a class="link" href="/admin/examples/prompts.txt">Image prompts</a></p>
+      <input type="file" id="example-photos" accept="image/*" multiple />
+      <button type="button" class="btn btn-accent" id="example-upload-btn" style="margin-top:8px">Upload</button>
+      <div id="example-upload-log" class="upload-log" aria-live="polite"></div>
+    </section>
+    <div class="example-grid">${tiles}</div>
+    ${examples.length ? `<section class="panel" style="margin-top:24px">
+      <h2>Remove all examples</h2>
+      <p class="small muted">When enough real listings have arrived. This deletes every example listing; it can't be undone (you can create them again).</p>
+      <form method="POST" action="/api/admin/examples/delete" class="inline-form">
+        <label class="small">Type DELETE to confirm <input name="confirm" autocomplete="off" style="width:110px" /></label>
+        <button class="btn btn-outline btn-sm" type="submit">Delete all examples</button>
+      </form></section>` : ""}
+    <script src="/admin-examples.js" defer></script>`;
+  send(res, 200, await layout({ title: "Example listings", activeNav: "admin-examples", user, body, noindex: true }));
+}
+
+// Plain-text prompt list for the image generator (handy on a phone).
+export async function adminExamplePromptsText(req, res) {
+  const user = await requireSuperAdmin(req, res, "/admin/examples/prompts.txt");
+  if (!user) return;
+  const text = EXAMPLE_LISTINGS.map((e) => `${e.key}.jpg — ${e.title}\n${imagePrompt(e, countryName(e.cc))}`).join("\n\n");
+  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(text + "\n");
+}
+
 export async function adminDealsPage(req, res) {
   const user = await requirePermission(req, res, "canAccessSupport", "/admin/deals");
   if (!user) return;
@@ -1105,12 +1181,13 @@ export async function accountPage(req, res, query) {
   const updated = query.get("updated");
   const notices = `
     ${updated ? notice(`${updated} updated.`) : ""}
+    ${query.get("verifySent") ? notice("Verification email sent — it can take a minute or two to arrive.") : ""}
     ${notice(query.get("err"), "orange")}
     ${query.get("verified") ? notice("Email verified — you're all set.") : ""}
     ${
       isEmailConfigured() && !user.emailVerifiedAt
         ? `<div class="notice notice-orange">Your email isn't verified yet, so messaging and listing are locked. Check your inbox for the link.
-            <form method="POST" action="/api/account/resend-verification" style="display:inline;margin-left:6px"><button class="btn-link link">Resend email</button></form></div>`
+            <form method="POST" action="/api/account/resend-verification" style="display:inline;margin-left:6px"><button class="btn-link link">Resend email</button></form></div>${spamFolderTip()}`
         : ""
     }`;
   const body = `

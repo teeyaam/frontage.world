@@ -16,6 +16,7 @@ CREATE SEQUENCE IF NOT EXISTS messages_seq;
 CREATE SEQUENCE IF NOT EXISTS reports_seq;
 CREATE SEQUENCE IF NOT EXISTS contact_messages_seq;
 CREATE SEQUENCE IF NOT EXISTS deals_seq;
+CREATE SEQUENCE IF NOT EXISTS agreements_seq;
 
 -- ---------- users (one account both buys and sells) ----------
 CREATE TABLE IF NOT EXISTS users (
@@ -84,7 +85,8 @@ CREATE TABLE IF NOT EXISTS listings (
   width_m NUMERIC, -- optional
   height_m NUMERIC, -- optional
 
-  status TEXT NOT NULL DEFAULT 'live', -- live | rented (seller marked it taken) | removed (by moderation) | deleted (by the seller)
+  status TEXT NOT NULL DEFAULT 'live', -- live | rented (seller marked it taken) | removed (by moderation) | deleted (by the seller) | draft (example waiting for a photo)
+  example_key TEXT, -- set only on Frontage's labelled example listings (lib/exampleListings.js), e.g. EX-AU-1
   expires_at TIMESTAMPTZ, -- a live listing drops out of browse after this until renewed (60 days)
   renewed_at TIMESTAMPTZ, -- last time the seller confirmed it's still available
   rented_at TIMESTAMPTZ,
@@ -182,6 +184,21 @@ CREATE TABLE IF NOT EXISTS deals (
 );
 CREATE INDEX IF NOT EXISTS idx_deals_listing ON deals(listing_id);
 
+-- ---------- agreements (lib/agreement.js) ----------
+-- A seller-prepared advertising agreement, filled from the listing and
+-- shared with one buyer in their conversation. A template both sides print
+-- and sign themselves; Frontage is not a party to it. One per conversation;
+-- the seller can edit it, and both see the latest version.
+CREATE TABLE IF NOT EXISTS agreements (
+  id TEXT PRIMARY KEY,
+  seq INTEGER NOT NULL,
+  conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+  listing_id TEXT REFERENCES listings(id) ON DELETE SET NULL,
+  terms JSONB NOT NULL DEFAULT '{}', -- the filled-in fields (lib/agreement.js AGREEMENT_FIELDS)
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ---------- upgrades for databases created before these columns existed ----------
 -- Idempotent: safe to run on every deploy.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT 'AU';
@@ -196,6 +213,8 @@ ALTER TABLE listings ADD COLUMN IF NOT EXISTS expired_notice_sent_at TIMESTAMPTZ
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS buyer_followup_token TEXT;
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS buyer_followup_sent_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_listings_expires ON listings(expires_at);
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS example_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_example_key ON listings(example_key) WHERE example_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_conversations_followup ON conversations(buyer_followup_token);
 -- Live listings from before expiry existed get 60 days from when they were listed.
 UPDATE listings SET expires_at = created_at + interval '60 days' WHERE expires_at IS NULL AND status = 'live';

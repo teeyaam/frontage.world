@@ -7,6 +7,7 @@ import { currentUser } from "../lib/auth.js";
 import * as db from "../lib/db.js";
 import { readBody } from "../lib/body.js";
 import { priceLabel, timeAgo } from "../lib/format.js";
+import { defaultTerms, parseTerms, agreementHtml, FEE_FREQUENCIES, INSPECTIONS, PARTY, INSURANCE } from "../lib/agreement.js";
 import { checkMessageAllowed, MESSAGE_MAX_LENGTH } from "../lib/rateLimit.js";
 import { trySend, newMessageEmail } from "../lib/email.js";
 import { send, redirect, requireUser, notFoundPage, coverPhoto, reportFormMarkup, viewerContext } from "./pages.js";
@@ -80,6 +81,13 @@ export async function conversationPage(req, res, id) {
   const initial = serializeMessages(messages, conversation, user.id);
   const otherSuspended = (await db.getUserById(role === "buyer" ? conversation.sellerId : conversation.buyerId))?.suspendedAt;
   const sendError = new URL(req.url, "http://localhost").searchParams.get("err");
+  const agreement = await db.getAgreementByConversation(conversation.id);
+  const agreementBox = agreement
+    ? `<div class="agreement-box"><span>📄 <strong>Advertising agreement</strong> <span class="small muted">· updated ${escapeHtml(timeAgo(agreement.updatedAt))}</span></span>
+        <span><a class="link" href="/messages/${escapeHtml(conversation.id)}/agreement/view">View &amp; print</a>${role === "seller" ? ` · <a class="link" href="/messages/${escapeHtml(conversation.id)}/agreement">Edit</a>` : ""}</span></div>`
+    : role === "seller" && listingLive
+    ? `<div class="agreement-box"><span class="small">Ready to make it official?</span> <a class="link" href="/messages/${escapeHtml(conversation.id)}/agreement">Prepare an agreement from your listing →</a></div>`
+    : "";
 
   const body = `
     <a href="/account/messages" class="small muted back-link">← All messages</a>
@@ -93,6 +101,7 @@ export async function conversationPage(req, res, id) {
         </a>
         <div class="small muted">Chatting with <strong>${escapeHtml(firstName(otherName))}</strong>${role === "seller" ? " about your listing" : " (the seller)"}</div>
       </div>
+      ${agreementBox}
       <details class="safety-strip">
         <summary>Frontage never handles payments — deal directly and safely. <span class="link">Tips</span></summary>
         <ul class="small">
@@ -108,7 +117,8 @@ export async function conversationPage(req, res, id) {
       <div class="chat-seen small muted" id="chat-seen" hidden>Seen</div>
       ${
         listingLive && !otherSuspended
-          ? `<form method="POST" action="/api/conversations/${escapeHtml(conversation.id)}/messages" class="chat-composer" id="chat-form">
+          ? `${quickRepliesMarkup(role, "chat-body", conversation.id)}
+            <form method="POST" action="/api/conversations/${escapeHtml(conversation.id)}/messages" class="chat-composer" id="chat-form">
               <label for="chat-body" class="visually-hidden">Message</label>
               <textarea id="chat-body" name="body" rows="2" maxlength="${MESSAGE_MAX_LENGTH}" required placeholder="Write a message…"></textarea>
               <button class="btn btn-accent" type="submit">Send</button>
@@ -121,6 +131,142 @@ export async function conversationPage(req, res, id) {
     <script>window.FRONTAGE_CHAT = ${JSON.stringify(initial).replace(/</g, "\\u003c")};</script>
     <script src="/chat.js" defer></script>`;
   send(res, 200, await layout({ title: `Messages — ${conversation.listingTitle}`, activeNav: "messages", user, body, noindex: true }));
+}
+
+// Tap-to-insert message starters (public/client.js fills the textarea; the
+// member can edit before sending).
+export const QUICK_REPLIES = {
+  buyer: [
+    "Hi, is this space still available?",
+    "What's the minimum term?",
+    "Could I see the space in person before we agree?",
+    "Is the price negotiable?",
+    "Can you arrange printing and installation, or do I supply that?",
+  ],
+  seller: [
+    "Yes, it's still available.",
+    "When would you like to start, and for how long?",
+    "Could you send me your artwork or brand details?",
+    "Happy to arrange a site visit — what time suits you?",
+    "Do you need any council or landlord approvals for your ad?",
+  ],
+};
+export function quickRepliesMarkup(role, textareaId, conversationId) {
+  const chips = (QUICK_REPLIES[role] || [])
+    .map((t) => `<button type="button" class="chip-pill quick-reply" data-quick="${escapeHtml(t)}">${escapeHtml(t)}</button>`)
+    .join("");
+  const agreementChip = role === "seller" && conversationId ? `<a class="chip-pill quick-reply quick-agreement" href="/messages/${escapeHtml(conversationId)}/agreement">📄 Send an agreement</a>` : "";
+  return `<div class="quick-replies" data-target="${escapeHtml(textareaId)}" aria-label="Quick messages">${agreementChip}${chips}</div>`;
+}
+
+// ---------------- Agreement ----------------
+async function loadAgreementContext(req, id) {
+  const ctx = await loadOwnConversation(req, id);
+  if (!ctx.user || !ctx.conversation) return ctx;
+  const listing = await db.getListingById(ctx.conversation.listingId);
+  const agreement = await db.getAgreementByConversation(ctx.conversation.id);
+  return { ...ctx, listing, agreement };
+}
+
+function agreementFormPage({ conversation, listing, terms, errors = {}, isNew }) {
+  const v = (k) => escapeHtml(terms[k] == null ? "" : terms[k]);
+  const err = (k) => (errors[k] ? `<div class="field-error">${escapeHtml(errors[k])}</div>` : "");
+  const select = (name, options, label) => `<div class="field"><label for="ag-${name}">${label}</label><select id="ag-${name}" name="${name}">${Object.entries(options)
+    .map(([k, l]) => `<option value="${k}"${terms[name] === k ? " selected" : ""}>${escapeHtml(l)}</option>`)
+    .join("")}</select></div>`;
+  const input = (name, label, attrs = "", hint = "") => `<div class="field"><label for="ag-${name}">${label}</label><input id="ag-${name}" name="${name}" value="${v(name)}" ${attrs} />${hint ? `<div class="small muted">${hint}</div>` : ""}${err(name)}</div>`;
+  return `
+    <a href="/messages/${escapeHtml(conversation.id)}" class="small muted back-link">← Back to the conversation</a>
+    <div class="form-card">
+      <h1>${isNew ? "Prepare an agreement" : "Edit the agreement"}</h1>
+      <p class="muted small">We've filled this in from your listing. Check every detail, then share it — ${escapeHtml(String(conversation.buyerName || "the advertiser").split(" ")[0])} gets a message with a link, and you can both print it or save it as a PDF to sign. It's a template, not legal advice, and Frontage isn't a party to it.</p>
+      <form method="POST" action="/api/conversations/${escapeHtml(conversation.id)}/agreement" data-single-submit>
+        <h2 class="form-section">Who and what</h2>
+        ${input("ownerName", "Owner (you, or your business)", 'maxlength="120" required')}
+        ${input("advertiserName", "Advertiser", 'maxlength="120" required')}
+        ${input("spaceDescription", "The space", 'maxlength="200"')}
+        ${input("spaceAddress", "Where it is", 'maxlength="300" required', "The full address is only shown to this advertiser.")}
+        ${input("spaceSize", "Size", 'maxlength="60"')}
+        <h2 class="form-section">Money and dates</h2>
+        <div class="form-row">
+          ${input("fee", `Fee (${escapeHtml(listing.currency || "AUD")})`, 'inputmode="decimal" required')}
+          ${select("feeFrequency", FEE_FREQUENCIES, "Charged")}
+        </div>
+        ${input("paymentTerms", "How and when it's paid", 'maxlength="300"')}
+        <div class="form-row">
+          ${input("startDate", "Start date", 'type="date" required')}
+          ${input("endDate", "End date", 'type="date" required')}
+        </div>
+        <h2 class="form-section">Looking after the space</h2>
+        <div class="form-row">
+          ${select("inspection", INSPECTIONS, "Site inspections")}
+          ${input("inspectionNoticeDays", "Notice before an inspection (days)", 'inputmode="numeric"')}
+        </div>
+        <div class="form-row">
+          ${select("artworkBy", PARTY, "Who supplies the artwork")}
+          ${select("installBy", PARTY, "Who installs and removes it")}
+        </div>
+        <div class="form-row">
+          ${select("approvalsBy", PARTY, "Who gets council / landlord approvals")}
+          ${select("insurance", INSURANCE, "Insurance")}
+        </div>
+        <div class="form-row">
+          ${input("removalDays", "Days to remove the ad after the end", 'inputmode="numeric"')}
+          ${input("noticeDays", "Notice to end early (days)", 'inputmode="numeric"')}
+        </div>
+        <div class="field"><label for="ag-specialConditions">Special conditions <span class="muted">(optional)</span></label><textarea id="ag-specialConditions" name="specialConditions" rows="4" maxlength="2000" placeholder="e.g. Ad must be family-friendly. Lights on the wall stay on until 10pm.">${v("specialConditions")}</textarea></div>
+        <button class="btn btn-accent btn-block" type="submit">${isNew ? "Save and share with the advertiser" : "Save changes"}</button>
+      </form>
+    </div>`;
+}
+
+// GET /messages/:id/agreement — the seller's form.
+export async function agreementFormHandler(req, res, id) {
+  const { user, conversation, role, listing, agreement } = await loadAgreementContext(req, id);
+  if (!user) return redirect(res, `/onboarding?next=${encodeURIComponent(`/messages/${id}/agreement`)}`);
+  if (!conversation || !listing) return notFoundPage(req, res, "This conversation doesn't exist.");
+  if (role !== "seller") return redirect(res, agreement ? `/messages/${conversation.id}/agreement/view` : `/messages/${conversation.id}`);
+  const buyer = await db.getUserById(conversation.buyerId);
+  const terms = agreement ? agreement.terms : defaultTerms({ listing, seller: user, buyer: buyer || {} });
+  send(res, 200, await layout({ title: "Agreement", activeNav: "messages", user, body: agreementFormPage({ conversation, listing, terms, isNew: !agreement }), noindex: true }));
+}
+
+// POST /api/conversations/:id/agreement — save, and tell the buyer.
+export async function agreementSaveHandler(req, res, id) {
+  const { user, conversation, role, listing } = await loadAgreementContext(req, id);
+  if (!user) return redirect(res, "/onboarding");
+  if (!conversation || !listing || role !== "seller") return notFoundPage(req, res, "This conversation doesn't exist.");
+  const b = await readBody(req, { limit: 32 * 1024 });
+  const { terms, errors } = parseTerms(b);
+  if (Object.keys(errors).length) {
+    return send(res, 422, await layout({ title: "Agreement", activeNav: "messages", user, body: agreementFormPage({ conversation, listing, terms, errors, isNew: !(await db.getAgreementByConversation(conversation.id)) }), noindex: true }));
+  }
+  const { created } = await db.saveAgreement(conversation, terms);
+  const text = created
+    ? "I've prepared a draft advertising agreement for this space. Open it from the agreement box in our conversation — let me know if anything needs changing."
+    : "I've updated the agreement — open it from the agreement box in our conversation to see the latest version.";
+  await db.createMessage(conversation, user.id, text);
+  await maybeNotify(conversation, user, text);
+  redirect(res, `/messages/${conversation.id}/agreement/view?saved=1`);
+}
+
+// GET /messages/:id/agreement/view — printable, for both parties.
+export async function agreementViewHandler(req, res, id) {
+  const { user, conversation, role, listing, agreement } = await loadAgreementContext(req, id);
+  if (!user) return redirect(res, `/onboarding?next=${encodeURIComponent(`/messages/${id}/agreement/view`)}`);
+  if (!conversation || !agreement) return notFoundPage(req, res, "There's no agreement for this conversation yet.");
+  const saved = new URL(req.url, "http://localhost").searchParams.get("saved");
+  const body = `
+    <div class="no-print">
+      <a href="/messages/${escapeHtml(conversation.id)}" class="small muted back-link">← Back to the conversation</a>
+      ${saved ? `<div class="notice notice-green">Saved and shared — ${escapeHtml(String(conversation.buyerName || "the advertiser").split(" ")[0])} has been sent a message about it.</div>` : ""}
+      <div class="agreement-actions">
+        <button type="button" class="btn btn-accent" data-print>Print or save as PDF</button>
+        ${role === "seller" ? `<a class="btn btn-outline" href="/messages/${escapeHtml(conversation.id)}/agreement">Edit</a>` : ""}
+      </div>
+    </div>
+    ${agreementHtml(agreement.terms, { currency: (listing && listing.currency) || "AUD", countryCode: (listing && listing.countryCode) || "AU", updatedAt: agreement.updatedAt })}`;
+  send(res, 200, await layout({ title: "Advertising agreement", activeNav: "messages", user, body, noindex: true }));
 }
 
 function serializeMessages(messages, conversation, meId) {
@@ -187,7 +333,7 @@ export async function messageSellerHandler(req, res, listingId) {
   const b = await readBody(req, { limit: 16 * 1024 });
   const listing = await db.getPublicListing(listingId);
   if (!listing) return notFoundPage(req, res, "This listing is no longer available.");
-  if (listing.ownerId === user.id) return redirect(res, `/listing/${listingId}`);
+  if (listing.ownerId === user.id || listing.exampleKey) return redirect(res, `/listing/${listingId}`);
   const { conversation } = await db.getOrCreateConversation(listing, user.id);
   const startsConversation = !conversation.lastMessageAt;
   await deliver(req, res, { user, listing, conversation, body: b.body, startsConversation, backPath: `/listing/${listingId}` });

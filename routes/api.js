@@ -9,7 +9,8 @@ import { PERMISSIONS, hasPermission } from "../lib/permissions.js";
 import { formLimit } from "../lib/rateLimit.js";
 import { isEmailConfigured, trySend, verificationEmail, passwordResetEmail, contactForwardEmail, listingRemovedEmail, reportAlertEmail } from "../lib/email.js";
 import { REPORT_REASONS } from "./pages.js";
-import { parseMobile, isMarket, marketOrDefault, defaultUnitsFor, currencyFor } from "../lib/countries.js";
+import { EXAMPLE_LISTINGS } from "../lib/exampleListings.js";
+import { parseMobile, isMarket, marketOrDefault, defaultUnitsFor, currencyFor, countryName } from "../lib/countries.js";
 
 function redirect(res, location, cookie) {
   const headers = { Location: location };
@@ -101,7 +102,7 @@ export async function resendVerificationHandler(req, res) {
   if (user.emailVerifiedAt) return redirect(res, "/account");
   if (!formLimit(req, "resendVerification").allowed) return redirect(res, withParam("/account", "err", "We've sent a few already — check your spam folder, or try again in an hour."));
   await startVerification(user);
-  redirect(res, "/account?updated=Verification email sent. Your email");
+  redirect(res, "/account?verifySent=1");
 }
 
 export async function login(req, res) {
@@ -212,7 +213,7 @@ export async function createListingHandler(req, res) {
   const user = await currentUser(req);
   if (!user) return wantsJson(req) ? json(res, 401, { error: "Please log in again." }) : redirect(res, "/onboarding?next=/sell/new");
   if (emailUnverified(user)) {
-    const error = "Please verify your email before listing — check your inbox, or resend the link from your Account page.";
+    const error = "Please verify your email before listing — check your inbox (and your Spam or Junk folder), or resend the link from your Account page.";
     return wantsJson(req) ? json(res, 403, { error }) : redirect(res, withParam("/sell/new", "err", error));
   }
   await saveListing(req, res, { user, existing: null });
@@ -505,6 +506,54 @@ export async function unsuspendUserHandler(req, res, id) {
   if (!admin) return;
   await db.unsuspendUser(id);
   redirect(res, `/admin/users?done=1&q=${encodeURIComponent(id)}`);
+}
+
+// ---------- Example listings (super-admin) ----------
+// Creates any of lib/exampleListings.js not already in the database, as
+// drafts (hidden until they get a photo). Safe to run more than once.
+export async function createExamplesHandler(req, res) {
+  const admin = await requireSuperAdmin(req, res);
+  if (!admin) return;
+  const owner = await db.ensureExamplesOwner();
+  const existing = new Set((await db.getExampleListings()).map((l) => l.exampleKey));
+  let created = 0;
+  for (const e of EXAMPLE_LISTINGS) {
+    if (existing.has(e.key)) continue;
+    const country = countryName(e.cc);
+    await db.createExampleListing({
+      ownerId: owner.id, exampleKey: e.key, title: e.title, category: e.category, description: e.desc,
+      price: e.price, priceNote: e.note, photos: [],
+      address: `${e.district}, ${e.city}, ${country}`, suburb: e.district, state: e.city, country, countryCode: e.cc, currency: currencyFor(e.cc),
+      lat: e.lat, lng: e.lng, showExactLocation: false, widthM: e.w, heightM: e.h,
+    });
+    created++;
+  }
+  redirect(res, `/admin/examples?created=${created}`);
+}
+
+// One photo per request (the page uploads them one at a time), matched to
+// the example by the key in the URL.
+export async function exampleListingPhotoHandler(req, res, key) {
+  const admin = await requireSuperAdmin(req, res);
+  if (!admin) return;
+  const json = (status, obj) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
+  const listing = /^EX-[A-Z]{2}-\d{1,2}$/.test(key) ? await db.getExampleListingByKey(key) : null;
+  if (!listing) return json(404, { ok: false, error: `No example listing ${key} — create the examples first.` });
+  const uploadError = await runUpload(req, res, uploadListingPhotos);
+  if (uploadError) return json(400, { ok: false, error: uploadError });
+  const file = (req.files || [])[0];
+  if (!file) return json(400, { ok: false, error: "No photo received." });
+  await db.updateListing(listing.id, { photos: [photoPublicUrl(file)], status: listing.status === "draft" ? "live" : listing.status, renewedAt: new Date().toISOString() });
+  json(200, { ok: true, id: listing.id });
+}
+
+export async function deleteExamplesHandler(req, res) {
+  const admin = await requireSuperAdmin(req, res);
+  if (!admin) return;
+  const b = await readBody(req);
+  if (String(b.confirm || "").trim() !== "DELETE") return redirect(res, "/admin/examples?err=Type DELETE to confirm.");
+  const removed = await db.deleteExampleListings();
+  redirect(res, `/admin/examples?deleted=${removed.length}`);
 }
 
 async function requireSuperAdmin(req, res) {

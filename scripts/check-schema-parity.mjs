@@ -16,7 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const url = process.env.DATABASE_URL;
 const pool = new pg.Pool({ connectionString: url, ssl: /localhost|127\.0\.0\.1/.test(url || "") ? false : { rejectUnauthorized: false } });
 const temp = `parity_${crypto.randomBytes(4).toString("hex")}`;
-const TABLES = ["users", "sessions", "listings", "conversations", "messages", "reports", "contact_messages", "deals"];
+const TABLES = ["users", "sessions", "listings", "conversations", "messages", "reports", "contact_messages", "deals", "agreements"];
 
 async function columns(client, schema) {
   const { rows } = await client.query(

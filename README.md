@@ -64,6 +64,18 @@ npm run dev             # http://localhost:3000
   questions when they mark a space rented and buyers answer the emailed
   check-in (`/deal-check/:token`, no login). Admins see totals at
   `/admin/deals`; deal values are never shown publicly.
+- **Agreements** (`lib/agreement.js`): in a conversation the seller can
+  prepare an advertising agreement pre-filled from the listing (fee, dates,
+  inspections, artwork, approvals, insurance, notice). Both sides view and
+  print it at `/messages/:id/agreement/view` and sign it themselves; it's a
+  template, and Frontage isn't a party to it.
+- **Quick messages**: tap-to-insert message starters for buyers and sellers
+  above the message box (`QUICK_REPLIES` in `routes/messages.js`).
+- **Example listings** (`lib/exampleListings.js`): 90 labelled examples (3
+  per country), badged "Example", not messageable, never indexed, sorted
+  after real listings. Super-admins create them, bulk-upload photos by
+  filename (`EX-AU-1.jpg`) and delete them all at `/admin/examples`.
+  Image prompts: `docs/example-image-prompts.md`.
 - **Messaging** (`routes/messages.js`): one conversation per listing +
   buyer, one inbox labelled by listing title, per-conversation unread state,
   "Seen" receipts, polling (no websockets). Email alerts are throttled to one

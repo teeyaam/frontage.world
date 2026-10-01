@@ -39,7 +39,7 @@ const STATIC_TYPES = {
   ".heif": "image/heif",
   ".ico": "image/x-icon",
 };
-const STATIC_FILES = new Set(["/style.css", "/client.js", "/browse.js", "/listing.js", "/listing-form.js", "/chat.js", "/listing-map.js", "/favicon.svg", "/og-default.png"]);
+const STATIC_FILES = new Set(["/style.css", "/client.js", "/browse.js", "/listing.js", "/listing-form.js", "/chat.js", "/listing-map.js", "/admin-examples.js", "/favicon.svg", "/og-default.png"]);
 
 function serveStatic(req, res, pathname) {
   const filePath = path.join(PUBLIC_DIR, pathname);
@@ -156,7 +156,7 @@ function robotsTxt(res) {
 async function sitemapXml(res) {
   const base = appBaseUrl();
   const fixed = ["/", "/about", "/how-it-works", "/pricing-guide", "/safety", "/sell/welcome", "/terms", "/privacy", "/contact"];
-  const listings = await db.getListings();
+  const listings = (await db.getListings()).filter((l) => !l.exampleKey);
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
   const urls = [
     ...fixed.map((p) => `<url><loc>${esc(base + p)}</loc></url>`),
@@ -245,6 +245,8 @@ const server = http.createServer(async (req, res) => {
       if (pathname === "/admin/users") return await pages.adminUsersPage(req, res, query);
       if (pathname === "/admin/staff") return await pages.adminStaffPage(req, res, query);
       if (pathname === "/admin/deals") return await pages.adminDealsPage(req, res);
+      if (pathname === "/admin/examples") return await pages.adminExamplesPage(req, res, query);
+      if (pathname === "/admin/examples/prompts.txt") return await pages.adminExamplePromptsText(req, res);
       if ((m = pathname.match(/^\/sell\/rented\/([^/]+)$/))) return await pages.markRentedPage(req, res, m[1]);
       if ((m = pathname.match(/^\/deal-check\/([^/]+)$/))) return await pages.dealCheckPage(req, res, m[1], query);
       if ((m = pathname.match(/^\/listing\/([^/]+)$/))) return await pages.listingDetailPage(req, res, m[1]);
@@ -252,6 +254,8 @@ const server = http.createServer(async (req, res) => {
       if ((m = pathname.match(/^\/sell\/edit\/([^/]+)$/))) return await pages.editListingPage(req, res, m[1]);
       if ((m = pathname.match(/^\/messages\/([^/]+)$/))) return await messages.conversationPage(req, res, m[1]);
       if ((m = pathname.match(/^\/messages\/([^/]+)\/report$/))) return await messages.reportConversationPage(req, res, m[1], query);
+      if ((m = pathname.match(/^\/messages\/([^/]+)\/agreement$/))) return await messages.agreementFormHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/messages\/([^/]+)\/agreement\/view$/))) return await messages.agreementViewHandler(req, res, m[1]);
       if ((m = pathname.match(/^\/api\/conversations\/([^/]+)\/messages$/))) return await messages.conversationMessagesJson(req, res, m[1], query);
       if ((m = pathname.match(/^\/admin\/conversations\/([^/]+)$/))) return await pages.adminConversationPage(req, res, m[1]);
     }
@@ -271,6 +275,9 @@ const server = http.createServer(async (req, res) => {
       if ((m = pathname.match(/^\/api\/listings\/([^/]+)\/rented$/))) return await api.markRentedHandler(req, res, m[1]);
       if ((m = pathname.match(/^\/api\/deal-check\/([^/]+)$/))) return await api.dealCheckSubmit(req, res, m[1]);
       if ((m = pathname.match(/^\/api\/admin\/listings\/([^/]+)\/fix-currency$/))) return await api.fixListingCurrencyHandler(req, res, m[1]);
+      if (pathname === "/api/admin/examples/create") return await api.createExamplesHandler(req, res);
+      if (pathname === "/api/admin/examples/delete") return await api.deleteExamplesHandler(req, res);
+      if ((m = pathname.match(/^\/api\/admin\/examples\/([A-Za-z0-9-]+)\/photo$/))) return await api.exampleListingPhotoHandler(req, res, m[1].toUpperCase());
       if (pathname === "/api/account/resend-verification") return await api.resendVerificationHandler(req, res);
       if (pathname === "/api/listings") return await api.createListingHandler(req, res);
       if (pathname === "/api/contact") return await api.contactSubmit(req, res);
@@ -280,6 +287,7 @@ const server = http.createServer(async (req, res) => {
       if ((m = pathname.match(/^\/api\/listings\/([^/]+)\/delete$/))) return await api.deleteListingHandler(req, res, m[1]);
       if ((m = pathname.match(/^\/api\/listings\/([^/]+)\/messages$/))) return await messages.messageSellerHandler(req, res, m[1]);
       if ((m = pathname.match(/^\/api\/conversations\/([^/]+)\/messages$/))) return await messages.replyHandler(req, res, m[1]);
+      if ((m = pathname.match(/^\/api\/conversations\/([^/]+)\/agreement$/))) return await messages.agreementSaveHandler(req, res, m[1]);
       if ((m = pathname.match(/^\/api\/admin\/reports\/([^/]+)\/resolve$/))) return await api.resolveReportHandler(req, res, m[1]);
       if ((m = pathname.match(/^\/api\/admin\/listings\/([^/]+)\/remove$/))) return await api.removeListingHandler(req, res, m[1]);
       if ((m = pathname.match(/^\/api\/admin\/listings\/([^/]+)\/restore$/))) return await api.restoreListingHandler(req, res, m[1]);
