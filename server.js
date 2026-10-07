@@ -146,12 +146,47 @@ function retiredRedirect(pathname) {
 }
 
 // ---------- robots.txt + sitemap.xml ----------
+// "Selective openness": search engines and AI search/answer bots may crawl
+// (traffic and citations); AI training crawlers are refused. Private pages
+// stay out of results through their noindex tags, not robots.txt.
+const ROBOTS_TXT = `# ALLOW TRADITIONAL & AI SEARCH BOTS (For Traffic & Citations)
+User-agent: *
+Allow: /
+
+User-agent: Googlebot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+# BLOCK AI TRAINING BOTS (Protecting data from passive scraping)
+User-agent: GPTBot
+Disallow: /
+
+User-agent: Google-Extended
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /
+
+User-agent: anthropic-ai
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+`;
+
 function robotsTxt(res) {
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+  // A staging copy (NOINDEX) or passcode-gated site stays fully closed.
   if (process.env.NOINDEX === "1" || process.env.NOINDEX === "true" || process.env.SITE_PASSCODE) return res.end("User-agent: *\nDisallow: /\n");
-  res.end(
-    `User-agent: *\nDisallow: /api/\nDisallow: /admin/\nDisallow: /account\nDisallow: /messages/\nDisallow: /sell/edit/\nDisallow: /sell/new\nDisallow: /onboarding\nDisallow: /reset-password\nDisallow: /forgot-password\n\nSitemap: ${appBaseUrl()}/sitemap.xml\n`
-  );
+  res.end(ROBOTS_TXT);
 }
 async function sitemapXml(res) {
   const base = appBaseUrl();
