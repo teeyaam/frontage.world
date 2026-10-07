@@ -147,7 +147,9 @@ function retiredRedirect(pathname) {
 
 // ---------- robots.txt + sitemap.xml ----------
 // "Selective openness": search engines and AI search/answer bots may crawl
-// (traffic and citations); AI training crawlers are refused. Private pages
+// (traffic and citations); AI training crawlers are refused. Google-Extended
+// is deliberately NOT blocked: it also controls Gemini grounding (citing the
+// site in Gemini answers), not just training. Private pages
 // stay out of results through their noindex tags, not robots.txt.
 const ROBOTS_TXT = `# ALLOW TRADITIONAL & AI SEARCH BOTS (For Traffic & Citations)
 User-agent: *
@@ -169,9 +171,6 @@ Allow: /
 User-agent: GPTBot
 Disallow: /
 
-User-agent: Google-Extended
-Disallow: /
-
 User-agent: ClaudeBot
 Disallow: /
 
@@ -180,6 +179,8 @@ Disallow: /
 
 User-agent: CCBot
 Disallow: /
+
+Sitemap: ${appBaseUrl()}/sitemap.xml
 `;
 
 function robotsTxt(res) {
