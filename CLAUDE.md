@@ -4,14 +4,19 @@ Read this first, then README.md.
 
 ## What Frontage is (v2, from September 2026)
 
-A **classifieds marketplace for advertising space**, like Facebook
-Marketplace: listings plus messaging only, with every deal done
+A **classifieds marketplace for vehicle advertising** (since October 2026;
+before that, any advertising space), like Facebook Marketplace: listings plus messaging only, with every deal done
 off-platform. No payments, bookings or contractors on the platform — that
 v1 transactional product is archived in `archive/v1-transactional/` (tag
 `v1-transactional-final`, branch `archive/v1-transactional`). Never import
 from `archive/`.
 
-One account type: any user can both list space and message sellers.
+One account type: any user can both list a vehicle and message owners.
+Vehicle categories only (`CATEGORIES` in `lib/categories.js`); legacy
+wall/fence/window/etc. listings stay in the DB but are filtered out of
+every public query. Keep vehicle wording road-legal: passenger-car rear
+windows stay see-through, plates/lights/marking plates uncovered, no
+rideshare.
 
 ## Production (live since 27 September 2026)
 

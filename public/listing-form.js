@@ -173,6 +173,31 @@
   ["widthM", "heightM"].forEach(function (n) {
     if (form.elements[n]) form.elements[n].addEventListener("input", function () { clearError("size"); });
   });
+  ["vehicleArea", "vehicleKmWeek"].forEach(function (n) {
+    var el = form.elements[n];
+    if (el) el.addEventListener("input", function () { clearError(n); });
+  });
+  form.querySelectorAll('input[name="panels"]').forEach(function (el) {
+    el.addEventListener("change", function () { clearError("panels"); });
+  });
+  var confirmBoxes = form.querySelectorAll(".confirm-checks input[type=checkbox]");
+  confirmBoxes.forEach(function (el) {
+    el.addEventListener("change", function () { clearError("confirm"); });
+  });
+
+  // ---------- Rear window (not allowed on passenger cars) ----------
+  var panelSet = form.querySelector("[data-no-rear-window]");
+  var rearBox = form.querySelector('input[name="panels"][value="rear_window"]');
+  function syncRearWindow() {
+    if (!panelSet || !rearBox) return;
+    var blocked = panelSet.getAttribute("data-no-rear-window").split(",").indexOf(form.elements.category.value) !== -1;
+    if (blocked) rearBox.checked = false;
+    rearBox.disabled = blocked;
+    var row = rearBox.closest(".check-row");
+    if (row) row.classList.toggle("is-disabled", blocked);
+  }
+  if (form.elements.category) form.elements.category.addEventListener("change", syncRearWindow);
+  syncRearWindow();
   function scrollToFirstError() {
     var first = form.querySelector(".has-error") || formError;
     if (first && !first.hidden) first.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -349,12 +374,17 @@
   function validate() {
     var errors = {};
     if (!form.elements.title.value.trim()) errors.title = "Give your listing a title.";
-    if (!form.elements.category.value) errors.category = "Choose the type of space.";
-    if (!form.elements.description.value.trim()) errors.description = "Describe the space.";
-    if (!form.elements.address.value.trim()) errors.address = "Enter the address of the space.";
+    if (!form.elements.category.value) errors.category = "Choose the type of vehicle.";
+    if (!form.elements.description.value.trim()) errors.description = "Describe the vehicle and how you use it.";
+    if (!form.elements.address.value.trim()) errors.address = "Enter the suburb where the vehicle is kept.";
+    if (!form.querySelector('input[name="panels"]:checked')) errors.panels = "Choose at least one place the ad can go.";
+    if (form.elements.vehicleArea && !form.elements.vehicleArea.value.trim()) errors.vehicleArea = "Say where you usually drive.";
+    var km = form.elements.vehicleKmWeek ? form.elements.vehicleKmWeek.value.replace(/[,\s]/g, "") : "";
+    if (km !== "" && !(Number(km) >= 0 && Number(km) <= 20000)) errors.vehicleKmWeek = "Enter a number of km between 0 and 20,000.";
+    if (Array.prototype.some.call(confirmBoxes, function (b) { return !b.checked; })) errors.confirm = "Please tick all four to list a vehicle.";
     var price = form.elements.price.value.replace(/[$,\s]/g, "");
     if (price !== "" && !(Number(price) >= 0)) errors.price = "Enter a price in dollars, or 0 for “price on request”.";
-    if (!photos.length) errors.photos = "Add at least one photo of the space.";
+    if (!photos.length) errors.photos = "Add at least one photo of the vehicle.";
     if (photos.some(function (p) { return p.pending; })) errors.photos = "Photos are still being prepared — try again in a moment.";
     if (form.elements.youtubeUrl.value.trim() && !parseYouTubeId(form.elements.youtubeUrl.value)) errors.youtubeUrl = "That doesn't look like a YouTube link.";
     return errors;

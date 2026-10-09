@@ -87,6 +87,10 @@ CREATE TABLE IF NOT EXISTS listings (
 
   status TEXT NOT NULL DEFAULT 'live', -- live | rented (seller marked it taken) | removed (by moderation) | deleted (by the seller) | draft (example waiting for a photo)
   example_key TEXT, -- set only on Frontage's labelled example listings (lib/exampleListings.js), e.g. EX-AU-1
+  vehicle_panels TEXT, -- comma-separated lib/categories.js PANELS keys, e.g. doors,boot
+  vehicle_area TEXT, -- where the vehicle is usually driven (owner's words)
+  vehicle_km_week INTEGER, -- owner's estimate, optional
+  vehicle_confirmed_at TIMESTAMPTZ, -- when the owner ticked the VEHICLE_CONFIRMATIONS
   expires_at TIMESTAMPTZ, -- a live listing drops out of browse after this until renewed (60 days)
   renewed_at TIMESTAMPTZ, -- last time the seller confirmed it's still available
   rented_at TIMESTAMPTZ,
@@ -214,6 +218,10 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS buyer_followup_token TEXT;
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS buyer_followup_sent_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_listings_expires ON listings(expires_at);
 ALTER TABLE listings ADD COLUMN IF NOT EXISTS example_key TEXT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS vehicle_panels TEXT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS vehicle_area TEXT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS vehicle_km_week INTEGER;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS vehicle_confirmed_at TIMESTAMPTZ;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_example_key ON listings(example_key) WHERE example_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_conversations_followup ON conversations(buyer_followup_token);
 -- Live listings from before expiry existed get 60 days from when they were listed.

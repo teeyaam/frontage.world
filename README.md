@@ -1,8 +1,11 @@
 # Frontage
 
-A classifieds marketplace for advertising space: people list walls, fences,
-windows, billboards, screens and vehicles for free, and advertisers message
-them directly. **Every deal happens off-platform** — Frontage hosts listings
+A classifieds marketplace for **vehicle advertising**, worldwide: people list
+their car, ute, van, truck, semi-trailer, caravan or trailer for free, and
+advertisers message them directly to put an ad on it. (Walls, fences and
+other fixed signage were dropped in October 2026 — in NSW, for one,
+third-party ads are banned in residential zones; old listings in those
+categories stay in the database but are hidden everywhere public.) **Every deal happens off-platform** — Frontage hosts listings
 and messages only, and never handles payments.
 
 Live at https://frontage.world. The previous transactional version (Stripe
@@ -71,10 +74,18 @@ npm run dev             # http://localhost:3000
   template, and Frontage isn't a party to it.
 - **Quick messages**: tap-to-insert message starters for buyers and sellers
   above the message box (`QUICK_REPLIES` in `routes/messages.js`).
-- **Example listings** (`lib/exampleListings.js`): 90 labelled examples (3
-  per country), badged "Example", not messageable, never indexed, sorted
-  after real listings. Super-admins create them, bulk-upload photos by
-  filename (`EX-AU-1.jpg`) and delete them all at `/admin/examples`.
+- **Vehicle fields** (`lib/categories.js`, `lib/listingInput.js`): panels
+  the ad can go on (`vehicle_panels`, comma-separated `PANELS` keys; a
+  passenger car can't offer the rear window — `NO_REAR_WINDOW`), where it's
+  usually driven, km a week, and four owner confirmations (not rideshare,
+  insurer told, owner's/lender's permission, driven in the ordinary course)
+  stamped as `vehicle_confirmed_at`. The base address is never shown.
+  `PUBLIC_WHERE` in `lib/db.js` only shows vehicle categories.
+- **Example listings** (`lib/exampleListings.js`): 12 labelled vehicle
+  examples (one per major market), not messageable, never indexed, sorted
+  after real listings. Super-admins create them (which also removes any
+  examples no longer in the file), bulk-upload photos by filename
+  (`EXV-AU.jpg`) and delete them all at `/admin/examples`.
   Image prompts: `docs/example-image-prompts.md`.
 - **Messaging** (`routes/messages.js`): one conversation per listing +
   buyer, one inbox labelled by listing title, per-conversation unread state,

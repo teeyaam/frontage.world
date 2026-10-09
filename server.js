@@ -142,6 +142,9 @@ function retiredRedirect(pathname) {
     return "/";
   if (pathname === "/terms/buyer" || pathname === "/terms/seller" || pathname === "/terms/non-discrimination") return "/terms";
   if (pathname === "/investors") return "/about";
+  if (pathname === "/rent-out-your-wall") return "/earn-from-your-vehicle";
+  if (pathname === "/find-advertising-space") return "/advertise-on-vehicles";
+  if (pathname === "/check-zoning") return "/";
   return null;
 }
 
@@ -191,7 +194,7 @@ function robotsTxt(res) {
 }
 async function sitemapXml(res) {
   const base = appBaseUrl();
-  const fixed = ["/", "/about", "/how-it-works", "/rent-out-your-wall", "/find-advertising-space", "/pricing-guide", "/safety", "/sell/welcome", "/terms", "/privacy", "/contact"];
+  const fixed = ["/", "/about", "/how-it-works", "/earn-from-your-vehicle", "/advertise-on-vehicles", "/pricing-guide", "/safety", "/sell/welcome", "/terms", "/privacy", "/contact"];
   const listings = (await db.getListings()).filter((l) => !l.exampleKey);
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
   const urls = [
@@ -270,8 +273,8 @@ const server = http.createServer(async (req, res) => {
       if (pathname === "/account") return await pages.accountPage(req, res, query);
       if (pathname === "/account/messages") return await messages.inboxPage(req, res);
       if (pathname === "/about") return await pages.aboutPage(req, res);
-      if (pathname === "/rent-out-your-wall") return await pages.rentOutYourWallPage(req, res);
-      if (pathname === "/find-advertising-space") return await pages.findAdvertisingSpacePage(req, res);
+      if (pathname === "/earn-from-your-vehicle") return await pages.earnFromYourVehiclePage(req, res);
+      if (pathname === "/advertise-on-vehicles") return await pages.advertiseOnVehiclesPage(req, res);
       if (pathname === "/how-it-works") return await pages.howItWorksPage(req, res);
       if (pathname === "/pricing-guide") return await pages.pricingGuidePage(req, res);
       if (pathname === "/safety") return await pages.safetyPage(req, res);

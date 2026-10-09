@@ -105,7 +105,7 @@ export async function conversationPage(req, res, id) {
       <details class="safety-strip">
         <summary>Frontage never handles payments — deal directly and safely. <span class="link">Tips</span></summary>
         <ul class="small">
-          <li>See the space (or a live video) before you pay anything, and check who actually controls it.</li>
+          <li>See the vehicle (or a live video walk-around) before you pay anything, and check who actually controls it.</li>
           <li>Never pay by gift card, crypto or wire transfer, or to someone other than the owner.</li>
           <li>Check council, landlord or strata rules before printing an ad.</li>
           <li>Keep chatting here until you're confident — it's your record if something goes wrong.</li>
@@ -137,18 +137,18 @@ export async function conversationPage(req, res, id) {
 // member can edit before sending).
 export const QUICK_REPLIES = {
   buyer: [
-    "Hi, is this space still available?",
-    "What's the minimum term?",
-    "Could I see the space in person before we agree?",
-    "Is the price negotiable?",
-    "Can you arrange printing and installation, or do I supply that?",
+    "Hi, is your vehicle still available?",
+    "Where do you usually drive, and how far each week?",
+    "Which panels are available, and what size are they?",
+    "Could I see the vehicle before we agree?",
+    "Can you send a photo of the ad on the vehicle each week?",
   ],
   seller: [
     "Yes, it's still available.",
     "When would you like to start, and for how long?",
     "Could you send me your artwork or brand details?",
-    "Happy to arrange a site visit — what time suits you?",
-    "Do you need any council or landlord approvals for your ad?",
+    "Do you have a wrap shop you'd like to use, or shall I suggest one?",
+    "I can send a dated photo of the ad every week.",
   ],
 };
 export function quickRepliesMarkup(role, textareaId, conversationId) {
@@ -184,9 +184,11 @@ function agreementFormPage({ conversation, listing, terms, errors = {}, isNew })
         <h2 class="form-section">Who and what</h2>
         ${input("ownerName", "Owner (you, or your business)", 'maxlength="120" required')}
         ${input("advertiserName", "Advertiser", 'maxlength="120" required')}
-        ${input("spaceDescription", "The space", 'maxlength="200"')}
-        ${input("spaceAddress", "Where it is", 'maxlength="300" required', "The full address is only shown to this advertiser.")}
-        ${input("spaceSize", "Size", 'maxlength="60"')}
+        ${input("spaceDescription", "The vehicle", 'maxlength="200"')}
+        ${input("rego", "Registration number (optional)", 'maxlength="15"', "Only shown to this advertiser, on the agreement.")}
+        ${input("spaceAddress", "Where it's based and usually driven", 'maxlength="300" required')}
+        ${input("panels", "Where the ad goes", 'maxlength="200"', "e.g. both front doors and the tailgate")}
+        ${input("spaceSize", "Ad size (optional)", 'maxlength="60"')}
         <h2 class="form-section">Money and dates</h2>
         <div class="form-row">
           ${input("fee", `Fee (${escapeHtml(listing.currency || "AUD")})`, 'inputmode="decimal" required')}
@@ -197,22 +199,18 @@ function agreementFormPage({ conversation, listing, terms, errors = {}, isNew })
           ${input("startDate", "Start date", 'type="date" required')}
           ${input("endDate", "End date", 'type="date" required')}
         </div>
-        <h2 class="form-section">Looking after the space</h2>
-        <div class="form-row">
-          ${select("inspection", INSPECTIONS, "Site inspections")}
-          ${input("inspectionNoticeDays", "Notice before an inspection (days)", 'inputmode="numeric"')}
-        </div>
+        <h2 class="form-section">Photos, fitting and removal</h2>
+        ${select("inspection", INSPECTIONS, "Photos of the ad on the vehicle")}
         <div class="form-row">
           ${select("artworkBy", PARTY, "Who supplies the artwork")}
-          ${select("installBy", PARTY, "Who installs and removes it")}
+          ${select("installBy", PARTY, "Who arranges fitting and removal")}
         </div>
-        ${select("approvalsBy", PARTY, "Who gets council / landlord approvals")}
         <div class="field"><label for="ag-insurance">Insurance <span class="muted">(optional)</span></label><textarea id="ag-insurance" name="insurance" rows="3" maxlength="1000" placeholder="e.g. The Advertiser holds public liability insurance covering the ad and its installation, and shows a certificate on request.">${escapeHtml(insuranceText(terms.insurance))}</textarea><div class="small muted">Leave blank if you haven't agreed anything about insurance.</div></div>
         <div class="form-row">
           ${input("removalDays", "Days to remove the ad after the end", 'inputmode="numeric"')}
           ${input("noticeDays", "Notice to end early (days)", 'inputmode="numeric"')}
         </div>
-        <div class="field"><label for="ag-specialConditions">Special conditions <span class="muted">(optional)</span></label><textarea id="ag-specialConditions" name="specialConditions" rows="4" maxlength="2000" placeholder="e.g. Ad must be family-friendly. Lights on the wall stay on until 10pm.">${v("specialConditions")}</textarea></div>
+        <div class="field"><label for="ag-specialConditions">Special conditions <span class="muted">(optional)</span></label><textarea id="ag-specialConditions" name="specialConditions" rows="4" maxlength="2000" placeholder="e.g. Ad must be family-friendly. Vehicle drives at least 300 km a week in the Inner West.">${v("specialConditions")}</textarea></div>
         <button class="btn btn-accent btn-block" type="submit">${isNew ? "Save and share with the advertiser" : "Save changes"}</button>
       </form>
     </div>`;
@@ -241,7 +239,7 @@ export async function agreementSaveHandler(req, res, id) {
   }
   const { created } = await db.saveAgreement(conversation, terms);
   const text = created
-    ? "I've prepared a draft advertising agreement for this space. Open it from the agreement box in our conversation — let me know if anything needs changing."
+    ? "I've prepared a draft advertising agreement for this vehicle. Open it from the agreement box in our conversation — let me know if anything needs changing."
     : "I've updated the agreement — open it from the agreement box in our conversation to see the latest version.";
   await db.createMessage(conversation, user.id, text);
   await maybeNotify(conversation, user, text);

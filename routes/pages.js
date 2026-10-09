@@ -5,6 +5,10 @@ import { priceLabel, sizeLabel, sizeForInput, formatDate, timeAgo, listedAgo, da
 import {
   CATEGORIES,
   CATEGORY_LABEL,
+  CATEGORY_CHIP,
+  PANELS,
+  NO_REAR_WINDOW,
+  VEHICLE_CONFIRMATIONS,
   LISTING_TITLE_MAX_LENGTH,
   LISTING_DESC_MAX_LENGTH,
   LISTING_PRICE_NOTE_MAX_LENGTH,
@@ -78,7 +82,7 @@ export async function notFoundPage(req, res, message = "That page doesn't exist,
       title: "Not found",
       user,
       noindex: true,
-      body: `<div class="panel empty-state"><h1>Not found</h1><p class="muted">${escapeHtml(message)}</p><a href="/" class="btn btn-primary">Browse spaces</a></div>`,
+      body: `<div class="panel empty-state"><h1>Not found</h1><p class="muted">${escapeHtml(message)}</p><a href="/" class="btn btn-primary">Browse vehicles</a></div>`,
     })
   );
 }
@@ -100,6 +104,15 @@ export function coverPhoto(l) {
 
 function categoryLabel(c) {
   return CATEGORY_LABEL[c] || "Other";
+}
+
+// "Doors, Boot, tailgate or rear doors" from "doors,boot".
+function panelLabels(v) {
+  return String(v || "")
+    .split(",")
+    .filter((p) => PANELS[p])
+    .map((p) => PANELS[p])
+    .join(" · ");
 }
 
 // Who's looking: their country (account setting, else a guess from their
@@ -154,7 +167,8 @@ export function listingCard(l, viewer) {
       <div class="card-body">
         <div class="card-price">${escapeHtml(priceLabel(l, { withNote: false, viewerCurrency: viewer && viewer.currency }))}${l.priceNote && l.price > 0 ? ` <span class="muted card-price-note">${escapeHtml(l.priceNote)}</span>` : ""}</div>
         <h3 class="card-title">${escapeHtml(l.title)}</h3>
-        <div class="muted small">${escapeHtml(categoryLabel(l.category))}${place ? ` · ${escapeHtml(place)}` : ""}</div>
+        <div class="muted small">${escapeHtml(CATEGORY_CHIP[l.category] ? categoryLabel(l.category).replace(/ \(.*\)$/, "") : categoryLabel(l.category))}${place ? ` · ${escapeHtml(place)}` : ""}</div>
+        ${l.vehicleArea ? `<div class="muted small card-area">Drives ${escapeHtml(l.vehicleArea.length > 48 ? `${l.vehicleArea.slice(0, 47)}…` : l.vehicleArea)}</div>` : ""}
       </div>
     </a>`;
 }
@@ -220,16 +234,16 @@ export async function browsePage(req, res, query) {
   }
 
   const noResultsHtml = nearby.length
-    ? `<div class="panel empty-state"><p class="muted">No spaces match “${escapeHtml(locationTerm)}” yet. Nearby suburbs with spaces:</p>
+    ? `<div class="panel empty-state"><p class="muted">No vehicles match “${escapeHtml(locationTerm)}” yet. Nearby suburbs with vehicles:</p>
          <div class="chip-row">${nearby.map((s) => `<a href="${withParams({ q: "", where: s.suburb })}" class="chip-pill">${escapeHtml(s.suburb)} (${s.count})</a>`).join("")}</div></div>`
     : inCountry.length === 0
-    ? `<div class="panel empty-state"><h2>Be the first to list a space${country === "all" ? "" : ` in ${escapeHtml(countryName(country))}`}</h2><p class="muted">Got a wall, fence, window or screen people can see? List it free in a couple of minutes.</p><a href="/sell/welcome" class="btn btn-accent">List your space</a></div>`
-    : `<div class="panel empty-state"><p class="muted">No spaces match that search.</p><a href="/" class="btn btn-outline btn-sm">Clear search</a></div>`;
+    ? `<div class="panel empty-state"><h2>Be the first to list a vehicle${country === "all" ? "" : ` in ${escapeHtml(countryName(country))}`}</h2><p class="muted">Drive a car, ute, van or truck? List it free in a couple of minutes and let local businesses pay to put their brand on it.</p><a href="/sell/welcome" class="btn btn-accent">List your vehicle</a></div>`
+    : `<div class="panel empty-state"><p class="muted">No vehicles match that search.</p><a href="/" class="btn btn-outline btn-sm">Clear search</a></div>`;
 
   const categoryChips = ["all", ...CATEGORIES]
     .map((c) => {
       const active = (cat || "all") === c;
-      return `<a href="${withParams({ category: c === "all" ? "" : c })}" class="chip-pill${active ? " is-active" : ""}">${c === "all" ? "All spaces" : categoryLabel(c)}</a>`;
+      return `<a href="${withParams({ category: c === "all" ? "" : c })}" class="chip-pill${active ? " is-active" : ""}">${c === "all" ? "All vehicles" : CATEGORY_CHIP[c] || categoryLabel(c)}</a>`;
     })
     .join("");
 
@@ -242,7 +256,7 @@ export async function browsePage(req, res, query) {
         <h1 class="hero-headline">Every wall is <span class="hero-accent">a billboard.</span></h1>
         <p class="hero-sub">${escapeHtml(SITE_TAGLINE)}</p>
       </div>
-      <a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent btn-lg">List your space — free</a>
+      <a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent btn-lg">List your vehicle — free</a>
     </section>
 
     <div class="browse-toolbar">
@@ -263,7 +277,7 @@ export async function browsePage(req, res, query) {
           .map((k) => (query.get(k) ? `<input type="hidden" name="${k}" value="${escapeHtml(query.get(k))}" />` : ""))
           .join("")}
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-        <input type="search" name="q" aria-label="Search" placeholder="Search spaces, suburbs or keywords" value="${escapeHtml(query.get("q") || "")}" />
+        <input type="search" name="q" aria-label="Search" placeholder="Search vehicles, suburbs or routes" value="${escapeHtml(query.get("q") || "")}" />
       </form>
       <div class="toolbar-buttons">
         <button type="button" id="map-toggle-btn" class="btn-pill btn">${mapView ? "List view" : "Map view"}</button>
@@ -297,7 +311,7 @@ export async function browsePage(req, res, query) {
     </div>
     <div id="category-chips" class="chip-row">${categoryChips}</div>
     <div id="browse-map" class="browse-map"${mapView ? "" : " hidden"}></div>
-    <h2 class="results-heading">${realCount} space${realCount === 1 ? "" : "s"} ${country === "all" ? "worldwide" : `in ${escapeHtml(countryName(country))}`}${cat ? ` · ${escapeHtml(categoryLabel(cat))}` : ""}${exampleCount ? ` <span class="muted small results-examples">+ ${exampleCount} example${exampleCount === 1 ? "" : "s"} showing what a listing looks like</span>` : ""}</h2>
+    <h2 class="results-heading">${realCount} vehicle${realCount === 1 ? "" : "s"} ${country === "all" ? "worldwide" : `in ${escapeHtml(countryName(country))}`}${cat ? ` · ${escapeHtml(categoryLabel(cat))}` : ""}${exampleCount ? ` <span class="muted small results-examples">+ ${exampleCount} example${exampleCount === 1 ? "" : "s"} showing what a listing looks like</span>` : ""}</h2>
     <div id="browse-results"${mapView ? " hidden" : ""}>${listings.length === 0 ? noResultsHtml : `<div class="grid">${listings.map((l) => listingCard(l, viewer)).join("")}</div>`}</div>
     <script>
       window.FRONTAGE_MAP = ${JSON.stringify({ target: "browse-map", engine: googleKey ? "google" : "leaflet", key: googleKey || null, startInMap: mapView, country, mapQuery: mapQueryString(query, country) })};
@@ -309,8 +323,8 @@ export async function browsePage(req, res, query) {
     res,
     200,
     await layout({
-      title: cat ? `${categoryLabel(cat)} advertising space` : "Every wall is a billboard",
-      fullTitle: cat ? undefined : "Frontage — Advertising space marketplace | Every wall is a billboard",
+      title: cat ? `Advertising on ${(CATEGORY_CHIP[cat] || categoryLabel(cat)).toLowerCase()}` : "Every wall is a billboard",
+      fullTitle: cat ? undefined : "Frontage — Vehicle advertising marketplace | Every wall is a billboard",
       activeNav: "browse",
       user,
       body,
@@ -373,7 +387,7 @@ export async function listingDetailPage(req, res, id) {
 // What the owner sees about where their listing stands.
 function ownerStatusNotice(l) {
   if (l.status === "removed") return `<div class="notice notice-orange">Removed by moderators${l.removedReason ? `: ${escapeHtml(l.removedReason)}` : ""}.</div>`;
-  if (l.status === "rented") return `<div class="notice notice-blue">Marked as rented ${escapeHtml(timeAgo(l.rentedAt))} — hidden from browse. Relist it when the space is free again.</div>`;
+  if (l.status === "rented") return `<div class="notice notice-blue">Marked as rented ${escapeHtml(timeAgo(l.rentedAt))} — hidden from browse. Relist it when the vehicle is free again.</div>`;
   if (db.isExpired(l)) return `<div class="notice notice-orange"><strong>Expired</strong> — hidden from browse since ${escapeHtml(formatDate(l.expiresAt))}. Renew it to put it back.</div>`;
   const left = daysUntil(l.expiresAt);
   return `<div class="notice notice-blue">This is your listing${left != null ? ` — live for ${left} more day${left === 1 ? "" : "s"}` : ""}.</div>`;
@@ -472,7 +486,7 @@ async function renderListing(req, res, user, listing) {
       <form method="POST" action="/api/listings/${escapeHtml(listing.id)}/messages" class="composer" id="message-seller" data-single-submit>
         ${existingConversation && existingConversation.lastMessageAt ? "" : quickRepliesMarkup("buyer", "first-message")}
         <label for="first-message" class="composer-label">${existingConversation && existingConversation.lastMessageAt ? "Send another message" : "Send the seller a message"}</label>
-        <textarea id="first-message" name="body" rows="3" maxlength="2000" required>${existingConversation && existingConversation.lastMessageAt ? "" : "Hi, is this space still available?"}</textarea>
+        <textarea id="first-message" name="body" rows="3" maxlength="2000" required>${existingConversation && existingConversation.lastMessageAt ? "" : "Hi, is this vehicle still available?"}</textarea>
         <button class="btn btn-accent btn-block" type="submit">Send</button>
       </form>`;
   }
@@ -484,13 +498,17 @@ async function renderListing(req, res, user, listing) {
       <div class="detail-main">
         ${gallery}
         <section class="detail-section">
-          <h2>About this space</h2>
+          <h2>About this vehicle</h2>
           <p class="prewrap">${escapeHtml(listing.description)}</p>
         </section>
         <section class="detail-section">
           <h2>Details</h2>
           <dl class="detail-facts">
-            <div><dt>Type of space</dt><dd>${escapeHtml(categoryLabel(listing.category))}</dd></div>
+            <div><dt>Type of vehicle</dt><dd>${escapeHtml(categoryLabel(listing.category))}</dd></div>
+            ${listing.vehiclePanels ? `<div><dt>Where the ad can go</dt><dd>${escapeHtml(panelLabels(listing.vehiclePanels))}</dd></div>` : ""}
+            ${listing.vehicleArea ? `<div><dt>Usually driven</dt><dd>${escapeHtml(listing.vehicleArea)}</dd></div>` : ""}
+            ${listing.vehicleKmWeek ? `<div><dt>Distance</dt><dd>About ${escapeHtml(String(listing.vehicleKmWeek))} km a week (owner's estimate)</dd></div>` : ""}
+            ${listing.vehicleConfirmedAt ? `<div><dt>Owner has confirmed</dt><dd>Not used for rideshare · insurer to be told · owner's or lender's permission · driven regularly</dd></div>` : ""}
             ${size ? `<div><dt>Size</dt><dd>${escapeHtml(size)}</dd></div>` : ""}
             <div><dt>Price</dt><dd>${escapeHtml(priceLabel(listing, vc))}${listing.price > 0 ? ` <span class="muted small">(${escapeHtml(listing.currency || "AUD")})</span>` : ""}</dd></div>
             <div><dt>Location</dt><dd>${escapeHtml(locationLine)}${listing.showExactLocation ? "" : ` <span class="muted small">(approximate)</span>`}</dd></div>
@@ -500,7 +518,7 @@ async function renderListing(req, res, user, listing) {
           </dl>
         </section>
         ${video}
-        ${map ? `<section class="detail-section"><h2>Location</h2>${map}<div class="small muted" style="margin-top:6px">${listing.showExactLocation ? escapeHtml(locationLine) : `Approximate area — the seller shares the exact spot when you message them.`}</div></section>` : ""}
+        ${map ? `<section class="detail-section"><h2>Where it's based</h2>${map}<div class="small muted" style="margin-top:6px">Approximate area where the vehicle is kept — it's driven well beyond it (see “Usually driven”).</div></section>` : ""}
       </div>
       <aside class="detail-side">
         <div class="side-card">
@@ -525,7 +543,7 @@ async function renderListing(req, res, user, listing) {
         }
         <div class="side-card safety-card">
           <strong class="small">Stay safe</strong>
-          <p class="small muted">Frontage never handles payments. See the space before you pay, and never pay by gift card or crypto. <a href="/safety" class="link">Safety tips</a></p>
+          <p class="small muted">Frontage never handles payments. See the vehicle before you pay, and never pay by gift card or crypto. <a href="/safety" class="link">Safety tips</a></p>
         </div>
         ${!isOwner && !isExample ? `<div class="small" style="text-align:center"><a href="/listing/${escapeHtml(listing.id)}/report" class="muted link-quiet">Report this listing</a></div>` : ""}
       </aside>
@@ -555,10 +573,10 @@ async function renderListing(req, res, user, listing) {
 // ---------------- Report a listing ----------------
 export const REPORT_REASONS = [
   ["scam", "Scam or fraud"],
-  ["not_owner", "They don't control this space"],
+  ["not_owner", "They don't own or control this vehicle"],
   ["misleading", "Misleading or inaccurate"],
   ["prohibited", "Prohibited or offensive content"],
-  ["not_ad_space", "Not advertising space"],
+  ["not_ad_space", "Not a vehicle for advertising"],
   ["spam", "Spam or duplicate"],
   ["harassment", "Harassment or abuse"],
   ["other", "Something else"],
@@ -737,21 +755,21 @@ export async function sellWelcomePage(req, res) {
   const user = await currentUser(req);
   if (user && (await db.getListingsByOwner(user.id)).length > 0) return redirect(res, "/sell");
   const steps = [
-    ["Snap a few photos", "Show the space and what people see from the street. One photo is enough to start; up to 10 is better."],
-    ["Set your price and details", "Any price you like — per month, per week, or “price on request”. Our pricing guide helps you gauge it."],
+    ["Snap a few photos", "Show the vehicle from each side you're offering. One photo is enough to start; up to 10 is better."],
+    ["Say where you drive and set your price", "Your usual routes, roughly how far you drive, and any price you like. Our pricing guide helps you gauge it."],
     ["Chat and deal directly", "Advertisers message you on Frontage. You agree the terms and get paid directly — Frontage takes no cut."],
   ];
   const body = `
     <div class="sell-intro">
-      <h1>Turn your wall, fence or window into income</h1>
-      <p class="muted">List advertising space for free. Local businesses find it, message you, and you deal directly.</p>
+      <h1>Get paid to carry an ad on your vehicle</h1>
+      <p class="muted">List your car, ute, van, truck or trailer for free. Businesses find you, message you, and you deal directly — you keep 100% of what they pay.</p>
       <ol class="step-list">
         ${steps.map(([t, d], i) => `<li><span class="step-num-lg">${i + 1}</span><div><strong>${t}</strong><div class="small muted">${d}</div></div></li>`).join("")}
       </ol>
       <a href="${user ? "/sell/new" : "/onboarding?next=%2Fsell%2Fnew"}" class="btn btn-accent btn-block btn-lg">Get started</a>
       <p class="small muted" style="text-align:center;margin-top:12px">Not sure what to charge? <a href="/pricing-guide" class="link">Read the pricing guide</a>.</p>
     </div>`;
-  send(res, 200, await layout({ title: "List your advertising space for free", activeNav: "sell", user, body, canonicalPath: "/sell/welcome" }));
+  send(res, 200, await layout({ title: "List your vehicle for advertising — free", activeNav: "sell", user, body, canonicalPath: "/sell/welcome" }));
 }
 
 export async function myListingsPage(req, res, query) {
@@ -799,8 +817,8 @@ export async function myListingsPage(req, res, query) {
         : ""
     )}
     ${needsAttention ? notice(`${needsAttention} listing${needsAttention === 1 ? " needs" : "s need"} renewing to stay visible.`, "orange") : ""}
-    <p class="small muted">Listings stay up for 60 days. Renew them any time, or mark a space as rented when it's taken.</p>
-    ${listings.length ? `<div class="listing-rows">${rows}</div>` : `<div class="panel empty-state"><p class="muted">You haven't listed anything yet.</p><a href="/sell/new" class="btn btn-accent">List your space</a></div>`}
+    <p class="small muted">Listings stay up for 60 days. Renew them any time, or mark a vehicle as rented when it's taken.</p>
+    ${listings.length ? `<div class="listing-rows">${rows}</div>` : `<div class="panel empty-state"><p class="muted">You haven't listed anything yet.</p><a href="/sell/new" class="btn btn-accent">List your vehicle</a></div>`}
     ${query.get("created") ? trackOnLoad("publish_listing", {}) : ""}`;
   send(res, 200, await layout({ title: "My listings", activeNav: "sell", user, body, noindex: true }));
 }
@@ -828,7 +846,7 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
 
       <section class="form-section">
         <h2>Photos</h2>
-        <p class="small muted">Up to ${LISTING_MAX_PHOTOS}. Drag to reorder — the first photo is the cover. Show the space itself and what people see from the street.</p>
+        <p class="small muted">Up to ${LISTING_MAX_PHOTOS}. Drag to reorder — the first photo is the cover. Show the vehicle from each side you're offering — you don't need to show the number plate.</p>
         <div id="photo-grid" class="photo-grid" aria-live="polite"></div>
         <label class="photo-add" id="photo-add">
           <input type="file" id="photo-input" name="photos" accept="image/*" multiple />
@@ -840,11 +858,11 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
       <section class="form-section">
         <div class="field">
           <label for="lf-title">Title</label>
-          <input id="lf-title" name="title" required maxlength="${LISTING_TITLE_MAX_LENGTH}" value="${escapeHtml(v.title || "")}" placeholder="e.g. Street-facing brick wall on Pittwater Rd" data-counter="${LISTING_TITLE_MAX_LENGTH}" />
+          <input id="lf-title" name="title" required maxlength="${LISTING_TITLE_MAX_LENGTH}" value="${escapeHtml(v.title || "")}" placeholder="e.g. White Hilux ute, drives Parramatta to the CBD daily" data-counter="${LISTING_TITLE_MAX_LENGTH}" />
           ${fieldError("title")}
         </div>
         <div class="field">
-          <label for="lf-country">Country of the space</label>
+          <label for="lf-country">Country the vehicle is in</label>
           <select id="lf-country" name="countryCode" data-currencies="${escapeHtml(JSON.stringify(currencies))}">${marketOptions(cc)}</select>
           <div class="hint">The price is in this country's currency, set automatically.</div>
           ${fieldError("countryCode")}
@@ -865,7 +883,7 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
         </div>
         <p class="small" style="margin:-4px 0 16px"><a href="/pricing-guide" target="_blank" class="link">Not sure what to charge? See the pricing guide →</a></p>
         <div class="field">
-          <label for="lf-category">Type of space</label>
+          <label for="lf-category">Type of vehicle</label>
           <select id="lf-category" name="category" required>
             <option value="">Choose…</option>
             ${CATEGORIES.map((c) => `<option value="${c}"${v.category === c ? " selected" : ""}>${categoryLabel(c)}</option>`).join("")}
@@ -874,16 +892,45 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
         </div>
         <div class="field">
           <label for="lf-desc">Description</label>
-          <textarea id="lf-desc" name="description" rows="6" required maxlength="${LISTING_DESC_MAX_LENGTH}" data-counter="${LISTING_DESC_MAX_LENGTH}" placeholder="Where is it, who sees it (cars, pedestrians, members), how visible is it, is it lit at night, and what's included (printing, install)?">${escapeHtml(v.description || "")}</textarea>
+          <textarea id="lf-desc" name="description" rows="6" required maxlength="${LISTING_DESC_MAX_LENGTH}" data-counter="${LISTING_DESC_MAX_LENGTH}" placeholder="What it is, where and when you drive, where it's usually parked (busy street, car park, depot, worksite), and what's included (printing, fitting, removal)?">${escapeHtml(v.description || "")}</textarea>
           ${fieldError("description")}
         </div>
       </section>
 
       <section class="form-section">
-        <h2>Location</h2>
+        <h2>The vehicle</h2>
+        <fieldset class="field panel-checks" data-no-rear-window="${escapeHtml([...NO_REAR_WINDOW].join(","))}">
+          <legend>Where can the ad go?</legend>
+          ${Object.entries(PANELS)
+            .map(([k, label]) => `<label class="check-row"><input type="checkbox" name="panels" value="${k}"${String(v.vehiclePanels || "").split(",").includes(k) ? " checked" : ""} /> <span>${escapeHtml(label)}</span></label>`)
+            .join("")}
+          <div class="hint">Cars: doors, boot or magnetic signs — the rear window must stay see-through by law. Utes, vans, trucks and trailers can have the rear window covered. Keep number plates, lights and reflectors clear.</div>
+          ${fieldError("panels")}
+        </fieldset>
+        <div class="field">
+          <label for="lf-area">Where do you usually drive?</label>
+          <input id="lf-area" name="vehicleArea" maxlength="200" value="${escapeHtml(v.vehicleArea || "")}" placeholder="e.g. Parramatta to the CBD on weekdays; Western Sydney job sites" />
+          ${fieldError("vehicleArea")}
+        </div>
+        <div class="field">
+          <label for="lf-km">Roughly how many km a week? <span class="optional">(optional)</span></label>
+          <input id="lf-km" name="vehicleKmWeek" inputmode="numeric" value="${v.vehicleKmWeek != null ? escapeHtml(String(v.vehicleKmWeek)) : ""}" placeholder="e.g. 400" />
+          ${fieldError("vehicleKmWeek")}
+        </div>
+        <fieldset class="field confirm-checks">
+          <legend>Please confirm</legend>
+          ${Object.entries(VEHICLE_CONFIRMATIONS)
+            .map(([k, label]) => `<label class="check-row"><input type="checkbox" name="${k}" value="1"${v.vehicleConfirmedAt ? " checked" : ""} /> <span>${escapeHtml(label)}</span></label>`)
+            .join("")}
+          ${fieldError("confirm")}
+        </fieldset>
+      </section>
+
+      <section class="form-section">
+        <h2>Where it's based</h2>
         <div class="field address-field">
-          <label for="lf-address">Address of the space</label>
-          <input id="lf-address" name="address" required autocomplete="off" value="${escapeHtml(v.address || "")}" placeholder="Start typing the street address" aria-autocomplete="list" aria-controls="address-suggestions" />
+          <label for="lf-address">Suburb or address where the vehicle is kept</label>
+          <input id="lf-address" name="address" required autocomplete="off" value="${escapeHtml(v.address || "")}" placeholder="Start typing your suburb or street" aria-autocomplete="list" aria-controls="address-suggestions" />
           <ul id="address-suggestions" class="address-suggestions" role="listbox" hidden></ul>
           <input type="hidden" name="placeId" value="${escapeHtml(v.placeId || "")}" />
           <input type="hidden" name="lat" value="${v.lat != null ? escapeHtml(String(v.lat)) : ""}" />
@@ -895,15 +942,14 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
           <input type="hidden" name="countryIso" value="${escapeHtml(v.countryCode || "")}" />
           ${fieldError("address")}
         </div>
-        <label class="consent-row"><input type="checkbox" name="showExactLocation" value="1"${v.showExactLocation ? " checked" : ""} />
-          <span><strong>Show the exact address and pin</strong><br/><span class="small muted">Leave this off and buyers only see the suburb and an approximate area until you share more in a message — recommended if it's your home.</span></span></label>
+        <div class="hint">Advertisers only ever see the suburb and an approximate area — never your address.</div>
       </section>
 
       <section class="form-section">
         <h2>More details <span class="optional">(optional)</span></h2>
         <div class="form-row">
-          <div class="field"><label for="lf-w">Width (${unitWord})</label><input id="lf-w" name="widthM" inputmode="decimal" value="${escapeHtml(sizeForInput(v.widthM, units))}" placeholder="${units === "ft" ? "e.g. 8" : "e.g. 2.4"}" /></div>
-          <div class="field"><label for="lf-h">Height (${unitWord})</label><input id="lf-h" name="heightM" inputmode="decimal" value="${escapeHtml(sizeForInput(v.heightM, units))}" placeholder="${units === "ft" ? "e.g. 4" : "e.g. 1.2"}" /></div>
+          <div class="field"><label for="lf-w">Ad area width (${unitWord})</label><input id="lf-w" name="widthM" inputmode="decimal" value="${escapeHtml(sizeForInput(v.widthM, units))}" placeholder="${units === "ft" ? "e.g. 8" : "e.g. 2.4"}" /></div>
+          <div class="field"><label for="lf-h">Ad area height (${unitWord})</label><input id="lf-h" name="heightM" inputmode="decimal" value="${escapeHtml(sizeForInput(v.heightM, units))}" placeholder="${units === "ft" ? "e.g. 4" : "e.g. 1.2"}" /></div>
           <input type="hidden" name="sizeUnit" value="${units}" />
         </div>
         <div class="hint" style="margin-top:-8px;margin-bottom:12px">Up to ${maxSide} per side. Change units in your <a href="/account#region" class="link">account settings</a>.</div>
@@ -911,7 +957,7 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
         <div class="field">
           <label for="lf-yt">Video presentation <span class="optional">(YouTube link)</span></label>
           <input id="lf-yt" name="youtubeUrl" inputmode="url" value="${escapeHtml(ytValue)}" placeholder="https://youtu.be/…" />
-          <div class="hint">A short video where you present the listing — walk the advertiser through the space, where it is, who passes it and how visible it is. Talk to camera or add voice-over; plain background footage on its own doesn't sell the space.</div>
+          <div class="hint">A short video where you present the listing — walk around the vehicle, show the panels on offer, and explain where and when you drive. Talk to camera or add voice-over; plain background footage on its own doesn't sell the space.</div>
           <div id="yt-preview" class="yt-preview" hidden></div>
           ${fieldError("youtubeUrl")}
         </div>
@@ -921,7 +967,7 @@ function listingFormMarkup({ listing = null, action, submitLabel, needsVerificat
         <button class="btn btn-accent btn-lg" type="submit" id="listing-submit">${escapeHtml(submitLabel)}</button>
         <span class="small muted" id="listing-progress" aria-live="polite"></span>
       </div>
-      <p class="small muted">By publishing you confirm you control this space (or have permission to offer it) and agree to the <a href="/terms" target="_blank" class="link">Terms</a>.</p>
+      <p class="small muted">By publishing you confirm you own this vehicle (or have permission to advertise on it) and agree to the <a href="/terms" target="_blank" class="link">Terms</a>.</p>
     </form>
     <script>window.FRONTAGE_PLACES = ${JSON.stringify({ key: mapsKey || null })};</script>
     <script src="/listing-form.js" defer></script>`;
@@ -933,11 +979,11 @@ export async function newListingPage(req, res) {
   const body = `
     <div class="form-page">
       <a href="${(await db.getListingsByOwner(user.id)).length ? "/sell" : "/"}" class="small muted">← Back</a>
-      <h1 style="margin:8px 0 4px">List your space</h1>
+      <h1 style="margin:8px 0 4px">List your vehicle</h1>
       <p class="muted" style="margin-bottom:24px">Free to list. Advertisers message you and you deal directly.</p>
       ${listingFormMarkup({ action: "/api/listings", submitLabel: "Publish listing", needsVerification: isEmailConfigured() && !user.emailVerifiedAt, country: isMarket(user.country) ? user.country : DEFAULT_COUNTRY, units: user.units || "m" })}
     </div>`;
-  send(res, 200, await layout({ title: "List your space", activeNav: "sell", user, body, noindex: true }));
+  send(res, 200, await layout({ title: "List your vehicle", activeNav: "sell", user, body, noindex: true }));
 }
 
 export async function editListingPage(req, res, id) {
@@ -989,7 +1035,7 @@ function dealQuestionsMarkup({ currency, askWho = [], viaLabel }) {
     </div>
     <div class="hint" style="margin-top:-6px;margin-bottom:14px">Private — never shown on the site. It helps us understand what spaces rent for.</div>
     <label class="consent-row"><input type="checkbox" name="okToFeature" value="1" />
-      <span>Frontage can feature this as a success story (the space and suburb — <strong>never the price</strong>). We'll check with you before using any photos.</span></label>`;
+      <span>Frontage can feature this as a success story (the vehicle and suburb — <strong>never the price</strong>). We'll check with you before using any photos.</span></label>`;
 }
 
 export async function markRentedPage(req, res, id) {
@@ -1002,7 +1048,7 @@ export async function markRentedPage(req, res, id) {
     <div class="form-card narrow-card">
       <a href="/sell" class="small muted">← My listings</a>
       <h1 style="margin-top:8px">Mark as rented</h1>
-      <p class="muted">“${escapeHtml(listing.title)}” will come off browse. You can relist it in one click when the space is free again.</p>
+      <p class="muted">“${escapeHtml(listing.title)}” will come off browse. You can relist it in one click when the vehicle is free again.</p>
       <form method="POST" action="/api/listings/${escapeHtml(listing.id)}/rented" data-single-submit>
         ${dealQuestionsMarkup({ currency: listing.currency || "AUD", askWho: buyers, viaLabel: "Did you find the advertiser on Frontage?" })}
         <button class="btn btn-primary btn-block" type="submit">Mark as rented</button>
@@ -1018,11 +1064,11 @@ export async function dealCheckPage(req, res, token, query) {
   const convo = await db.getConversationByFollowupToken(token);
   if (!convo) return notFoundPage(req, res, "This link has expired. Thanks anyway!");
   const answer = query.get("answer");
-  const thanks = (msg) => `<div class="form-card narrow-card" style="text-align:center"><div style="font-size:40px" aria-hidden="true">🙌</div><h1>Thanks for letting us know</h1><p class="muted">${msg}</p><a href="/" class="btn btn-primary">Browse spaces</a></div>`;
+  const thanks = (msg) => `<div class="form-card narrow-card" style="text-align:center"><div style="font-size:40px" aria-hidden="true">🙌</div><h1>Thanks for letting us know</h1><p class="muted">${msg}</p><a href="/" class="btn btn-primary">Browse vehicles</a></div>`;
   let body;
   if (answer === "no") {
     await db.upsertBuyerDeal(convo, { viaFrontage: "no", currency: null });
-    body = thanks("Plenty of new spaces are listed every week — have another look when you're ready.");
+    body = thanks("New vehicles are listed every week — have another look when you're ready.");
   } else if (answer === "yes" || query.get("details") === "1") {
     const listing = await db.getListingById(convo.listingId);
     const currency = (listing && listing.currency) || "AUD";
@@ -1041,7 +1087,7 @@ export async function dealCheckPage(req, res, token, query) {
             </div>
             <div class="hint" style="margin-top:-6px;margin-bottom:14px">Private — never shown on the site.</div>
             <label class="consent-row"><input type="checkbox" name="okToFeature" value="1" />
-              <span>Frontage can feature this as a success story (the space and suburb — <strong>never the price</strong>). We'll check with you before using any photos.</span></label>
+              <span>Frontage can feature this as a success story (the vehicle and suburb — <strong>never the price</strong>). We'll check with you before using any photos.</span></label>
             <button class="btn btn-primary btn-block" type="submit">Save</button>
           </form>
         </div>`;
@@ -1064,6 +1110,8 @@ export async function adminExamplesPage(req, res, query) {
   const byKey = new Map(examples.map((l) => [l.exampleKey, l]));
   const live = examples.filter((l) => l.status === "live").length;
   const missing = EXAMPLE_LISTINGS.length - EXAMPLE_LISTINGS.filter((e) => byKey.has(e.key)).length;
+  const currentKeys = new Set(EXAMPLE_LISTINGS.map((e) => e.key));
+  const stale = examples.filter((l) => !currentKeys.has(l.exampleKey)).length;
   const tiles = EXAMPLE_LISTINGS.map((e) => {
     const l = byKey.get(e.key);
     const photo = l && coverPhoto(l);
@@ -1075,7 +1123,7 @@ export async function adminExamplesPage(req, res, query) {
   }).join("");
   const body = `${adminSubnav(user, "examples")}
     <h1>Example listings</h1>
-    <p class="muted small">${EXAMPLE_LISTINGS.length} labelled examples, 3 per country, to show visitors what a finished listing looks like. Each one is badged "Example", can't be messaged, stays out of Google and sorts after real listings. An example goes live once it has a photo.</p>
+    <p class="muted small">${EXAMPLE_LISTINGS.length} labelled vehicle examples, one per country, to show visitors what a finished listing looks like. Each one is badged "Example", can't be messaged, stays out of Google and sorts after real listings. An example goes live once it has a photo.</p>
     ${query.get("created") ? notice(`Created ${escapeHtml(query.get("created"))} example listings.`) : ""}
     ${query.get("deleted") ? notice(`Deleted ${escapeHtml(query.get("deleted"))} example listings.`) : ""}
     ${notice(query.get("err"), "orange")}
@@ -1084,10 +1132,10 @@ export async function adminExamplesPage(req, res, query) {
       <div class="stat-tile"><div class="stat-num">${live}</div><div class="small muted">Live (have a photo)</div></div>
       <div class="stat-tile"><div class="stat-num">${examples.length - live}</div><div class="small muted">Waiting for a photo</div></div>
     </div>
-    ${missing ? `<form method="POST" action="/api/admin/examples/create" style="margin:16px 0"><button class="btn btn-primary" type="submit">${examples.length ? `Create the ${missing} missing examples` : `Create the ${EXAMPLE_LISTINGS.length} example listings`}</button> <span class="small muted">They stay hidden until each has a photo.</span></form>` : ""}
+    ${missing || stale ? `<form method="POST" action="/api/admin/examples/create" style="margin:16px 0"><button class="btn btn-primary" type="submit">${stale ? `Replace the ${stale} old examples with the ${EXAMPLE_LISTINGS.length} vehicle examples` : examples.length ? `Create the ${missing} missing examples` : `Create the ${EXAMPLE_LISTINGS.length} example listings`}</button> <span class="small muted">They stay hidden until each has a photo.</span></form>` : ""}
     <section class="panel" style="margin:16px 0">
       <h2>Upload photos</h2>
-      <p class="small muted">Name each image after its code, e.g. <span class="mono">EX-AU-1.jpg</span>, then pick them all at once. Each photo replaces that example's photo and puts it live. <a class="link" href="/admin/examples/prompts.txt">Image prompts</a></p>
+      <p class="small muted">Name each image after its code, e.g. <span class="mono">EXV-AU.jpg</span>, then pick them all at once. Each photo replaces that example's photo and puts it live. <a class="link" href="/admin/examples/prompts.txt">Image prompts</a></p>
       <input type="file" id="example-photos" accept="image/*" multiple />
       <button type="button" class="btn btn-accent" id="example-upload-btn" style="margin-top:8px">Upload</button>
       <div id="example-upload-log" class="upload-log" aria-live="polite"></div>
@@ -1261,93 +1309,93 @@ export async function aboutPage(req, res) {
   const user = await currentUser(req);
   const body = contentPage(`
     <h1>About Frontage</h1>
-    <p class="lead">Frontage is a marketplace for advertising space — the walls, fences, windows, screens and vehicles that people walk and drive past every day.</p>
-    <p>Most of that space sits idle, while local businesses find traditional outdoor advertising expensive and hard to buy. Frontage puts the two together: owners list their space for free, and advertisers message them directly.</p>
+    <p class="lead">Frontage is a marketplace for vehicle advertising — the cars, utes, vans, trucks and trailers that people see on the road every day.</p>
+    <p>Vehicle advertising usually goes through agencies that sell big campaigns to big brands and pay drivers a fixed fee. Frontage cuts out the middle: owners list their vehicle for free and set their own price, and businesses of any size book directly.</p>
     <p>Like any classifieds site, Frontage doesn't take part in the deal. You agree the price, the term and the details between yourselves, and payment goes straight to the owner — we don't take a cut.</p>
     <p><a href="/how-it-works" class="link">How it works →</a></p>`);
   send(res, 200, await layout({ title: "About", user, body, canonicalPath: "/about" }));
 }
 
 // ---------------- Search landing pages ----------------
-// Plain, useful pages for the two things people search for: earning from
-// space they own, and finding somewhere local to advertise.
-export async function rentOutYourWallPage(req, res) {
+// Plain, useful pages for the two things people search for: earning from a
+// vehicle they own, and advertising on vehicles.
+export async function earnFromYourVehiclePage(req, res) {
   const user = await currentUser(req);
+  const cta = `<p><a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent">List your vehicle — free</a></p>`;
   const body = contentPage(`
-    <h1>Rent out your wall, fence or window for advertising</h1>
-    <p class="lead">Got a wall, fence, shop window or vehicle that people walk or drive past every day? Local businesses will pay to put their ad on it. List it on Frontage for free and deal directly with advertisers.</p>
-    <p><a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent">List your space — free</a></p>
+    <h1>Earn money from advertising on your car, ute, van or truck</h1>
+    <p class="lead">Your vehicle is already seen by thousands of people a week. Local businesses will pay to put their brand on it. List it free on Frontage, set your own price, and keep everything they pay.</p>
+    ${cta}
 
-    <h2>What kind of space can earn money?</h2>
+    <h2>What can carry an ad?</h2>
     <ul>
-      <li><strong>Side walls</strong> facing a road, a set of traffic lights or a busy corner.</li>
-      <li><strong>Front fences</strong> on busy streets, corner blocks, or near schools and shops.</li>
-      <li><strong>Shop and café windows</strong> on high streets with plenty of foot traffic.</li>
-      <li><strong>Rural fences</strong> beside highways and the roads into town.</li>
-      <li><strong>Screens</strong> in cafés, gyms, waiting rooms and shopfronts.</li>
-      <li><strong>Vehicles</strong> — vans, utes, trucks and food trucks that are out on the road every day.</li>
+      <li><strong>Cars:</strong> door decals, boot decals, magnetic signs or a full wrap. The rear window has to stay see-through.</li>
+      <li><strong>Utes and vans:</strong> tailgates, rear windows, side panels and full wraps — ideal for tradies and delivery drivers.</li>
+      <li><strong>Trucks and semi-trailers:</strong> box sides and curtain sides — the biggest moving billboards on the road.</li>
+      <li><strong>Caravans, campervans and working trailers:</strong> great for holiday routes, markets and events.</li>
     </ul>
 
-    <h2>How much can you charge?</h2>
-    <p>You set the price. What a space is worth comes down to how many people see it, how long they see it for, its size, and where it is. As a rough guide in Australia, a front fence on a quiet suburban street might go for $40–$120 a month, while a large, clear wall on a main road can earn $300–$1,200 a month. These are examples, not promises — see the <a href="/pricing-guide" class="link">pricing guide</a> for more.</p>
+    <h2>How much can you earn?</h2>
+    <p>You set the price. What a vehicle is worth comes down to where and how far you drive, where it's parked, and how much of it carries the ad. As a rough guide in Australia, door decals on a car might earn $50–$150 a month and a full van wrap $300–$600 a month. These are examples, not promises — see the <a href="/pricing-guide" class="link">pricing guide</a>.</p>
 
     <h2>How it works</h2>
     <ol>
-      <li><strong>List your space for free.</strong> Add photos, your price and a short description. People only see the suburb unless you choose to show the exact address.</li>
-      <li><strong>Answer messages from advertisers.</strong> We email you when someone gets in touch.</li>
-      <li><strong>Agree the deal directly.</strong> Use our free agreement template to put the price, dates, inspections and who installs the ad in writing. Payment goes straight to you — Frontage takes no commission.</li>
+      <li><strong>List your vehicle for free.</strong> Photos, where you usually drive, roughly how far, which panels are on offer, and your price. Advertisers only see your suburb.</li>
+      <li><strong>Answer messages.</strong> We email you when a business gets in touch.</li>
+      <li><strong>Agree the deal directly.</strong> Use our free agreement template for the price, dates, who prints and fits the ad, and how it comes off. Payment goes straight to you.</li>
     </ol>
 
     <h2>Before you list</h2>
     <ul>
-      <li>Check whether your council, landlord or strata scheme has rules about signage.</li>
-      <li>You decide who you deal with and which ads you're happy to show.</li>
-      <li>Read our <a href="/safety" class="link">safety tips</a> — never accept payment by gift card or crypto.</li>
+      <li>Rideshare cars can't take part — Uber and others don't allow advertising on cars that drive for them.</li>
+      <li>Tell your insurer, and if the vehicle is financed or leased, get the lender's OK.</li>
+      <li>Keep windscreens, front side windows, number plates, lights and truck warning plates clear.</li>
+      <li>Check any freight, franchise or employer contract doesn't control what your vehicle displays.</li>
     </ul>
-    <p><a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent">List your space — free</a></p>`);
+    ${cta}`);
   send(res, 200, await layout({
-    title: "Rent out your wall, fence or window for advertising",
-    description: "Earn money from a wall, fence, shop window or vehicle people pass every day. List it free on Frontage, set your own price and deal directly with local advertisers.",
-    user, body, canonicalPath: "/rent-out-your-wall",
+    title: "Earn money from advertising on your vehicle",
+    description: "Get paid to carry ads on your car, ute, van, truck or trailer. List it free on Frontage, set your own price and deal directly with businesses — keep 100% of what they pay.",
+    user, body, canonicalPath: "/earn-from-your-vehicle",
   }));
 }
 
-export async function findAdvertisingSpacePage(req, res) {
+export async function advertiseOnVehiclesPage(req, res) {
   const user = await currentUser(req);
   const body = contentPage(`
-    <h1>Find local advertising space for your business</h1>
-    <p class="lead">Put your business on the walls, fences and windows your customers pass every day — and deal directly with the owner, with no agency and no minimum spend.</p>
-    <p><a href="/?country=all" class="btn btn-accent">Browse advertising space</a></p>
+    <h1>Advertise on cars, vans and trucks — book direct from the owner</h1>
+    <p class="lead">Put your brand on vehicles that drive past your customers every day. Choose the vehicles, the areas and the price — and deal directly with the owner, with no agency and no minimum fleet size.</p>
+    <p><a href="/?country=all" class="btn btn-accent">Browse vehicles</a></p>
 
-    <h2>Why advertise on local space?</h2>
+    <h2>Why vehicle advertising?</h2>
     <ul>
-      <li><strong>Seen by people near you.</strong> Pick the exact street, corner or suburb your customers live and work in.</li>
-      <li><strong>Seen every day.</strong> Unlike a post that scrolls away, a sign on someone's daily route keeps working.</li>
-      <li><strong>Affordable.</strong> Many spaces cost far less than a traditional billboard, and you agree the price with the owner.</li>
+      <li><strong>It goes where your customers are.</strong> Pick vehicles that drive your suburbs, your routes or your city.</li>
+      <li><strong>It's seen all day.</strong> On the road, in traffic and parked on busy streets — not scrolled past.</li>
+      <li><strong>Start small.</strong> One ute or fifty vans; agree the price with each owner.</li>
     </ul>
 
-    <h2>Types of space</h2>
-    <p>Walls, fences, shop and café windows, billboards, digital screens, indoor spaces like gyms and cafés, and vehicles such as vans and food trucks. Browse by type, by suburb or on the map, in 30 countries.</p>
+    <h2>Types of vehicle</h2>
+    <p>Cars, utes and pickups, vans, trucks, semi-trailers, caravans and campervans, and working trailers like food trucks. Browse by type, by area or on the map, in 30 countries.</p>
 
-    <h2>How to pick a good spot</h2>
+    <h2>How to choose</h2>
     <ul>
-      <li><strong>Sightlines:</strong> can people actually see it, and from how far away?</li>
-      <li><strong>Dwell time:</strong> traffic lights, bus stops and queues give people time to read.</li>
-      <li><strong>Traffic:</strong> how many people pass by car or on foot, and when.</li>
-      <li><strong>Fit:</strong> is it close to where your customers are and to where they can buy?</li>
+      <li><strong>Routes:</strong> where does the owner usually drive, and how far each week?</li>
+      <li><strong>Parking:</strong> is it parked on busy streets, at a depot, or at home?</li>
+      <li><strong>Canvas:</strong> door decals, a full wrap, or truck curtain sides?</li>
+      <li><strong>Proof:</strong> agree that the owner sends regular dated photos of the ad on the vehicle.</li>
     </ul>
 
     <h2>How it works</h2>
     <ol>
-      <li><strong>Browse spaces</strong> and shortlist the ones that suit you.</li>
-      <li><strong>Message the owner</strong> to ask about availability, size, visibility and permits.</li>
-      <li><strong>Agree the details directly.</strong> See the space first, check any council or landlord rules, and put the deal in writing — owners can share our agreement template with you. Frontage never handles payments.</li>
+      <li><strong>Browse vehicles</strong> and shortlist the ones that suit you.</li>
+      <li><strong>Message the owner</strong> about routes, panels, timing and printing.</li>
+      <li><strong>Agree the details directly.</strong> Owners can share our free agreement template. You arrange printing and fitting with a local wrap shop. Frontage never handles payments.</li>
     </ol>
-    <p><a href="/?country=all" class="btn btn-accent">Browse advertising space</a> <a href="/how-it-works" class="btn btn-outline">How it works</a></p>`);
+    <p><a href="/?country=all" class="btn btn-accent">Browse vehicles</a> <a href="/how-it-works" class="btn btn-outline">How it works</a></p>`);
   send(res, 200, await layout({
-    title: "Find local advertising space for your business",
-    description: "Find walls, fences, shop windows, screens and vehicles to advertise on near your customers. Message the owner and deal directly — no agency, no minimum spend.",
-    user, body, canonicalPath: "/find-advertising-space",
+    title: "Advertise on cars, vans and trucks — book direct",
+    description: "Book advertising on cars, utes, vans, trucks and trailers that drive past your customers. Message the owner and deal directly — no agency, no minimum fleet.",
+    user, body, canonicalPath: "/advertise-on-vehicles",
   }));
 }
 
@@ -1355,17 +1403,17 @@ export async function howItWorksPage(req, res) {
   const user = await currentUser(req);
   const body = contentPage(`
     <h1>How it works</h1>
-    <h2>If you have space</h2>
+    <h2>If you own a vehicle</h2>
     <ol>
-      <li><strong>List it free.</strong> Add photos, a price and a description. Buyers see only the suburb unless you choose to show the exact address.</li>
-      <li><strong>Answer messages.</strong> Advertisers message you on Frontage, and we email you when they do.</li>
-      <li><strong>Deal directly.</strong> Agree the price, dates, and who prints and installs the ad. Payment goes straight to you.</li>
+      <li><strong>List it free.</strong> Add photos, the panels on offer, where you usually drive and your price. Advertisers only see your suburb, never your address.</li>
+      <li><strong>Answer messages.</strong> Businesses message you on Frontage, and we email you when they do.</li>
+      <li><strong>Deal directly.</strong> Agree the price, dates, and who prints, fits and removes the ad. Send regular photos of the ad on your vehicle. Payment goes straight to you.</li>
     </ol>
     <h2>If you want to advertise</h2>
     <ol>
-      <li><strong>Browse spaces</strong> by type, suburb or on the map.</li>
-      <li><strong>Message the owner</strong> with your questions — availability, visibility, size, permits.</li>
-      <li><strong>Agree the details</strong> with the owner. We recommend seeing the space first and putting the deal in writing.</li>
+      <li><strong>Browse vehicles</strong> by type, area or on the map.</li>
+      <li><strong>Message the owner</strong> about routes, panels, timing and printing.</li>
+      <li><strong>Agree the details</strong> with the owner and put the deal in writing — our agreement template helps.</li>
     </ol>
     <div class="panel-tint"><strong>Frontage never handles payments.</strong> If anyone asks you to pay “through Frontage”, it's a scam — please <a href="/contact" class="link">tell us</a>. Read our <a href="/safety" class="link">safety tips</a>.</div>`);
   send(res, 200, await layout({ title: "How it works", user, body, canonicalPath: "/how-it-works" }));
@@ -1376,8 +1424,8 @@ export async function pricingGuidePage(req, res) {
   const body = contentPage(`
     <h1>Pricing guide</h1>
     <p class="lead">You can set any price you like. Here's how to work out a fair one.</p>
-    <p>Look at similar spaces near you on Frontage, then use the examples below as a rough starting point. Enter <strong>0</strong> if you'd rather say “price on request” and negotiate each enquiry. Use the <em>price details</em> field to say what the price covers — e.g. “per month, min 3 months” or “includes install”.</p>
-    <p class="small muted">These ranges are illustrative, in Australian dollars for spaces in Australia — rates elsewhere vary with the local market, to help you gauge a price — they aren't a valuation or a guarantee of what a space will earn.</p>
+    <p>Look at similar vehicles near you on Frontage, then use the examples below as a rough starting point. Enter <strong>0</strong> if you'd rather say “price on request” and negotiate each enquiry. Use the <em>price details</em> field to say what the price covers — e.g. “per month, min 3 months” or “advertiser pays printing and fitting”.</p>
+    <p class="small muted">These ranges are illustrative, in Australian dollars for vehicles in Australia — rates elsewhere vary with the local market. They help you gauge a price; they aren't a valuation or a guarantee of what a vehicle will earn.</p>
     <h2>Example situations</h2>
     <div class="scenario-grid">
       ${PRICING_SCENARIOS.map(
@@ -1397,11 +1445,11 @@ export async function pricingGuidePage(req, res) {
     <h2>Tips</h2>
     <ul>
       <li>Start in the middle of the range, and adjust if you get lots of enquiries (too cheap) or none (too dear).</li>
-      <li>Photos taken from where people actually see the space make a bigger difference than size.</li>
-      <li>If you know traffic or visitor numbers, put them in the description.</li>
+      <li>Clear photos of each panel you're offering make a bigger difference than anything else.</li>
+      <li>Be specific about your routes and where the vehicle is parked during the day.</li>
     </ul>
-    <p><a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent">List your space</a></p>`);
-  send(res, 200, await layout({ title: "Pricing guide for advertising space", user, body, canonicalPath: "/pricing-guide", description: "How to price a wall, fence, window, billboard or screen for advertising — example situations, typical ranges and what moves the price." }));
+    <p><a href="${user ? "/sell/new" : "/sell/welcome"}" class="btn btn-accent">List your vehicle</a></p>`);
+  send(res, 200, await layout({ title: "Pricing guide for vehicle advertising", user, body, canonicalPath: "/pricing-guide", description: "How to price advertising on a car, ute, van, truck, semi-trailer or caravan — example situations, typical ranges and what moves the price." }));
 }
 
 export async function safetyPage(req, res) {

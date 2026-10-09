@@ -1,5 +1,5 @@
 // /admin/examples: bulk-upload example listing photos. Each file is matched
-// to its example by name (EX-AU-1.jpg), shrunk in the browser, then
+// to its example by name (EXV-AU.jpg), shrunk in the browser, then
 // uploaded on its own so a big batch never hits the request size limit.
 (function () {
   var input = document.getElementById("example-photos");
@@ -18,8 +18,8 @@
   }
 
   function keyFor(name) {
-    var m = /EX-([A-Za-z]{2})-(\d{1,2})/i.exec(name);
-    return m ? "EX-" + m[1].toUpperCase() + "-" + Number(m[2]) : null;
+    var m = /EXV-([A-Za-z]{2})/i.exec(name);
+    return m ? "EXV-" + m[1].toUpperCase() : null;
   }
 
   // Resize to at most MAX_SIDE px as JPEG; fall back to the original file.
@@ -50,7 +50,7 @@
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
       var key = keyFor(f.name);
-      if (!key) { line(f.name + ": skipped — the name needs a code like EX-AU-1", true); continue; }
+      if (!key) { line(f.name + ": skipped — the name needs a code like EXV-AU", true); continue; }
       line(key + ": uploading…");
       try {
         var blob = await shrink(f);

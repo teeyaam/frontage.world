@@ -197,7 +197,7 @@ async function saveListing(req, res, { user, existing }) {
 
   const { values, fieldErrors } = await parseListingInput(req.body, { existing, defaultCountry: marketOrDefault(user.country) });
   const photos = assemblePhotos(existing ? existing.photos || [] : [], req.files, (req.body || {}).photoOrder);
-  if (photos.length < LISTING_MIN_PHOTOS) fieldErrors.photos = "Add at least one photo of the space.";
+  if (photos.length < LISTING_MIN_PHOTOS) fieldErrors.photos = "Add at least one photo of the vehicle.";
   if (photos.length > LISTING_MAX_PHOTOS) fieldErrors.photos = `You can add up to ${LISTING_MAX_PHOTOS} photos.`;
   if (Object.keys(fieldErrors).length) return fail(422, "Please fix the highlighted fields.", fieldErrors);
 
@@ -512,12 +512,14 @@ export async function unsuspendUserHandler(req, res, id) {
 }
 
 // ---------- Example listings (super-admin) ----------
-// Creates any of lib/exampleListings.js not already in the database, as
-// drafts (hidden until they get a photo). Safe to run more than once.
+// Removes examples no longer in lib/exampleListings.js (e.g. the old
+// wall-and-window set), then creates any that aren't in the database yet,
+// as drafts (hidden until they get a photo). Safe to run more than once.
 export async function createExamplesHandler(req, res) {
   const admin = await requireSuperAdmin(req, res);
   if (!admin) return;
   const owner = await db.ensureExamplesOwner();
+  await db.deleteExampleListingsExcept(EXAMPLE_LISTINGS.map((e) => e.key));
   const existing = new Set((await db.getExampleListings()).map((l) => l.exampleKey));
   let created = 0;
   for (const e of EXAMPLE_LISTINGS) {
@@ -528,6 +530,7 @@ export async function createExamplesHandler(req, res) {
       price: e.price, priceNote: e.note, photos: [],
       address: `${e.district}, ${e.city}, ${country}`, suburb: e.district, state: e.city, country, countryCode: e.cc, currency: currencyFor(e.cc),
       lat: e.lat, lng: e.lng, showExactLocation: false, widthM: e.w, heightM: e.h,
+      vehiclePanels: e.panels, vehicleArea: e.area, vehicleKmWeek: e.km, vehicleConfirmedAt: new Date().toISOString(),
     });
     created++;
   }
@@ -540,7 +543,7 @@ export async function exampleListingPhotoHandler(req, res, key) {
   const admin = await requireSuperAdmin(req, res);
   if (!admin) return;
   const json = (status, obj) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
-  const listing = /^EX-[A-Z]{2}-\d{1,2}$/.test(key) ? await db.getExampleListingByKey(key) : null;
+  const listing = /^EXV?-[A-Z]{2}(-\d{1,2})?$/.test(key) ? await db.getExampleListingByKey(key) : null;
   if (!listing) return json(404, { ok: false, error: `No example listing ${key} — create the examples first.` });
   const uploadError = await runUpload(req, res, uploadListingPhotos);
   if (uploadError) return json(400, { ok: false, error: uploadError });
